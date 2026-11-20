@@ -1,0 +1,454 @@
+id: dl-advanced-training-transfer
+track: deep-learning
+module: dl-architectures
+title: "Advanced PyTorch — Transfer Learning, LR Warmup, Gradient Clipping və Sabit Training"
+summary: "Müasir dərin neyron şəbəkələri və Transformer-ləri real GPU məhdudiyyətləri altında necə öyrətməyi mənimsəyəcəksən: Transfer Learning və backbone dondurma, Linear Warmup + Cosine Annealing, Gradient Norm Clipping, Gradient Accumulation, Mixed Precision (AMP) və Early Stopping + Checkpointing."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [dl-attention-transformers]
+next: null
+skills: [dl-training-loop, dl-architectures, dl-backprop]
+objectives:
+  - "Pretrained modeli yeni tapşırığa uyğunlaşdırarkən backbone-u dondurmaq (`requires_grad = False`), yeni head öyrətmək və kiçik learning rate ilə fine-tuning aparmaq"
+  - "Gradient Norm Clipping düsturunu ($\\mathbf{g} \\leftarrow \\mathbf{g} \\cdot \\frac{c}{\\max(c, \\|\\mathbf{g}\\|_2)}$) həm əllə, həm də kodda tətbiq etmək"
+  - "Linear Warmup + Cosine Annealing cədvəlini, Gradient Accumulation ilə effektiv batch ölçüsünü ($B_{\\text{eff}} = B_{\\text{micro}} \\times K$) və Mixed Precision (`torch.amp.autocast`) mexanizmini qurmaq"
+  - "Validation loss üzərində Early Stopping və yalnız ən yaxşı modeli (`best_val_loss`) saxlayan Checkpointing məntiqini yazmaq"
+why_it_matters: |
+  Real mühəndislikdə heç kim milyonlarla parametrli görmə və ya dil modelini kiçik şirkət datası üzərində sıfırdan (təsadüfi çəkilərlə) öyrətmir — bu həm minlərlə dollar GPU xərci tələb edər, həm də bir neçə min nümunədə dərhal overfit olar. Bunun əvəzinə **Transfer Learning (Fine-Tuning)** tətbiq edilir.
+
+  Bundan əlavə, böyük modelləri öyrədərkən üç klassik maneə çıxır:
+  1. İlk addımlarda qradiyentlər partlayır və loss `NaN` olur (**Warmup** və **Gradient Clipping** lazımdır).
+  2. Böyük batch ölçüsü tək GPU-nun VRAM yaddaşına yerləşmir (**Gradient Accumulation** və **Mixed Precision / BF16** lazımdır).
+  3. Model gecə boyu öyrənərkən 8-ci epoxada ən yaxşı nəticəni verib 20-ci epoxada pozulur (**Best Checkpointing** və **Early Stopping** lazımdır).
+terms:
+  - term: Transfer Learning & Fine-Tuning
+    definition: "Böyük ümumi datada əvvəlcədən öyrədilmiş (pretrained) modelin gövdəsini (backbone) götürüb, yalnız sonuncu təsnifat/reqressiya başlığını (head) yeni hədəf tapşırığa uyğunlaşdırmaq."
+  - term: Backbone Freezing
+    definition: "Pretrained qatların parametrlərində `param.requires_grad = False` təyin edərək həmin çəkilərin qradiyent hesabını və yenilənməsini dayandırmaq."
+  - term: Gradient Norm Clipping
+    definition: "Qradiyent vektorunun $L_2$ norması verilmiş $c$ (`max_norm`) həddini aşdıqda, vektorun istiqamətini saxlayıb uzunluğunu $c$-yə qədər kiçiltmək: $\\mathbf{g} \\leftarrow \\mathbf{g} \\cdot \\frac{c}{\\max(c, \\|\\mathbf{g}\\|_2)}$."
+  - term: Learning Rate Warmup
+    definition: "Training-in ilk $N_{\\text{warmup}}$ addımında learning rate-i $0$-dan hədəf $\\eta_{\\max}$ dəyərinə qədər xətti artırmaq; Adam/Transformer-in ilk addımlarda dağılmasının qarşısını alır."
+  - term: Gradient Accumulation
+    definition: "`optimizer.step()` və `zero_grad()` çağırmazdan əvvəl $K$ ardıcıl micro-batch üzrə `loss.backward()` çağıraraq qradiyentləri toplamaq; VRAM artırmadan böyük batch-i simulyasiya edir."
+  - term: Mixed Precision (AMP — Automatic Mixed Precision)
+    definition: "Matris vurmalarını sürətli və az yaddaş tutan 16-bit (`float16` / `bfloat16`) formatında, həssas cəmləmə və çəki yeniləmələrini isə 32-bit (`float32`) formatında aparmaq."
+  - term: Early Stopping & Best Checkpointing
+    definition: "Hər epoxada validation loss-u izləyərək yalnız yeni minimum tapıldıqda model çəkilərini diskə yazmaq və $p$ (`patience`) epoxa ərzində yaxşılaşma olmadıqda training-i dayandırmaq."
+sections:
+  - id: transfer-clipping-and-amp
+    kind: explanation
+    title: "Transfer Learning, Warmup, Gradient Clipping və VRAM optimallaşdırması"
+    body: |
+      ### 1. Transfer Learning və 2 Mərhələli Fine-Tuning Strategiyası
+
+      Təsəvvür et ki, əlində yalnız $1\,500$ tibbi rentgen şəkli və ya $2\,000$ Azərbaycan dilində müştəri rəyi var. Sıfırdan 100 milyon parametrli model öyrətsən, model 2 epoxaya bütün datanı əzbərləyəcək.
+
+      **Düzgün Transfer Learning ardıcıllığı:**
+      1. **Pretrained modeli yüklə** (məsələn, ImageNet-də öyrədilmiş `ResNet` / `ViT` və ya böyük mətndə öyrədilmiş `RoBERTa`).
+      2. **Backbone-u dondur (`requires_grad = False`):** Gövdə artıq kənarları, formaları və ya dil sintaksisini bilir.
+      3. **Sonuncu qatı (Task Head) dəyiş və öyrət:** Köhnə 1000-sinifli çıxış qatını öz tapşırığının sinif sayına uyğun yeni təsadüfi `nn.Linear(d_model, num_classes)` ilə əvəz et. Yalnız bu yeni başlığı orta learning rate ($\eta \approx 10^{-3}$) ilə bir neçə epoxa öyrət.
+      4. **(İxtiyari) Unfreeze & Fine-Tune:** Başlıq sabitləşdikdən sonra gövdənin son bloklarını aç (`requires_grad = True`) və **çox kiçik learning rate** ($\eta \approx 10^{-5}$) ilə bütün modeli incə tənzimlə.
+
+      > **Niyə əvvəlcə dondururuq?** Yeni başlığın çəkiləri başlanğıcda tam təsadüfidir və böyük xəta qradiyentləri yaradır. Gövdəni dondurmasan, bu təsadüfi qradiyentlər ilk addımlardaca gövdədəki qiymətli pretrained bilikləri dağıdar (**catastrophic forgetting**).
+
+      ---
+
+      ### 2. Learning Rate Schedules: Linear Warmup + Cosine Annealing
+
+      Transformer-ləri `AdamW` optimizatoru ilə öyrədərkən ilk addımlarda birbaşa yüksək learning rate vermək təhlükəlidir: training-in 1-ci addımında `AdamW`-nin ikinci moment təxmini ($v_t$ — qradiyentlərin kvadratlarının hərəkətli ortası) hələ formalaşmayıb və LayerNorm statistikaları qeyri-sabitdir.
+
+      Buna görə iki mərhələli cədvəl istifadə olunur:
+      - **Linear Warmup ($t \le T_{\text{warmup}}$):** Learning rate sıfırdan $\eta_{\max}$-a qədər xətti qalxır:
+        $$\eta_t = \eta_{\max} \cdot \frac{t}{T_{\text{warmup}}}$$
+      - **Cosine Annealing ($t > T_{\text{warmup}}$):** $\eta_t$ kosinus əyrisi ilə hamar şəkildə $\eta_{\min}$-ə enir.
+
+      ---
+
+      ### 3. Gradient Norm Clipping: Partlayan qradiyentlərin cilovlanması
+
+      Bəzi çətin batch-lərdə loss kəskin sıçrayır və qradiyent vektoru $\mathbf{g}$ həddindən artıq böyüyür (**exploding gradients**). Tək bir belə addım modelin həftələrlə öyrəndiyi çəkiləri poza bilər.
+
+      **Gradient Norm Clipping** (`torch.nn.utils.clip_grad_norm_`) bütün parametrlərin qradiyentlərini vahid $\mathbf{g}$ vektoru kimi götürür, onun $L_2$ normasını ($\|\mathbf{g}\|_2 = \sqrt{\sum_i g_i^2}$) hesablayır və norma $c$ (`max_norm`, adətən `1.0`) həddini aşdıqda vektoru kiçildir:
+
+      $$\mathbf{g}_{\text{clipped}} = \mathbf{g} \cdot \frac{c}{\max(c, \|\mathbf{g}\|_2)}$$
+
+      Simvollar:
+      - $\mathbf{g}$ — orijinal qradiyent vektoru
+      - $\|\mathbf{g}\|_2 = \sqrt{\sum_i g_i^2}$ — qradiyentin Evklid ($L_2$) uzunluğu
+      - $c > 0$ — icazə verilən maksimum norma həddi (`max_norm`)
+      - Diqqət et: Əgər $\|\mathbf{g}\|_2 \le c$ olarsa, kəsr $\frac{c}{c} = 1$ olur və qradiyent **dəyişmir**. Əgər $\|\mathbf{g}\|_2 > c$ olarsa, qradiyentin **istiqaməti qorunur**, uzunluğu isə tam $c$-yə bərabərləşir!
+
+      ---
+
+      ### 4. Gradient Accumulation, Mixed Precision (AMP) və Early Stopping
+
+      - **Gradient Accumulation:** Tutaq ki, sabit öyrənmə üçün $B_{\text{eff}} = 64$ batch ölçüsü lazımdır, amma GPU yaddaşına (VRAM) yalnız $B_{\text{micro}} = 16$ yerləşir. PyTorch-da `loss.backward()` qradiyentləri `.grad` sahəsinə **toplayır (+=)**. Ona görə hər micro-batch-də loss-u $K = 4$-ə bölüb `backward()` çağırırıq, `optimizer.step()` və `optimizer.zero_grad()` əməliyyatlarını isə yalnız **hər 4 addımdan bir** icra edirik!
+      - **Mixed Precision (`torch.amp.autocast`):** Matris vurmalarını `bfloat16` / `float16` ilə icra edərək aktivasiya yaddaşını $\sim 2\times$ azaldır və Tensor Core GPU-larda sürəti $2\text{--}3\times$ artırır.
+      - **Checkpointing & Early Stopping:** Sonuncu epoxanın modeli həmişə ən yaxşı model deyil. Yalnız `val_loss < best_val_loss` olduqda `torch.save(model.state_dict(), "best.pt")` çağırırıq; ardıcıl `patience` epoxa ərzində yeni rekord qırılmazsa, dövrü dayandırırıq.
+  - id: surgery-and-speed-limit-analogy
+    kind: analogy
+    title: "Mental model: Təcrübəli cərrahın komandası və dağ yolunda sürət həddi"
+    body: |
+      - **Transfer Learning (Backbone Freezing):**
+        Xəstəxanaya 20 illik təcrübəsi olan baş həkim (**pretrained backbone**) və yeni məzun olmuş stajor (**təsadüfi task head**) gəlir. İlk həftə baş həkimin biliklərini dəyişməyə çalışmırsan (**freeze**) — yalnız stajora baş həkimin hesabatlarını oxuyub düzgün yekun qərar çıxarmağı öyrədirsən. Stajor işi öyrənəndən sonra hər ikisi birlikdə incə uyğunlaşma (**low-LR fine-tuning**) keçir.
+
+      - **Gradient Norm Clipping:**
+        Sükanın istiqaməti (**qradiyentin yönü**) avtomobilin hara dönəcəyini, qaz pedalının sıxılması (**qradiyentin norması $\|\mathbf{g}\|_2$**) isə nə qədər irəli atılacağını göstərir. Dağ döngəsində birdən ayağın qaza ilişsə ($\|\mathbf{g}\|_2 = 50$), avtomobil uçuruma düşər. **Gradient Clipping** sükanın bucağına toxunmur, sadəcə sürəti maksimum təhlükəsiz həddə ($c = 1.0$) endirir.
+  - id: advanced-training-loop-diagram
+    kind: diagram
+    title: "Production-səviyyəli PyTorch Training və Checkpointing Axını"
+    body: |
+      ```mermaid
+      flowchart TD
+        START["Pretrained Model: Backbone Freeze, Head Trainable"] --> FWD["Autocast (BF16/FP16): loss = criterion(model(x), y) / accum_steps"]
+        FWD --> BWD["loss.backward() (qradiyentlər toplanır)"]
+        BWD --> ACC{"step % accum_steps == 0?"}
+        ACC -- "Xeyr" --> FWD
+        ACC -- "Bəli" --> CLIP["clip_grad_norm_(model.parameters(), max_norm=1.0)"]
+        CLIP --> OPT["optimizer.step() -> scheduler.step() -> optimizer.zero_grad()"]
+        OPT --> VAL["Epoch sonu: Validation Loss hesabla"]
+        VAL --> BEST{"val_loss < best_loss?"}
+        BEST -- "Bəli" --> SAVE["best_loss = val_loss; bad_epochs = 0; torch.save(best.pt)"]
+        BEST -- "Xeyr" --> INC["bad_epochs += 1"]
+        INC --> STOP{"bad_epochs >= patience?"}
+        STOP -- "Bəli" --> END["Early Stop! best.pt çəkilərini geri yüklə"]
+        STOP -- "Xeyr" --> FWD
+        SAVE --> FWD
+      ```
+
+      Bu sxem müasir LLM və CV fine-tuning skriptlərinin (Hugging Face `Trainer`, PyTorch Lightning) daxildə icra etdiyi standart skeletdir.
+  - id: worked-clipping-and-early-stop
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: Gradient Norm Clipping və Early Stopping"
+    body: |
+      ### Hissə A: Gradient Norm Clipping hesabı
+
+      Tutaq ki, modelin iki parametrinin qradiyent vektoru $\mathbf{g} = [3.0, -4.0]$ alınıb və icazə verilən maksimum norma həddi $c = 2.5$-dir.
+
+      1. **Orijinal $L_2$ normanı hesablayırıq:**
+         $$\|\mathbf{g}\|_2 = \sqrt{3.0^2 + (-4.0)^2} = \sqrt{9 + 16} = \sqrt{25} = 5.0$$
+      2. **Həddi yoxlayırıq:** $\|\mathbf{g}\|_2 = 5.0 > c = 2.5$ olduğu üçün kiçiltmə əmsalı (scale factor) tapılır:
+         $$\text{scale} = \frac{c}{\|\mathbf{g}\|_2} = \frac{2.5}{5.0} = 0.5$$
+      3. **Kəsilmiş (clipped) qradiyent vektoru:**
+         $$\mathbf{g}_{\text{clipped}} = 0.5 \cdot [3.0, -4.0] = [1.5, -2.0]$$
+      4. **Yoxlama:** Yeni vektorun norması $\sqrt{1.5^2 + (-2.0)^2} = \sqrt{2.25 + 4.0} = \sqrt{6.25} = 2.5 = c$, istiqaməti isə orijinal vektorla eynidir!
+
+      *(Əgər $c = 10.0$ olsaydı, $\|\mathbf{g}\|_2 = 5.0 \le 10.0$ olduğu üçün $\mathbf{g}_{\text{clipped}} = [3.0, -4.0]$ olduğu kimi qalacaqdı.)*
+
+      ---
+
+      ### Hissə B: Early Stopping və Patience izlənməsi
+
+      Tutaq ki, `patience = 3` seçmişik və 6 epoxa üzrə validation loss tarixçəsi belədir:
+      `val_losses = [0.90, 0.75, 0.60, 0.62, 0.61, 0.65]`
+
+      | Epoxa | `val_loss` | Cari ən yaxşı (`best_loss`) | Yaxşılaşma oldu? | `bad_epochs` sayğacı | Qərar |
+      |---|---|---|---|---|---|
+      | 1 | `0.90` | `0.90` | Bəli (ilk) | `0` | `best.pt` saxla |
+      | 2 | `0.75` | `0.75` | Bəli (`0.75 < 0.90`) | `0` | `best.pt` yenilə |
+      | 3 | `0.60` | `0.60` | Bəli (`0.60 < 0.75`) | `0` | `best.pt` yenilə |
+      | 4 | `0.62` | `0.60` | Xeyr (`0.62 >= 0.60`) | `1` | Davam et |
+      | 5 | `0.61` | `0.60` | Xeyr (`0.61 >= 0.60`) | `2` | Davam et |
+      | 6 | `0.65` | `0.60` | Xeyr (`0.65 >= 0.60`) | `3` (`== patience`) | **EARLY STOP!** (Epoxa 3-dəki `best.pt` götürülür) |
+
+      Diqqət et: 5-ci epoxada loss `0.62`-dən `0.61`-ə düşsə də, **rekord olan `0.60`-dan yaxşı olmadığı üçün** `bad_epochs` sıfırlanmır, `2` olur!
+  - id: advanced-pytorch-code
+    kind: code
+    title: "Kod: Saf Python-da Clipping & Early Stopping və PyTorch Fine-Tuning Şablonu"
+    body: |
+      Əvvəlcə qradiyent normasının kəsilməsi və early stopping qərarını saf Python-da yazaq:
+
+      ```python
+      import math
+
+
+      def clip_grad_norm(grads: list[float], max_norm: float) -> tuple[list[float], float]:
+          """Clip gradient vector by L2 norm without mutating input."""
+          if max_norm <= 0:
+              raise ValueError("max_norm must be positive")
+          l2_norm = math.sqrt(sum(g * g for g in grads))
+          if l2_norm > max_norm and l2_norm > 0.0:
+              scale = max_norm / l2_norm
+              return [g * scale for g in grads], l2_norm
+          return list(grads), l2_norm
+
+
+      def should_early_stop(val_losses: list[float], patience: int) -> bool:
+          """Return True if no improvement over running minimum for `patience` epochs."""
+          if not val_losses:
+              return False
+          best = val_losses[0]
+          bad_epochs = 0
+          for loss in val_losses[1:]:
+              if loss < best:
+                  best = loss
+                  bad_epochs = 0
+              else:
+                  bad_epochs += 1
+                  if bad_epochs >= patience:
+                      return True
+          return False
+      ```
+
+      **PyTorch-da Transfer Learning + AMP + Gradient Accumulation + Clipping Şablonu:**
+
+      ```python
+      import torch
+      import torch.nn as nn
+
+      # 1. Backbone-u dondur, yalnız yeni head-i aktiv saxla
+      for param in model.backbone.parameters():
+          param.requires_grad = False
+      model.head = nn.Linear(in_features=768, out_features=2)
+
+      # Yalnız requires_grad=True olan parametrləri optimizatora ötür
+      trainable_params = [p for p in model.parameters() if p.requires_grad]
+      optimizer = torch.optim.AdamW(trainable_params, lr=3e-4, weight_decay=0.01)
+
+      accum_steps = 4
+      max_norm = 1.0
+      optimizer.zero_grad()
+
+      for step, (inputs, targets) in enumerate(train_loader, start=1):
+          # 2. Mixed Precision forward pass
+          with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+              logits = model(inputs)
+              # Qradiyentlər toplanacağı üçün loss-u accum_steps-ə bölürük
+              loss = criterion(logits, targets) / accum_steps
+
+          loss.backward()
+
+          # 3. Hər accum_steps addımdan bir qradiyenti kəs və çəkiləri yenilə
+          if step % accum_steps == 0:
+              torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=max_norm)
+              optimizer.step()
+              scheduler.step()
+              optimizer.zero_grad()
+      ```
+  - id: advanced-training-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər və gizli bug-lar"
+    body: |
+      **1. Gradient Accumulation zamanı loss-u `accum_steps`-ə bölməyi unutmaq**
+      `loss.backward()` qradiyentləri topladığı üçün 4 micro-batch üzrə bölmədən toplasan, effektiv qradiyent $4\times$ böyüyür — bu isə gizlicə learning rate-i $4\times$ artırmaq deməkdir! **Düzəliş:** `loss = raw_loss / accum_steps` yaz.
+
+      **2. `clip_grad_norm_`-u `optimizer.step()`-dən SONRA çağırmaq**
+      `optimizer.step()` artıq çəkiləri partlamış qradiyentlərlə yenilədikdən sonra qradiyenti kəsməyin heç bir mənası yoxdur! **Düzəliş:** Sıra həmişə belə olmalıdır: `loss.backward()` $\to$ `clip_grad_norm_()` $\to$ `optimizer.step()` $\to$ `optimizer.zero_grad()`.
+
+      **3. Early Stopping-də əvvəlki epoxaya nisbətən kiçik azalmanı "rekord" saymaq**
+      Əgər loss tarixçəsi `0.50 -> 0.80 -> 0.79 -> 0.78 -> 0.77` olarsa, loss hər addımda əvvəlki epoxadan azalsa da, **heç biri `0.50` rekordunu yeniləmir**. `bad_epochs` həmişə bütün tarixçədəki **qlobal minimum (`best_loss`)** ilə müqayisə edilməlidir.
+
+      **4. Early Stopping dayandıqda sonuncu (overfit olmuş) epoxanın çəkilərini saxlamaq**
+      `patience=5` bitəndə model artıq 5 epoxadır ki, pisləşir. Dayananda cari yaddaşdakı modeli yox, diskə yazılmış `best_model.pt` çəkilərini geri yükləməlisən (`model.load_state_dict(torch.load("best.pt"))`).
+  - id: training-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndis seçimləri: Full Fine-Tuning vs Freeze vs LoRA (PEFT)"
+    body: |
+      | Yanaşma | Öyrədilən parametr payı | VRAM tələbi | Overfitting riski | Nə vaxt seçməli? |
+      |---|---|---|---|---|
+      | **Linear Probing (Backbone Frozen)** | $< 1\%$ (yalnız son qat) | Çox aşağı | Çox aşağı | Çox kiçik dataset ($< 2\,000$ nümunə), sürətli baseline |
+      | **Full Fine-Tuning** | $100\%$ (bütün model) | Çox yüksək (bütün model üçün optimizer state) | Yüksək (kiçik datada) | Kifayət qədər böyük domain datası və güclü GPU olduqda |
+      | **PEFT / LoRA (Low-Rank Adaptation)** | $0.1\% \text{--} 2\%$ (kiçik ranklı $A \cdot B$ adapterləri) | Aşağı | Aşağı | Milyardlarla parametrli LLM-ləri tək GPU-da öyrədəndə |
+
+      **Praktik qayda:** Həmişə əvvəlcə dondurulmuş backbone üzərində yalnız yeni başlığı (Linear Probing) öyrədib sürətli və ucuz baseline al; yalnız bundan sonra son blokları açaraq və ya LoRA ilə tam fine-tuning-ə keç.
+mastery_criteria:
+  - "Verilmiş qradiyent vektoru və `max_norm` üçün $L_2$ normanı və kəsilmiş (clipped) vektoru dəqiq hesablayırsan"
+  - "Validation loss ardıcıllığı və `patience` əsasında Early Stopping-in hansı epoxada işə düşəcəyini müəyyən edirsən"
+  - "`backward()`, `clip_grad_norm_()`, `optimizer.step()`, `scheduler.step()` və `zero_grad()` əməliyyatlarının dəqiq icra sırasını izah edə bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-dladv-clip-calculation
+      type: numeric
+      title: "Gradient Norm Clipping hesabı"
+      prompt: |
+        Qradiyent vektoru $\mathbf{g} = [6.0, 8.0]$ və icazə verilən maksimum norma həddi `max_norm` $c = 5.0$-dir.
+        Gradient Norm Clipping tətbiq edildikdən sonra vektorun **1-ci komponentinin ($g_0$)** yeni dəyəri neçə olacaq?
+      skills: [dl-training-loop, dl-backprop]
+      category: math
+      answer: 3.0
+      tolerance: 0.01
+      hints:
+        - "Əvvəlcə $\\|\\mathbf{g}\\|_2 = \\sqrt{6^2 + 8^2}$ normasını tap."
+        - "$\\|\\mathbf{g}\\|_2 = 10.0 > 5.0$ olduğu üçün hər komponenti $c / \\|\\mathbf{g}\\|_2 = 5.0 / 10.0 = 0.5$-ə vur."
+      explanation: "$\\|\\mathbf{g}\\|_2 = \\sqrt{36 + 64} = 10.0$. Kiçiltmə əmsalı $= 5.0 / 10.0 = 0.5$. Kəsilmiş vektor $[6.0 \\times 0.5, 8.0 \\times 0.5] = [3.0, 4.0]$, deməli 1-ci komponent $3.0$ olur."
+    - id: q-dladv-effective-batch
+      type: numeric
+      title: "Gradient Accumulation ilə effektiv batch ölçüsü"
+      prompt: |
+        GPU yaddaşına hər addımda yalnız `micro_batch_size = 8` nümunə yerləşir.
+        Əgər `gradient_accumulation_steps = 6` təyin etsək (hər 6 `backward()` addımından bir `optimizer.step()` çağırsaq), **effektiv batch ölçüsü ($B_{\text{eff}}$)** neçə olar?
+      skills: [dl-training-loop]
+      category: math
+      answer: 48
+      tolerance: 0.01
+      hints:
+        - "Effektiv batch ölçüsü bir `optimizer.step()` yeniləməsində iştirak edən bütün nümunələrin cəmidir."
+        - "$B_{\\text{eff}} = B_{\\text{micro}} \\times K = 8 \\times 6$."
+      explanation: "6 ardıcıl micro-batch (hər birində 8 nümunə) toplanıb tək bir çəki yeniləməsi etdiyi üçün effektiv batch ölçüsü $8 \\times 6 = 48$ olur."
+    - id: q-dladv-clip-order
+      type: mcq
+      title: "Gradient Clipping harada çağırılmalıdır?"
+      prompt: "PyTorch training dövründə `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)` funksiyası hansı iki əməliyyatın **arasında** çağırılmalıdır?"
+      skills: [dl-training-loop, dl-backprop]
+      category: production
+      options:
+        - id: a
+          text: "`loss.backward()`-dan SONRA və `optimizer.step()`-dən ƏVVƏL"
+          feedback: "Doğru! Qradiyentlər əvvəlcə `backward()` ilə hesablanmalı, sonra kəsilməli, sonda isə `optimizer.step()` kəsilmiş qradiyentlərlə çəkiləri yeniləməlidir."
+        - id: b
+          text: "`optimizer.step()`-dən SONRA və `optimizer.zero_grad()`-dan ƏVVƏL"
+          feedback: "Yanlış — `optimizer.step()` artıq çəkiləri yeniləyib; bundan sonra qradiyenti kəsmək heç nəyi dəyişmir."
+        - id: c
+          text: "Forward pass-dan ƏVVƏL, hələ loss hesablanmamış"
+          feedback: "Yanlış — `backward()` çağırılmamış `.grad` sahələrində cari batch-in qradiyenti yoxdur."
+      answer: a
+      explanation: "Qradiyentlər `loss.backward()` zamanı yaranır və `optimizer.step()` zamanı çəkilərə tətbiq edilir; ona görə clipping məhz bu ikisinin arasında icra edilməlidir."
+    - id: q-dladv-why-freeze-first
+      type: mcq
+      title: "Niyə Transfer Learning-də əvvəlcə backbone dondurulur?"
+      prompt: "Pretrained modelə yeni, təsadüfi çəkilərlə başladılmış təsnifat başlığı (`head`) əlavə etdikdə, niyə ilk epoxalarda gövdəni (`backbone`) dondurmaq (`requires_grad = False`) tövsiyə olunur?"
+      skills: [dl-architectures, dl-training-loop]
+      category: concept
+      options:
+        - id: a
+          text: "Yeni başlığın təsadüfi çəkilərindən qaynaqlanan böyük başlanğıc qradiyentlərinin gövdədəki faydalı pretrained təsvirləri dağıtmasının (catastrophic forgetting) qarşısını almaq üçün"
+          feedback: "Doğru! Təsadüfi başlıq ilk addımlarda çox böyük loss və xaotik qradiyent yaradır; gövdəni dondurmaq onu bu şokdan qoruyur."
+        - id: b
+          text: "Çünki PyTorch eyni anda 2-dən çox qatın qradiyentini hesablaya bilmir"
+          feedback: "Xeyr — PyTorch yüzlərlə qatın qradiyentini hesablaya bilir."
+        - id: c
+          text: "Modelin inference zamanı diskdə tutduğu fayl ölçüsünü azaltmaq üçün"
+          feedback: "Xeyr — `requires_grad = False` parametrləri silmir, onların sayını və fayl ölçüsünü dəyişmir."
+      answer: a
+      explanation: "Dondurulmuş backbone həm təsadüfi başlığın yaratdığı dağıdıcı qradiyentlərdən qorunur, həm də aktivasiya/qradiyent yaddaşına qənaət edərək başlığın sürətlə uyğunlaşmasını təmin edir."
+exercises:
+  - id: ex-dladv-clip-and-early-stop
+    type: code
+    title: "Gradient Norm Clipping və Early Stopping funksiyalarını yaz"
+    prompt: |
+      Standart Python (`math.sqrt`) ilə iki mühüm training köməkçi funksiyasını implementasiya et:
+
+      1. `clip_grad_norm(grads: list[float], max_norm: float) -> tuple[list[float], float]`:
+         - Əgər `max_norm <= 0` olarsa, `ValueError` qaldırır.
+         - `grads` vektorunun Evklid ($L_2$) normasını hesablayır: $\|\mathbf{g}\|_2 = \sqrt{\sum g_i^2}$.
+         - Əgər $\|\mathbf{g}\|_2 > \text{max\_norm}$ olarsa, hər elementi $\frac{\text{max\_norm}}{\|\mathbf{g}\|_2}$ əmsalına vurub yeni list qaytarır; əks halda `grads`-in dəyişməmiş kopyasını qaytarır.
+         - Input `grads` list-ini **dəyişdirməməlidir** (mutate etmə).
+         - Qaytarılan dəyər: `(clipped_grads, original_l2_norm)`.
+
+      2. `should_early_stop(val_losses: list[float], patience: int) -> bool`:
+         - Epoxalar üzrə `val_losses` siyahısını soldan sağa izləyir.
+         - Yeni ciddi daha kiçik minimum (`loss < best_loss`) tapıldıqda `best_loss` yenilənir və uğursuz epoxa sayğacı (`bad_epochs`) `0`-a düşür.
+         - Əgər `loss >= best_loss` olarsa, `bad_epochs` `1` artır.
+         - Sayğac hər hansı nöqtədə `bad_epochs >= patience` həddinə çatarsa dərhal `True`, siyahı bitənə qədər çatmazsa (və ya siyahı boşdursa) `False` qaytarır.
+    skills: [dl-training-loop, dl-backprop]
+    category: python
+    difficulty: 2
+    hints:
+      - "`l2_norm = math.sqrt(sum(g * g for g in grads))` hesabla. `l2_norm > max_norm` olduqda `scale = max_norm / l2_norm` ilə yeni list yarat."
+      - "`should_early_stop` üçün `if not val_losses: return False`, sonra `best = val_losses[0]` və `bad = 0` götürüb `val_losses[1:]` üzərində dövr qur."
+      - "`loss < best` olduqda `best = loss; bad = 0`, əks halda `bad += 1` və `if bad >= patience: return True` yoxla."
+    starter_code: |
+      import math
+
+
+      def clip_grad_norm(grads: list[float], max_norm: float) -> tuple[list[float], float]:
+          # TODO: max_norm <= 0 olduqda ValueError; (clipped_grads, original_l2_norm) qaytar
+          return [], 0.0
+
+
+      def should_early_stop(val_losses: list[float], patience: int) -> bool:
+          # TODO: ardıcıl `patience` epoxa ərzində best_loss yenilənmədikdə True qaytar
+          return False
+    tests:
+      - name: "clip_grad_norm: norma həddi aşdıqda kiçildir, aşmadıqda qoruyur"
+        code: |
+          raw = [3.0, -4.0]
+          clipped, norm = clip_grad_norm(raw, max_norm=2.5)
+          assert abs(norm - 5.0) < 1e-9, f"Orijinal norma 5.0 olmalıdır, alınan: {norm}"
+          assert abs(clipped[0] - 1.5) < 1e-9 and abs(clipped[1] - (-2.0)) < 1e-9
+          assert raw == [3.0, -4.0], "Input list mutasiya olunmamalıdır"
+
+          clipped2, norm2 = clip_grad_norm([3.0, -4.0], max_norm=10.0)
+          assert abs(norm2 - 5.0) < 1e-9
+          assert clipped2 == [3.0, -4.0]
+      - name: "clip_grad_norm: sıfır vektor və max_norm <= 0 yoxlaması"
+        code: |
+          c_zero, n_zero = clip_grad_norm([0.0, 0.0], max_norm=1.0)
+          assert c_zero == [0.0, 0.0] and n_zero == 0.0
+          raised = False
+          try:
+              clip_grad_norm([1.0], 0.0)
+          except ValueError:
+              raised = True
+          assert raised, "max_norm <= 0 olduqda ValueError qaldırılmalıdır"
+      - name: "should_early_stop: patience həddi və rekord yenilənməsi"
+        code: |
+          assert should_early_stop([0.90, 0.75, 0.60, 0.62, 0.61, 0.65], patience=3) is True
+          assert should_early_stop([0.90, 0.75, 0.60, 0.62, 0.61], patience=3) is False
+          assert should_early_stop([0.80, 0.85, 0.70, 0.75, 0.76], patience=2) is True
+          assert should_early_stop([], patience=2) is False
+    solution: |
+      import math
+
+
+      def clip_grad_norm(grads: list[float], max_norm: float) -> tuple[list[float], float]:
+          if max_norm <= 0:
+              raise ValueError("max_norm must be positive")
+          l2_norm = math.sqrt(sum(g * g for g in grads))
+          if l2_norm > max_norm and l2_norm > 0.0:
+              scale = max_norm / l2_norm
+              return [g * scale for g in grads], l2_norm
+          return list(grads), l2_norm
+
+
+      def should_early_stop(val_losses: list[float], patience: int) -> bool:
+          if not val_losses:
+              return False
+          best = val_losses[0]
+          bad_epochs = 0
+          for loss in val_losses[1:]:
+              if loss < best:
+                  best = loss
+                  bad_epochs = 0
+              else:
+                  bad_epochs += 1
+                  if bad_epochs >= patience:
+                      return True
+          return False
+    explanation: |
+      `clip_grad_norm` $L_2$ normanı tapır və yalnız norma `max_norm`-dan böyük olduqda bütün komponentləri `max_norm / l2_norm` nisbətində kiçildir. `should_early_stop` isə indiyə qədərki ən kiçik `best` dəyəri izləyərək ardıcıl neçə epoxada rekord yenilənmədiyini sayır.
+  - id: ex-dladv-transfer-order
+    type: order
+    title: "Transfer Learning və Fine-Tuning addımlarını düzgün ardıcıllıqla düz"
+    prompt: |
+      Kiçik domain datası üzərində pretrained modeli **Transfer Learning** ilə təhlükəsiz öyrətmək və ən yaxşı modeli seçmək üçün addımları **1-cidən sonuncuya** doğru sırala.
+    skills: [dl-architectures, dl-training-loop]
+    category: production
+    difficulty: 2
+    hints:
+      - "Əvvəlcə pretrained model yüklənməli və gövdəsi (backbone) dondurulmalıdır ki, təsadüfi yeni başlıq onu pozmasın."
+      - "Yeni başlığı öyrətdikdən sonra gövdəni açıb çox kiçik learning rate ilə fine-tune edirik, sonda isə ən yaxşı validation checkpoint-i yükləyirik."
+    items:
+      - id: step1
+        text: "Pretrained modeli yüklə, backbone parametrlərini dondur (`requires_grad = False`) və çıxış qatını yeni Task Head ilə əvəz et"
+      - id: step2
+        text: "Yalnız yeni Task Head-i orta learning rate ilə bir neçə epoxa öyrət ki, təsadüfi çəkilər uyğunlaşsın"
+      - id: step3
+        text: "Backbone-un son bloklarını aç (`requires_grad = True`) və çox kiçik learning rate + warmup + gradient clipping ilə incə tənzimlə (fine-tune)"
+      - id: step4
+        text: "Early stopping dayandıqda ən aşağı validation loss göstərmiş checkpoint-i (`best.pt`) geri yüklə və test dəstində yoxla"
+    answer: [step1, step2, step3, step4]
+    explanation: |
+      Bu 4 addımlı protokol (`Freeze & Replace Head` $\to$ `Warmup New Head` $\to$ `Low-LR Unfreeze Fine-Tune` $\to$ `Restore Best Checkpoint`) həm catastrophic forgetting-in, həm də son epoxadakı overfitting-in qarşısını alır.
+references:
+  - title: "PyTorch Documentation — torch.nn.utils.clip_grad_norm_"
+    url: https://pytorch.org/docs/stable/generated/torch.nn.utils.clip_grad_norm_.html
+    note: "PyTorch-da qradiyent normasının kəsilməsi"
+  - title: "PyTorch Tutorials — Transfer Learning for Computer Vision"
+    url: https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
+    note: "Backbone freezing və fine-tuning üzrə rəsmi PyTorch bələdçisi"
+  - title: "PyTorch Documentation — Automatic Mixed Precision (torch.amp)"
+    url: https://pytorch.org/docs/stable/amp.html
+    note: "FP16 və BF16 ilə sürətli və az yaddaşlı training"

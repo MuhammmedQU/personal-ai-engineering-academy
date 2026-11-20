@@ -1,0 +1,391 @@
+id: spec-distributed-data-inference-opt
+track: specializations
+module: distributed-data-engineering
+title: "Distributed Data Engineering (Parquet/DuckDB), DDP/FSDP və LLM KV-Cache Optimizasiyası"
+summary: "Milyonlarla sətirlik AI datasetlərini CSV-də boğulmadan sütun əsaslı Parquet + DuckDB ilə emal etməyi, çox-GPU təlimində DDP vs FSDP (ZeRO) fərqini, LLM serving-də KV-Cache yaddaş düsturunu, Grouped-Query Attention (GQA) qənaətini və vLLM Continuous Batching arxitekturasını öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 80]
+prerequisites: [dl-attention-transformers, prod-cicd-versioning-reliability]
+next: spec-multimodal-research-papers
+skills: [spec-distributed-inference, dl-architectures, prod-monitoring]
+objectives:
+  - Sətir əsaslı (CSV/JSONL) saxlama ilə sütun əsaslı (Apache Parquet + predicate pushdown) saxlamanın I/O və performans fərqini izah etmək
+  - Çox-GPU təlimində Distributed Data Parallel (DDP) ilə Fully Sharded Data Parallel (FSDP / ZeRO) arasında yaddaş və şəbəkə (All-Reduce vs All-Gather) trade-off-larını ayırd etmək
+  - "LLM serving zamanı KV-Cache yaddaş tələbini ($\\text{KV}_{\\text{bytes}} = 2 \\cdot L \\cdot n_{\\text{kv}} \\cdot d_{\\text{head}} \\cdot S \\cdot B \\cdot b$) və GPU VRAM büdcəsinə sığan maksimum paralel sorğu sayını (batch size) dəqiq hesablamaq"
+  - Static Batching ilə Continuous Batching (vLLM / PagedAttention) arasındakı GPU istifadə fərqini izah etmək
+why_it_matters: |
+  Kiçik bir prototip 10 MB CSV faylı və tək sorğu ilə işləyir, amma real AI sistemləri iki divara çırpılır: **Data darboğazı** və **GPU VRAM/Throughput darboğazı**.
+
+  1. **Data tərəfi:** 50 milyon proqnoz logunu 15 sütunlu CSV-də saxlasan və yalnız 2 sütunun ortalamasını (`AVG(latency_ms)`) istəsən, disk bütün 15 sütunun mətnini oxuyub parse etməlidir. **Apache Parquet** sütun əsaslı olduğu üçün yalnız həmin 2 sütunu sıxılmış halda oxuyur və **DuckDB** bu sorğunu tək maşında Spark klasteri olmadan saniyələr içində bitirir.
+  2. **LLM Serving tərəfi:** 8B parametrli FP16 model 24 GiB GPU-da cəmi ~16 GiB çəki tutur, amma 20 istifadəçi eyni anda uzun kontekst göndərdikdə server `CUDA Out of Memory` verir. Səbəb çəkilər deyil — **KV-Cache**-dir! Bu dərsdə VRAM-ı dəqiq hesablamağı və serving tutumunu mühəndis kimi planlamağı öyrənəcəksən.
+terms:
+  - term: Columnar Storage (Apache Parquet)
+    definition: Cədvəli sətir-sətir yox, sütun-sütun saxlayan və sıxan fayl formatı; analitik sorğularda yalnız lazım olan sütunları oxumaqla (column pruning) I/O-nu 10–50 dəfə azaldır.
+  - term: Predicate Pushdown
+    definition: Parquet bloklarının min/max statistikalarına baxaraq `WHERE` şərtinə uyğun gəlməyən bütün data bloklarını diskdən oxumadan ötürmə optimizasiyası.
+  - term: DDP vs FSDP (ZeRO)
+    definition: DDP hər GPU-da modelin tam surətini saxlayıb yalnız qradiyentləri paylaşır (`All-Reduce`); FSDP/ZeRO isə parametrləri, qradiyentləri və optimizer vəziyyətlərini $N$ GPU arasında bölüşdürərək (sharding) tək GPU-ya sığmayan modelləri öyrədir.
+  - term: KV-Cache
+    definition: Avtoreqressiv LLM generasiyasında əvvəlki tokenlərin Key ($K$) və Value ($V$) vektorlarını yenidən hesablamamaq üçün GPU VRAM-da saxlayan keş.
+  - term: Grouped-Query Attention (GQA)
+    definition: Bir neçə Query başlığının eyni Key/Value başlığını paylaşması (məs. 32 Q başlığına 8 KV başlığı) — keyfiyyəti qoruyaraq KV-Cache yaddaşını 4x–8x azaldır.
+  - term: Continuous Batching & PagedAttention
+    definition: Batch-dəki bir sorğu bitən kimi dərhal yeni sorğunu əlavə edən (continuous batching) və KV-Cache-i əməliyyat sistemindəki virtual yaddaş səhifələri kimi fraqmentasiyasız paylaşdıran (PagedAttention / vLLM) serving arxitekturası.
+sections:
+  - id: columnar-distributed-kvcache
+    kind: explanation
+    title: "Sütun Əsaslı Data (Parquet/DuckDB), DDP/FSDP və KV-Cache Riyaziyyatı"
+    body: |
+      ### 1. CSV/JSONL vs Apache Parquet + DuckDB
+      Təsəvvür et ki, 10 milyon sətirlik `predictions` cədvəlində 20 sütun var (o cümlədən uzun `prompt_text`), sənə isə yalnız `model_version` üzrə orta `latency_ms` lazımdır:
+      - **CSV / JSONL (Row-oriented):** Disk bütün 20 sütunu oxuyur, hər sətirdə JSON/mətn parse edir — 12 GB I/O, 90 saniyə.
+      - **Apache Parquet (Columnar):** Yalnız 2 sütunun sıxılmış bloklarını oxuyur (`column pruning`) və `WHERE date = '2026-11-20'` filtri üçün uyğun gəlməyən blokları metadata (`min/max`) ilə atlayır (`predicate pushdown`) — 120 MB I/O, 0.4 saniyə!
+      - **DuckDB vs Apache Spark:** Data 100 GB-dan kiçikdirsə, bir maşında işləyən **DuckDB** SQL + Parquet ilə Spark klasterinin JVM/şəbəkə shuffle yükü olmadan qat-qat sürətli və ucuzdur. **Spark** yalnız data terabaytları keçib tək maşının diskinə/RAM-ına sığmayanda lazımdır.
+
+      ---
+
+      ### 2. Çox-GPU Təlimi: DDP vs FSDP (ZeRO)
+      - **DDP (Distributed Data Parallel):** Model tək GPU-ya sığır. Hər GPU-da modelin tam surəti var, batch $N$ yerə bölünür, backward sonunda `All-Reduce` ilə qradiyentlərin ortalaması tapılır.
+      - **FSDP / DeepSpeed ZeRO:** 70B parametrli model (FP16 çəkilər ~140 GB + AdamW optimizer ~560 GB) tək 80 GB GPU-ya sığmır! FSDP parametrləri, qradiyentləri və optimizer vəziyyətlərini $N$ GPU arasında bölür (**sharding**). Hər qatın forward/backward zamanı yalnız həmin qatın çəkiləri `All-Gather` ilə yığılır və dərhal azad edilir.
+
+      ---
+
+      ### 3. LLM Serving Darboğazı: KV-Cache Yaddaş Düsturu
+      Decode mərhələsində hər yeni token əvvəlki bütün tokenlərlə attention hesablayır. Hər dəfə $K$ və $V$ matrislərini sıfırdan hesablamaq $O(S^2)$ iş deməkdir; buna görə onları **KV-Cache**-də saxlayırıq. Onun baytlarla dəqiq həcmi:
+
+      $$\text{KV}_{\text{bytes}} = \underbrace{2}_{K \text{ və } V} \times L \times n_{\text{kv}} \times d_{\text{head}} \times S \times B \times b_{\text{elem}}$$
+
+      Burada:
+      - $L$: Transformer qatlarının sayı (`num_layers`)
+      - $n_{\text{kv}}$: Key/Value başlıqlarının sayı (`num_kv_heads`; GQA ilə `num_q_heads`-dən kiçik olur)
+      - $d_{\text{head}}$: Hər başlığın ölçüsü (`head_dim`, adətən $128$)
+      - $S$: Kontekst uzunluğu (giriş + çıxış token sayı)
+      - $B$: Eyni anda xidmət edilən paralel sorğu sayı (`batch_size`)
+      - $b_{\text{elem}}$: Bir ədədin bayt ölçüsü (FP16/BF16 üçün $2$, FP8/INT8 KV-cache üçün $1$).
+
+      **Static Batching vs Continuous Batching (vLLM):**
+      Static batching-də 4 sorğudan biri 20 tokendə bitsə belə, 500 tokenlik ən uzun sorğu bitənə qədər GPU yaddaşını boş yerə tutur. **Continuous Batching** (iterasiya səviyyəli planlama) bitən sorğunu dərhal çıxarıb növbədəki yeni sorğunu daxil edir; **PagedAttention** isə KV-cache-i sabit bloklara (pages) bölərək 60–80% yaddaş itkisini (internal fragmentation) aradan qaldırır.
+  - id: restaurant-tables-analogy
+    kind: analogy
+    title: "Mental model: Static vs Continuous Batching (Restoran masası) və Parquet (Kitabxana kataloqu)"
+    body: |
+      - **Static Batching:** 4 nəfərlik masada 3 nəfər yeməyini 10 dəqiqəyə bitirir, amma 4-cü nəfər 1 saat çay içir deyə qapıda gözləyən yeni müştərilərin heç biri boşalan 3 stula otura bilmir!
+      - **Continuous Batching (vLLM):** 1 stul boşalan kimi növbədəki yeni müştəri dərhal həmin stula oturur — mətbəx (GPU Tensor Cores) fasiləsiz 100% güclə işləyir.
+      - **Parquet vs CSV:** Kitabxanadan yalnız bütün kitabların nəşr ilini toplamaq istəyirsən. CSV hər kitabın bütün 500 səhifəsini oxuyub ili axtarmaqdır; Parquet isə yalnız "Nəşr İlləri" adlı nazik ayrıca cədvəli oxumaqdır.
+  - id: distributed-inference-diagram
+    kind: diagram
+    title: "GPU VRAM Büdcəsi və Continuous Batching (vLLM) Serving Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        REQ["Gələn Sorğular Növbəsi"] --> SCHED["Continuous Batching Scheduler"]
+        SCHED --> PAGED["PagedAttention KV-Cache Blokları"]
+        subgraph GPU["GPU VRAM (məs. 24 GiB)"]
+          W["Model Çəkiləri\n(FP16 ~16 GiB və ya INT4 ~5 GiB)"]
+          ACT["CUDA + Aktivasiya Ehtiyatı\n(~2 GiB)"]
+          KV["Qalan VRAM = KV-Cache Büdcəsi\n(max B paralel sorğu)"]
+        end
+        PAGED --> KV
+        W --> DEC["Parallel Decode Step"]
+        KV --> DEC
+        DEC -- "EOS token?" --> OUT["Cavabı bitir, KV bloklarını dərhal azad et!"]
+        DEC -- "Davam edir" --> SCHED
+      ```
+
+      Göründüyü kimi, model çəkiləri sabitdir, amma **KV-Cache** sorğu sayı ($B$) və kontekst uzunluğu ($S$) ilə xətti böyüyür — serving tutumunu təyin edən əsas limit məhz qalan VRAM-dır.
+  - id: worked-kv-cache-budget
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: Llama-3-8B üçün KV-Cache və Maksimum Batch Size hesabı"
+    body: |
+      Llama-3-8B tipli arxitektura verilib:
+      - Qat sayı: $L = 32$
+      - GQA KV başlıq sayı: $n_{\text{kv}} = 8$ (32 Query başlığı 8 KV başlığını paylaşır!)
+      - Başlıq ölçüsü: $d_{\text{head}} = 128$
+      - Dəqiqlik: FP16 ($b_{\text{elem}} = 2$ bayt)
+
+      **Addım 1: Tək 1 tokenin bütün 32 qat üzrə KV-Cache ölçüsü**
+      $$\text{bytes/token} = 2 \times 32 \times 8 \times 128 \times 2 = 131{,}072 \text{ bayt} = 128 \text{ KiB}$$
+
+      **Addım 2: $S = 4096$ tokenlik 1 sorğu üçün KV-Cache**
+      $$4096 \times 128 \text{ KiB} = 524{,}288 \text{ KiB} = 512 \text{ MiB} = \mathbf{0.5 \text{ GiB / sorğu}}$$
+
+      **Addım 3: $B = 16$ paralel sorğu üçün ümumi KV-Cache**
+      $$16 \times 0.5 \text{ GiB} = \mathbf{8.0 \text{ GiB}}$$
+      *(Müqayisə: GQA olmasaydı və standart MHA $n_{\text{kv}} = 32$ işlədilsəydi, eyni 16 sorğu $4\times$ çox — düz **$32.0 \text{ GiB}$** tutacaq və 24 GiB GPU-ya heç sığmayacaqdı!)*
+
+      **Addım 4: 24 GiB GPU-da maksimum paralel sorğu sayı ($B_{\max}$)**
+      - FP16 model çəkiləri = $16.0 \text{ GiB}$, CUDA + aktivasiya ehtiyatı = $2.0 \text{ GiB}$.
+      - KV-Cache üçün qalan sərbəst VRAM = $24.0 - 16.0 - 2.0 = 6.0 \text{ GiB}$.
+      - $S = 4096$ kontekstlə maksimum paralel sorğu:
+        $$B_{\max} = \left\lfloor \frac{6.0 \text{ GiB}}{0.5 \text{ GiB/sorğu}} \right\rfloor = \mathbf{12 \text{ paralel sorğu}}$$
+      - Əgər model çəkilərini **INT4 (AWQ/GPTQ)** ilə ~5.0 GiB-ə sıxsaq: qalan VRAM $= 24.0 - 5.0 - 2.0 = 17.0 \text{ GiB} \implies B_{\max} = \lfloor 17.0 / 0.5 \rfloor = \mathbf{34 \text{ paralel sorğu}}$ ($2.8\times$ daha yüksək throughput!).
+  - id: kvcache-and-duckdb-code
+    kind: code
+    title: "Kod: KV-Cache VRAM Kalkulyatoru + DuckDB/Parquet Analitik Nümunə"
+    body: |
+      **1. Saf Python-da GPU KV-Cache və Serving Tutumu Kalkulyatoru:**
+      ```python
+      GIB = 1024 ** 3
+
+
+      def estimate_kv_cache_capacity(
+          num_layers: int,
+          num_kv_heads: int,
+          head_dim: int,
+          seq_len: int,
+          bytes_per_elem: int,
+          gpu_vram_gib: float,
+          model_weights_gib: float,
+          overhead_gib: float = 2.0,
+      ) -> dict[str, float | int]:
+          """Calculate per-request KV-cache size (GiB) and max concurrent batch size on one GPU."""
+          if min(num_layers, num_kv_heads, head_dim, seq_len, bytes_per_elem) <= 0:
+              raise ValueError("Architecture parameters must be positive integers")
+          if gpu_vram_gib <= 0 or model_weights_gib < 0 or overhead_gib < 0:
+              raise ValueError("Memory parameters must be valid non-negative numbers")
+
+          bytes_per_seq = 2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_elem
+          kv_per_seq_gib = bytes_per_seq / GIB
+          free_vram_gib = max(0.0, gpu_vram_gib - model_weights_gib - overhead_gib)
+          max_batch = int(free_vram_gib // kv_per_seq_gib) if kv_per_seq_gib > 0 else 0
+
+          return {
+              "kv_per_seq_gib": round(kv_per_seq_gib, 4),
+              "free_vram_gib": round(free_vram_gib, 4),
+              "max_batch_size": max_batch,
+          }
+
+
+      print(estimate_kv_cache_capacity(32, 8, 128, 4096, 2, 24.0, 16.0, 2.0))
+      # {'kv_per_seq_gib': 0.5, 'free_vram_gib': 6.0, 'max_batch_size': 12}
+      ```
+
+      **2. Lokal ML mühitində DuckDB ilə 10M sətirlik Parquet analizi (SQL):**
+      ```sql
+      -- Yalnız 2 sütunu oxuyur, bütün 10GB faylı RAM-a yükləmir!
+      SELECT model_version,
+             COUNT(*) AS reqs,
+             QUANTILE_CONT(latency_ms, 0.95) AS p95_ms
+      FROM read_parquet('logs/predictions_*.parquet')
+      WHERE event_date >= DATE '2026-11-01'
+      GROUP BY model_version;
+      ```
+  - id: common-distributed-mistakes
+    kind: mistakes
+    title: "Ən çox edilən Data Engineering və Inference Optimizasiyası səhvləri"
+    body: |
+      **1. 2 GB-lıq dataset üçün dərhal Hadoop/Spark klasteri qurmaq**
+      "Big Data" terminini görüb 5 milyon sətirlik cədvəl üçün 4 node-lu Spark klasteri işlətmək mühəndislik vaxtını və bulud büdcəsini yandırır. 100 GB-dan kiçik analitik data üçün **Parquet + DuckDB / Polars** tək maşında həm daha sürətli, həm də 10x daha sadədir.
+
+      **2. GPU VRAM büdcəsində yalnız model çəkilərini hesablamaq**
+      "Model 16 GB-dır, 24 GB GPU bəsdir" deyib 32k kontekstlə 10 paralel istifadəçini buraxdıqda KV-Cache dərhal VRAM-ı partladır (`CUDA OOM`). Həmişə çəkilər + CUDA overhead + $B \times \text{KV}_{\text{seq}}$ cəmini hesabla.
+
+      **3. `max_model_len` limitini lazımsız yerə 128k saxlamaq**
+      Tətbiqin heç vaxt 8k tokendən uzun prompt göndərmirsə, serving engine-də `max_model_len=131072` saxlamaq başlanğıcda yaddaş planlayıcısını sıxır və paralel sorğu sayını məhdudlaşdırır.
+
+      **4. Çox-GPU təlimində şəbəkə bant genişliyini (NVLink vs Ethernet) unutmaq**
+      FSDP hər qatda parametrləri `All-Gather` ilə ötürür. Yavaş Ethernet üzərində FSDP işlətsən, GPU-lar hesablamaq əvəzinə vaxtın 80%-ni şəbəkədən çəki gözləməklə keçirər.
+  - id: distributed-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: Throughput vs Latency və FP16 vs FP8/INT8 KV-Cache"
+    body: |
+      - **Throughput vs Per-User Latency (ITL):** Batch ölçüsünü $B = 1$-dən $B = 32$-yə qaldırmaq ümumi saniyədə token sayını (throughput) 15x artıra bilər, lakin tək istifadəçinin token-arası gecikməsini (Inter-Token Latency) bir qədər uzadır. İnteraktiv çat üçün orta batch + Continuous Batching, oflayn sənəd xülasələşdirmə üçün isə maksimum batch seçilir.
+      - **FP16 vs FP8/INT8 KV-Cache:** KV-cache-i FP16-dan FP8/INT8-ə endirmək ($b_{\text{elem}}: 2 \to 1$) paralel sorğu tutumunu tam **2 qat** artırır, lakin çox uzun kontekstdə incə faktların (needle-in-a-haystack) xatırlanmasında kiçik keyfiyyət itkisi yarada bilər — mütləq golden eval ilə yoxla.
+      - **DuckDB vs Distributed Engine (Spark/BigQuery):** Tək SSD/NVMe üzərinə sığan data (< 100–200 GB Parquet) üçün DuckDB; çox-terabaytlıq komanda data gölləri (Data Lakehouse) üçün Spark / Trino / BigQuery seçilir.
+mastery_criteria:
+  - Parquet + DuckDB-nin CSV/JSONL və Spark-a nisbətən nə vaxt üstün olduğunu I/O və arxitektura baxımından izah edə bilirsən
+  - Verilmiş $L, n_{\text{kv}}, d_{\text{head}}, S, B, b$ parametrləri üçün KV-Cache ölçüsünü və GPU-ya sığan maksimum `batch_size`-ı hesablayan kodu yaza bilirsən
+  - GQA-nın KV-cache qənaətini, DDP vs FSDP fərqini və Continuous Batching-in GPU istifadəsini necə artırdığını izah edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-specdist-parquet-io
+      type: mcq
+      title: "Niyə analitik sorğularda Parquet CSV-dən qat-qat sürətlidir?"
+      prompt: "50 milyon sətir və 40 sütundan ibarət proqnoz logları üzərində yalnız `model_version` və `latency_ms` sütunları üzrə `AVG(latency_ms)` hesablanır. Parquet formatı CSV-yə nisbətən niyə 20x–50x daha az disk I/O edir?"
+      skills: [spec-distributed-inference]
+      category: production
+      options:
+        - id: a
+          text: "Parquet sütun əsaslıdır (columnar) — yalnız sorğuda tələb olunan 2 sütunun sıxılmış bloklarını oxuyur və predicate pushdown ilə uyğun olmayan blokları atlayır"
+          feedback: "Doğrudur! Column pruning + sıxılma + min/max metadata blok atlaması disk oxumasını kəskin azaldır."
+        - id: b
+          text: "Parquet faylları avtomatik GPU VRAM-da saxlanır"
+          feedback: "Yanlışdır — Parquet disk/obyekt saxlama formatıdır; sürət üstünlüyü sütun əsaslı təşkilatdan gəlir."
+        - id: c
+          text: "Parquet yalnız 1 milyon sətirdən az datanı saxlayır"
+          feedback: "Yanlışdır — Parquet petabayt miqyaslı data göllərinin əsas standartıdır."
+      answer: a
+      explanation: "Columnar storage yalnız tələb olunan sütunları oxuyur (column pruning) və eyni tipli dəyərləri yan-yana saxladığı üçün yüksək sıxılma + predicate pushdown təmin edir."
+    - id: q-specdist-ddp-vs-fsdp
+      type: mcq
+      title: "DDP vs FSDP (ZeRO) seçimi"
+      prompt: "70 milyard parametrli LLM-i 8 ədəd 80 GB H100 GPU-da fine-tune etmək istəyirsən (FP16 çəkilər ~140 GB, tək GPU-ya sığmır). Hansı paylanmış təlim strategiyası zəruridir?"
+      skills: [spec-distributed-inference, dl-architectures]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Standart DDP (Distributed Data Parallel) — hər GPU-da modelin tam surətini saxlamaq"
+          feedback: "Yanlışdır — 140 GB-lıq modelin tam surəti 80 GB-lıq tək GPU-ya sığmadığı üçün DDP ilk addımda OOM verəcək."
+        - id: b
+          text: "FSDP / DeepSpeed ZeRO — model parametrlərini, qradiyentləri və optimizer vəziyyətlərini 8 GPU arasında bölüşdürmək (sharding)"
+          feedback: "Doğrudur! Sharding yaddaş yükünü $N=8$ GPU arasında bölür və hər qat üçün lazımi çəkiləri yalnız hesablama anında toplayır."
+        - id: c
+          text: "Batch ölçüsünü 1-ə salıb tək GPU-da işlətmək"
+          feedback: "Yanlışdır — batch=1 olsa belə 140 GB-lıq çəkilərin özü 80 GB VRAM-a sığmır."
+      answer: b
+      explanation: "DDP yalnız model + optimizer tək GPU-ya sığanda işləyir; tək GPU-nu aşan modellərdə FSDP/ZeRO sharding məcburidir."
+    - id: q-specdist-continuous-batching
+      type: mcq
+      title: "Continuous Batching (vLLM) üstünlüyü"
+      prompt: "Static batching-də 8 sorğuluq batch-də 7 sorğu 30 tokendə bitir, 1 sorğu isə 600 token davam edir. Continuous Batching bunu necə həll edir?"
+      skills: [spec-distributed-inference, prod-monitoring]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "30 tokendə bitən 7 sorğunun KV-Cache bloklarını dərhal azad edir və növbədə gözləyən yeni sorğuları 600 tokenlik sorğunun bitməsini gözləmədən batch-ə daxil edir"
+          feedback: "Doğrudur! İterasiya səviyyəli planlama GPU-nun boş qalmasının qarşısını alıb throughput-u dəfələrlə artırır."
+        - id: b
+          text: "600 tokenlik sorğunu 30 tokendə zorla kəsir"
+          feedback: "Yanlışdır — uzun sorğular kəsilmir, sadəcə bitən sorğuların yerinə dərhal yeniləri əlavə olunur."
+        - id: c
+          text: "KV-Cache-i tam söndürür"
+          feedback: "Yanlışdır — KV-Cache PagedAttention ilə daha səmərəli idarə olunur."
+      answer: a
+      explanation: "Continuous batching hər decode addımında bitən sorğuları çıxarıb yenilərini əlavə edir, beləliklə GPU resursları uzun quyruqlu sorğular ucbatından israf edilmir."
+    - id: q-specdist-gqa-effect
+      type: multi
+      title: "LLM Serving-də KV-Cache yaddaşını azaltmağın düzgün yolları"
+      prompt: "Eyni GPU-da paralel istifadəçi sayını (batch size) artırmaq üçün KV-Cache yaddaş yükünü hansı mühəndislik üsulları birbaşa azaldır? Hamısını seç."
+      skills: [spec-distributed-inference, dl-architectures]
+      category: production
+      options:
+        - id: a
+          text: "Grouped-Query Attention (GQA) istifadə edən arxitektura seçmək ($n_{\\text{kv}} < n_q$)"
+          feedback: "Bəli — KV başlıq sayını 4x azaltmaq KV-Cache yaddaşını düz 4x azaldır."
+        - id: b
+          text: "KV-Cache dəqiqliyini FP16-dan ($b=2$) FP8/INT8-ə ($b=1$) endirmək (eval ilə yoxlamaq şərtilə)"
+          feedback: "Bəli — element ölçüsünü yarıya endirmək KV-Cache tutumunu 2x artırır."
+        - id: c
+          text: "PagedAttention ilə KV-Cache bloklarını fraqmentasiyasız paylaşdırmaq və ümumi sistem promptu üçün Prefix Caching işlətmək"
+          feedback: "Bəli — eyni system prompt-un KV bloklarını bütün sorğular arasında paylaşmaq böyük VRAM qənaəti verir."
+        - id: d
+          text: "Hər sorğunun kontekst uzunluğunu ($S$) 2 qat artırmaq"
+          feedback: "Xeyr — KV-Cache $S$ ilə düz mütənasibdir; konteksti 2x artırmaq VRAM tələbini 2x artırır."
+      answers: [a, b, c]
+      explanation: "KV-Cache düsturundakı ($2 \\cdot L \\cdot n_{\\text{kv}} \\cdot d_{\\text{head}} \\cdot S \\cdot B \\cdot b$) amilləri kiçiltmək (GQA, FP8 KV, Prefix Caching + PagedAttention) eyni GPU-da paralel tutumu kəskin artırır."
+exercises:
+  - id: ex-specdist-kv-capacity
+    type: code
+    title: "GPU KV-Cache və Maksimum Batch Tutumu (estimate_kv_cache_capacity) funksiyasını yaz"
+    prompt: |
+      LLM serving planlaması üçün `estimate_kv_cache_capacity(...)` funksiyasını yaz:
+
+      **Parametrlər:**
+      `num_layers: int, num_kv_heads: int, head_dim: int, seq_len: int, bytes_per_elem: int, gpu_vram_gib: float, model_weights_gib: float, overhead_gib: float = 2.0`
+
+      **Müqavilə (Contract):**
+      1. `num_layers, num_kv_heads, head_dim, seq_len, bytes_per_elem` dəyərlərindən hər hansı biri `<= 0` olarsa və ya `gpu_vram_gib <= 0`, `model_weights_gib < 0`, `overhead_gib < 0` olarsa `ValueError` qaldır.
+      2. Tək bir sorğunun (sequence) KV-Cache ölçüsünü GiB ilə hesabla ($\text{1 GiB} = 1024^3$ bayt):
+         $$\text{bytes\_per\_seq} = 2 \cdot L \cdot n_{\text{kv}} \cdot d_{\text{head}} \cdot S \cdot b_{\text{elem}}$$
+      3. Sərbəst VRAM: `free_vram_gib = max(0.0, gpu_vram_gib - model_weights_gib - overhead_gib)`.
+      4. Maksimum tam paralel sorğu sayı: `max_batch_size = int(free_vram_gib // kv_per_seq_gib)` (sərbəst VRAM 0-dırsa `0`).
+      5. Qaytar: `{"kv_per_seq_gib": round(kv_per_seq_gib, 4), "free_vram_gib": round(free_vram_gib, 4), "max_batch_size": max_batch_size}`.
+    skills: [spec-distributed-inference, dl-architectures]
+    category: llm-architecture
+    difficulty: 2
+    hints:
+      - "Əvvəlcə bütün müsbət/mənfi olmayan parametr yoxlamalarını et və səhvdirsə `raise ValueError(...)`."
+      - "GiB əmsalı `1024 ** 3`-dür (1_073_741_824). `kv_per_seq_gib = (2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_elem) / (1024 ** 3)`. Sərbəst yaddaş `max(0.0, gpu_vram_gib - model_weights_gib - overhead_gib)`."
+    starter_code: |
+      def estimate_kv_cache_capacity(
+          num_layers: int,
+          num_kv_heads: int,
+          head_dim: int,
+          seq_len: int,
+          bytes_per_elem: int,
+          gpu_vram_gib: float,
+          model_weights_gib: float,
+          overhead_gib: float = 2.0,
+      ) -> dict:
+          # TODO: validasiya et, KV-cache (GiB), free_vram_gib və max_batch_size hesabla
+          return {"kv_per_seq_gib": 0.0, "free_vram_gib": 0.0, "max_batch_size": 0}
+    solution: |
+      def estimate_kv_cache_capacity(
+          num_layers: int,
+          num_kv_heads: int,
+          head_dim: int,
+          seq_len: int,
+          bytes_per_elem: int,
+          gpu_vram_gib: float,
+          model_weights_gib: float,
+          overhead_gib: float = 2.0,
+      ) -> dict:
+          if min(num_layers, num_kv_heads, head_dim, seq_len, bytes_per_elem) <= 0:
+              raise ValueError("architecture dimensions must be positive")
+          if gpu_vram_gib <= 0 or model_weights_gib < 0 or overhead_gib < 0:
+              raise ValueError("invalid VRAM budget parameters")
+
+          gib = 1024 ** 3
+          bytes_per_seq = (
+              2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_elem
+          )
+          kv_per_seq_gib = bytes_per_seq / gib
+          free_vram_gib = max(0.0, gpu_vram_gib - model_weights_gib - overhead_gib)
+          max_batch = int(free_vram_gib // kv_per_seq_gib)
+          return {
+              "kv_per_seq_gib": round(kv_per_seq_gib, 4),
+              "free_vram_gib": round(free_vram_gib, 4),
+              "max_batch_size": max_batch,
+          }
+    tests:
+      - name: "Llama-3-8B FP16 24 GiB GPU-da (S=4096) dəqiq 0.5 GiB/seq və max_batch=12 verir"
+        code: |
+          res = estimate_kv_cache_capacity(32, 8, 128, 4096, 2, 24.0, 16.0, 2.0)
+          assert res == {"kv_per_seq_gib": 0.5, "free_vram_gib": 6.0, "max_batch_size": 12}
+      - name: "INT4 çəkilər (5 GiB) + FP8 KV-Cache (b=1) tutumu kəskin artırır"
+        code: |
+          res = estimate_kv_cache_capacity(32, 8, 128, 4096, 1, 24.0, 5.0, 2.0)
+          assert res == {"kv_per_seq_gib": 0.25, "free_vram_gib": 17.0, "max_batch_size": 68}
+      - name: "Çəkilər + overhead GPU-nu aşdıqda sərbəst VRAM 0 və max_batch=0 olur"
+        code: |
+          res = estimate_kv_cache_capacity(32, 8, 128, 4096, 2, 16.0, 16.0, 2.0)
+          assert res["free_vram_gib"] == 0.0 and res["max_batch_size"] == 0
+      - name: "Yanlış (0 və ya mənfi) parametrlərdə ValueError qaldırır"
+        code: |
+          try:
+              estimate_kv_cache_capacity(0, 8, 128, 4096, 2, 24.0, 16.0)
+              assert False
+          except ValueError:
+              pass
+    explanation: "KV-Cache büdcəsini əvvəlcədən hesablamaq production serving-də OOM qəzalarının qarşısını alır və INT4/FP8 kvantizasiyasının paralel tutuma təsirini (12 -> 68 sorğu!) dəqiq rəqəmlə sübut edir."
+  - id: ex-specdist-gqa-kv-numeric
+    type: numeric
+    title: "KV-Cache yaddaş hesabı (GiB)"
+    prompt: |
+      Bir Transformer modelində:
+      - $L = 32$ qat
+      - $n_{\text{kv}} = 8$ GQA KV başlığı
+      - $d_{\text{head}} = 128$
+      - Kontekst uzunluğu $S = 8192$ token
+      - Paralel sorğu sayı $B = 8$
+      - Dəqiqlik: FP16 ($b_{\text{elem}} = 2$ bayt)
+
+      Bu 8 paralel sorğunun KV-Cache-i cəmi neçə **GiB** ($1\text{ GiB} = 1024^3$ bayt) GPU yaddaşı tutur?
+    skills: [spec-distributed-inference]
+    category: math
+    difficulty: 2
+    answer: 8.0
+    tolerance: 0.01
+    unit: "GiB"
+    hints:
+      - "Əvvəlcə 1 tokenin bayt ölçüsünü tap: $2 \\times 32 \\times 8 \\times 128 \\times 2 = 131{,}072$ bayt ($128$ KiB)."
+      - "Ümumi token sayı $S \\times B = 8192 \\times 8 = 65{,}536$. İndi $65{,}536 \\times 131{,}072$ baytı $1024^3$-ə ($1{,}073{,}741{,}824$) böl."
+    explanation: "1 token = $2 \\times 32 \\times 8 \\times 128 \\times 2 = 128\\text{ KiB}$. 1 sorğu ($8192$ token) = $1.0\\text{ GiB}$. $B = 8$ paralel sorğu = $8 \\times 1.0 = 8.0\\text{ GiB}$."
+references:
+  - title: "vLLM: Efficient Memory Management for Large Language Model Serving with PagedAttention (SOSP 2023)"
+    url: "https://arxiv.org/abs/2309.06180"
+    note: "PagedAttention və Continuous Batching arxitekturasının orijinal elmi məqaləsi."
+  - title: "DuckDB Documentation — Parquet & Columnar Analytics"
+    url: "https://duckdb.org/docs/data/parquet/overview.html"
+    note: "Tək maşında böyük Parquet datasetlərini sürətli emal etmək üçün rəsmi sənəd."

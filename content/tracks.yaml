@@ -1,0 +1,611 @@
+# Learning path: tracks → modules → lessons.
+# status: authored  = lessons exist in content/lessons/
+# status: planned   = roadmap entry only; lessons NOT written yet (UI labels this honestly)
+# effort_hours is a rough RANGE for a learner with some programming background, not a promise.
+tracks:
+  # =====================================================================
+  - id: software-engineering
+    code: A
+    title: Software Engineering for AI
+    summary: Python-u "işləyir" səviyyəsindən "etibarlı, test olunmuş, oxunaqlı" səviyyəyə qaldırmaq.
+    why: AI sistemlərinin böyük hissəsi adi proqram təminatıdır — data emalı, API-lər, testlər, xəta idarəsi. Model nə qədər yaxşı olsa da, ətrafındakı kod zəifdirsə sistem etibarsız olur.
+    modules:
+      - id: python-engineering
+        title: Python engineering fundamentals
+        summary: Funksiya müqavilələri, xəta idarəsi, data structures və testlər — gündəlik AI kodunun bünövrəsi.
+        status: authored
+        level: foundation
+        prerequisites: []
+        outcomes:
+          - Aydın input/output müqaviləsi olan, type hint-li funksiyalar yazmaq
+          - Səhv inputu erkən aşkarlayıb mənalı exception qaldırmaq
+          - Məsələyə uyğun data structure seçmək və complexity-ni əsaslandırmaq
+          - pytest ilə edge case-ləri əhatə edən testlər yazmaq
+        effort_hours: [8, 14]
+        practical_task: Kiçik bir "dataset cleaner" modulu yaz (CSV sətirlərini validasiya edən funksiyalar) və ona ən azı 8 pytest testi əlavə et.
+        mastery_criteria:
+          - Yeni bir funksiyanı müqavilə, validation və testlərlə müstəqil yaza bilirsən
+          - Başqasının kodunda side effect və mutable default bug-ını tapa bilirsən
+          - "'Niyə dict, niyə list deyil?' sualına Big-O ilə cavab verə bilirsən"
+        lessons:
+          - py-functions-contracts
+          - py-errors-validation
+          - py-data-structures-complexity
+          - py-testing-pytest
+        planned_topics: []
+      - id: http-apis
+        title: HTTP, REST və API clients
+        summary: Xarici API-lərə (o cümlədən LLM API-lərinə) etibarlı müraciət etmək.
+        status: authored
+        level: foundation
+        prerequisites: [python-engineering]
+        outcomes:
+          - HTTP request/response strukturunu və status code-ları izah etmək
+          - Timeout, retry və exponential backoff ilə API client yazmaq
+          - Hansı xətaların retry edilə biləcəyini əsaslandırmaq
+        effort_hours: [4, 8]
+        practical_task: Pulsuz bir public API üçün timeout və retry olan kiçik client yaz; uğursuz cavabları log et.
+        mastery_criteria:
+          - 429 və 500 xətalarına fərqli reaksiya verən client yaza bilirsən
+          - Timeout olmayan kodun niyə təhlükəli olduğunu izah edə bilirsən
+        lessons:
+          - http-json-api-clients
+        planned_topics:
+          - Authentication (API key, OAuth) əsasları
+      - id: oop-typing-packaging
+        title: Advanced Python, OOP, Protocols və Streaming Architecture
+        summary: Composition vs inheritance, dataclass, typing.Protocol, dependency injection, lazy generators və streaming data pipelines.
+        status: authored
+        level: core
+        prerequisites: [python-engineering]
+        outcomes:
+          - Inheritance əvəzinə composition və Protocol ilə dəyişdirilə bilən (pluggable) AI pipeline komponentləri qurmaq
+          - "@dataclass(frozen=True) ilə dəyişməz konfiqurasiya və məlumat müqavilələri təyin etmək"
+          - Böyük datasetləri RAM-ı doldurmadan lazy generator (yield) və micro-batch axını ilə emal etmək
+        effort_hours: [8, 14]
+        practical_task: "Mini-Project: Protocol-based TextPreprocessor + BatchTokenizer + Validator pipeline-ı və 100k sətirlik JSONL axınını O(1) yaddaşla emal edən streaming generator yaz."
+        mastery_criteria:
+          - Kiçik bir AI modulunda xarici asılılığı Protocol və dependency injection ilə mock edib test edə bilirsən
+          - Generator exhaustion (tükənmə) bug-ını kodda tapıb izah edə bilirsən
+        lessons:
+          - py-oop-architecture-protocols
+          - py-generators-streaming-pipelines
+      - id: git-debugging-logging
+        title: Git, GitHub, sistemli debugging və structured logging
+        summary: Feature branch və PR iş axını, git bisect ilə O(log N) bug axtarışı, hipotez-əsaslı debugging və korrelyasiyalı JSON loglar.
+        status: authored
+        level: foundation
+        prerequisites: [python-engineering]
+        outcomes:
+          - Feature branch, atomik commit və PR yoxlama siyahısı ilə komanda səviyyəsində işləmək
+          - git bisect məntiqi və minimal reproduksiya ilə reqressiya yaradan dəyişikliyi tapmaq
+          - print() əvəzinə request_id korrelyasiyalı structured logging qurmaq
+        effort_hours: [5, 10]
+        practical_task: "Mini-Project: Öz layihəndə bir bug-ı minimal failing testlə reproduksiya et, git bisect / ikili axtarışla səbəbini tap, feature branch-də düzəlt və structured JSON logger əlavə et."
+        mastery_criteria:
+          - Merge konflikti zamanı hər iki tərəfin məntiqini itirmədən birləşdirə bilirsən
+          - İkili axtarışla (bisect) N commit içindən ilk sınıq commit-i O(log N) addımda tapa bilirsən
+        lessons:
+          - sw-git-debugging-structured-logging
+      - id: sql-databases
+        title: SQL və Database Engineering for AI
+        summary: Relational sxem dizaynı, INNER vs LEFT JOIN, GROUP BY analitikası, B-Tree indeksləri və SQL injection müdafiəsi.
+        status: authored
+        level: core
+        prerequisites: [python-engineering]
+        outcomes:
+          - AI telemetriyası, proqnoz logları və istifadəçi rəyləri üçün normallaşdırılmış relational sxem qurmaq
+          - LEFT JOIN və GROUP BY ilə seçim sürüşməsi (selection bias) yaratmadan analitik sorğular yazmaq
+          - B-Tree indeksinin O(log N) axtarış üstünlüyünü və parametrləşdirilmiş (?) sorğuları tətbiq etmək
+        effort_hours: [6, 12]
+        practical_task: "Mini-Project: Model proqnozları və istifadəçi feedback-ləri üçün SQLite sxemi, indeks və versiya üzrə xəta dərəcəsini çıxaran analitik modul yaz."
+        mastery_criteria:
+          - Könüllü feedback cədvəlində niyə INNER JOIN əvəzinə LEFT JOIN lazım olduğunu rəqəmlə göstərə bilirsən
+          - Parametrləşdirilmiş sorğu ilə SQL injection hücumunun qarşısını ala bilirsən
+        lessons:
+          - sw-sql-relational-analytics
+      - id: linux-cli-fundamentals
+        title: Linux, Command Line və Shell Scripting
+        summary: Terminal naviqasiyası, POSIX icazələri (chmod 600 vs 755), standart axınlar/pipes, set -euo pipefail, proseslər (SIGTERM/SIGKILL), tmux və GPU server diaqnostikası (nvidia-smi).
+        status: authored
+        level: foundation
+        prerequisites: [git-debugging-logging]
+        outcomes:
+          - POSIX fayl icazələrinin (r=4, w=2, x=1) bit hesablamasını aparmaq və gizli açar faylları üçün chmod 600 tətbiq etmək
+          - Standart axınlar (stdin/stdout/stderr), pipes və set -euo pipefail ilə etibarlı log analizi və shell skriptləri yazmaq
+          - Uzaq GPU serverlərində tmux, SIGTERM/SIGKILL və nvidia-smi ilə proses/VRAM diaqnostikası aparmaq
+        effort_hours: [6, 10]
+        practical_task: "Log fayllarından 5xx xəta faizini və ən problemli endpoint-i çıxaran analizator + set -euo pipefail əsaslı təlim skripti yaz."
+        mastery_criteria:
+          - "İstənilən 9 simvollu POSIX icazəsini octal koda çevirə və gizli açar üçün təhlükəsiz olub-olmadığını yoxlaya bilirsən"
+          - "Uzaq serverdə ilişmiş prosesi SIGTERM ilə təmiz dayandıra və tmux/nvidia-smi ilə diaqnostika apara bilirsən"
+        lessons:
+          - sw-linux-cli-shell-systems
+        planned_topics: []
+
+  # =====================================================================
+  - id: math
+    code: B
+    title: Math & Statistics for AI
+    summary: ML-də həqiqətən istifadə olunan riyaziyyat — intuisiya, kiçik rəqəmlərlə nümunə və kod.
+    why: Embedding-lərin oxşarlığı, neural network-ün öyrənməsi və metriklərin mənası birbaşa linear algebra, calculus və probability üzərində qurulub. Məqsəd isbat yazmaq deyil — modelin nə etdiyini başa düşmək və səhvini görə bilməkdir.
+    modules:
+      - id: linear-algebra
+        title: Linear algebra for ML
+        summary: Vektorlar, dot product, norm, cosine similarity, matrix multiplication və shapes.
+        status: authored
+        level: foundation
+        prerequisites: []
+        outcomes:
+          - Dot product və cosine similarity-ni əl ilə və kodla hesablamaq
+          - Matrix multiplication shape qaydasını tətbiq etmək
+          - Linear layer-i matris vurması kimi görmək
+        effort_hours: [5, 10]
+        practical_task: Pure Python-da kiçik "vector library" yaz (dot, norm, cosine, matmul) və NumPy nəticələri ilə müqayisə et.
+        mastery_criteria:
+          - İstənilən iki matris üçün vurmanın mümkünlüyünü və nəticə shape-ni deyə bilirsən
+          - Cosine similarity-nin niyə uzunluqdan asılı olmadığını izah edə bilirsən
+        lessons:
+          - math-vectors-dot-product
+          - math-matrices-shapes
+        planned_topics: []
+      - id: calculus-optimization
+        title: Calculus və optimization
+        summary: Törəmə, chain rule, gradient və gradient descent.
+        status: authored
+        level: foundation
+        prerequisites: [linear-algebra]
+        outcomes:
+          - Törəməni "dəyişmə sürəti" kimi izah etmək
+          - Chain rule ilə mürəkkəb funksiyanın törəməsini tapmaq
+          - Gradient descent addımlarını əl ilə hesablamaq və learning rate effektini proqnozlaşdırmaq
+        effort_hours: [5, 10]
+        practical_task: Pure Python-da 1D və 2D gradient descent yaz, müxtəlif learning rate-lər üçün loss-u çap et.
+        mastery_criteria:
+          - Verilmiş loss üçün bir gradient descent addımını əl ilə hesablaya bilirsən
+          - Divergence-in səbəbini izah edə bilirsən
+        lessons:
+          - math-derivatives-gradient-descent
+        planned_topics:
+          - Momentum və Adam optimizer intuisiyası
+      - id: probability-statistics
+        title: Probability, statistics, confidence intervals və PCA
+        summary: Şərti ehtimal, Bayes qaydası, seçmə dispersiyası, 95% etibarlılıq intervalları, A/B test əhəmiyyətliliyi və PCA variasiya nisbəti.
+        status: authored
+        level: foundation
+        prerequisites: []
+        outcomes:
+          - Şərti ehtimalı cədvəl ilə hesablamaq
+          - Bayes qaydasını tətbiq edib base rate effektini izah etmək
+          - Seçmə ortalaması, standart xəta (SE) və 95% Confidence Interval ilə iki modelin fərqini qiymətləndirmək
+          - Kovariasiya matrisinin məxsusi ədədlərindən (eigenvalues) PCA Explained Variance Ratio hesablamaq
+        effort_hours: [6, 12]
+        practical_task: "Mini-Project: İki model versiyasının (A və B) test nəticələri üçün 95% etibarlılıq intervalı və PCA ölçü azaltma analizi skripti yaz."
+        mastery_criteria:
+          - Nadir hadisə üçün müsbət testin real mənasını hesablaya bilirsən
+          - Kiçik seçmədə +0.5% dəqiqlik fərqinin niyə statistik küy ola biləcəyini SE ilə sübut edə bilirsən
+          - Verilmiş eigenvalue siyahısından hədəf variasiya faizi üçün neçə PCA komponenti lazım olduğunu tapırsan
+        lessons:
+          - math-probability-bayes
+          - math-pca-statistics-hypothesis
+
+  # =====================================================================
+  - id: classical-ml
+    code: C
+    title: Classical Machine Learning
+    summary: Problem qoyuluşundan qiymətləndirməyə qədər düzgün ML prosesi (scikit-learn ilə).
+    why: LLM dövründə də tabular data, proqnozlaşdırma və təsnifat məsələlərinin çoxu classical ML ilə daha ucuz və etibarlı həll olunur. Daha vacibi — evaluation, leakage və overfitting anlayışları LLM sistemlərinə də birbaşa keçir.
+    modules:
+      - id: ml-foundations
+        title: ML problem framing, splits və leakage
+        summary: Düzgün sual, baseline, data bölgüsü və data leakage-in qarşısının alınması.
+        status: authored
+        level: foundation
+        prerequisites: [python-engineering]
+        outcomes:
+          - Biznes problemini ML məsələsinə (target, features, metric) çevirmək
+          - Baseline qurmaq və modeli onunla müqayisə etmək
+          - Train/validation/test bölgüsünü və leakage risklərini əsaslandırmaq
+        effort_hours: [6, 10]
+        practical_task: Bir tabular dataset üçün problem tərifi, baseline və leakage-siz Pipeline yaz.
+        mastery_criteria:
+          - Verilmiş ssenaridə leakage mənbəyini tapa bilirsən
+          - Baseline olmadan nəticənin niyə mənasız olduğunu izah edə bilirsən
+        lessons:
+          - ml-framing-baselines-splits
+          - ml-data-leakage
+      - id: ml-evaluation
+        title: Model evaluation
+        summary: Classification və regression metrikləri, threshold seçimi, səhv analizi.
+        status: authored
+        level: foundation
+        prerequisites: [ml-foundations]
+        outcomes:
+          - Confusion matrix-dən precision, recall, F1 hesablamaq
+          - Məsələyə uyğun metrik və threshold seçmək
+          - MAE və RMSE fərqini izah etmək
+        effort_hours: [5, 9]
+        practical_task: Bir classifier üçün müxtəlif threshold-larda precision/recall cədvəli qur və biznes qərarını əsaslandır.
+        mastery_criteria:
+          - Imbalanced data-da accuracy-nin niyə aldadıcı olduğunu rəqəmlə göstərə bilirsən
+        lessons:
+          - ml-classification-metrics
+          - ml-regression-metrics
+      - id: ml-generalization
+        title: Overfitting, regularization və cross-validation
+        summary: Modelin yeni dataya ümumiləşməsini ölçmək və yaxşılaşdırmaq.
+        status: authored
+        level: core
+        prerequisites: [ml-evaluation]
+        outcomes:
+          - Train/validation nəticələrindən overfitting/underfitting diaqnozu qoymaq
+          - Regularization və cross-validation-ı düzgün tətbiq etmək
+        effort_hours: [4, 8]
+        practical_task: Bir model üçün complexity dəyişdikcə train/validation skorlarını qrafikə sal və optimal nöqtəni seç.
+        mastery_criteria:
+          - Learning curve-ə baxıb növbəti addımı (daha çox data, sadə model, regularization) əsaslandıra bilirsən
+        lessons:
+          - ml-overfitting-regularization
+      - id: ml-algorithms
+        title: Gradient Boosting, Decision Trees və Unsupervised ML (KMeans & PCA)
+        summary: Qərar ağacları (Gini impurity), Random Forest vs Gradient Boosting (qalıqların ardıcıl öyrənilməsi), KMeans klasterləşmə və miqyaslama.
+        status: authored
+        level: core
+        prerequisites: [ml-evaluation]
+        outcomes:
+          - Decision Tree bölünməsini Gini Impurity azalması ilə əl ilə və kodla hesablamaq
+          - Random Forest (bagging) ilə Gradient Boosting (ardıcıl pseudo-residual öyrənməsi) arasındakı riyazi və mühəndislik fərqini izah etmək
+          - KMeans addımlarını (assign & update) icra etmək və miqyaslamanın (StandardScaler) niyə məcburi olduğunu göstərmək
+        effort_hours: [10, 18]
+        practical_task: "Mini-Project: Eyni tabular dataset-də Baseline, Logistic Regression, Random Forest və Gradient Boosting modellərini eyni Pipeline və CV ilə müqayisə et; KMeans ilə müştəri seqmentlərini təhlil et."
+        mastery_criteria:
+          - Gradient Boosting-də hər yeni ağacın nəyi proqnozlaşdırdığını və learning rate shrinkage-in rolunu rəqəmlə izah edə bilirsən
+          - Miqyaslanmamış datada KMeans və PCA-nın niyə yanlış nəticə verdiyini sübut edə bilirsən
+        lessons:
+          - ml-trees-gradient-boosting
+          - ml-kmeans-pca-unsupervised
+
+  # =====================================================================
+  - id: deep-learning
+    code: D
+    title: Deep Learning
+    summary: Neural network-lərin içində nə baş verir — əl ilə hesablamadan PyTorch training loop-a qədər.
+    why: Transformers və LLM-lər də eyni prinsiplərlə öyrənir — forward pass, loss, backprop, optimizer. Bu mexanizmi bilmək fine-tuning, debugging və model seçimi qərarlarını başa düşülən edir.
+    modules:
+      - id: neural-network-basics
+        title: Neural network basics
+        summary: Neuron, activation, loss, backpropagation və PyTorch training loop.
+        status: authored
+        level: core
+        prerequisites: [linear-algebra, calculus-optimization]
+        outcomes:
+          - Kiçik şəbəkə üçün forward pass və gradient-i əl ilə hesablamaq
+          - PyTorch-da düzgün training loop yazmaq (zero_grad, backward, step, eval mode)
+          - Tensor shape xətalarını tapmaq
+        effort_hours: [8, 14]
+        practical_task: PyTorch ilə sadə MLP yaz, train/validation loss-u izlə, overfitting-i müşahidə et.
+        mastery_criteria:
+          - Training loop-dakı ümumi bug-ları (zero_grad yoxdur, eval mode yoxdur) tapa bilirsən
+        lessons:
+          - dl-neuron-forward-backprop
+          - dl-pytorch-training-loop
+      - id: dl-architectures
+        title: Transformers, Self-Attention və Advanced PyTorch Training
+        summary: Scaled dot-product self-attention, causal masking, multi-head attention, transfer learning, LR warmup/cosine decay və gradient clipping.
+        status: authored
+        level: advanced
+        prerequisites: [neural-network-basics]
+        outcomes:
+          - "Scaled Dot-Product Attention düsturunu ($\\text{softmax}(QK^T / \\sqrt{d_k})V$) kiçik matrislərlə əl ilə və kodla hesablamaq"
+          - Causal mask-ın gələcək token sızmasını necə blokladığını izah etmək
+          - Transfer learning (backbone freezing), gradient norm clipping, warmup + cosine LR və early stopping tətbiq etmək
+        effort_hours: [10, 20]
+        practical_task: "Mini-Project: Pure Python və PyTorch-da causal self-attention bloku yaz; gradient clipping və early stopping olan təlim dövrü ilə kiçik modeli öyrət."
+        mastery_criteria:
+          - "$\\sqrt{d_k}$ bölməsinin softmax doyma (vanishing gradient) problemini necə həll etdiyini izah edə bilirsən"
+          - Partlayan gradientləri (exploding gradients) L2 norm clipping ilə cilovlayan funksiya yaza bilirsən
+        lessons:
+          - dl-attention-transformers
+          - dl-advanced-training-transfer
+
+  # =====================================================================
+  - id: llm-engineering
+    code: E
+    title: Modern AI & LLM Engineering
+    summary: LLM-ləri etibarlı proqram komponentinə çevirmək — structured output, RAG, tools, evaluation.
+    why: LLM API-ni çağırmaq asandır; onu ölçülə bilən keyfiyyətlə, təhlükəsiz və idarə olunan xərclə istifadə etmək mühəndislikdir. Qeyd — LLM API istifadə etmək model train etmək deyil.
+    modules:
+      - id: llm-foundations
+        title: LLM foundations
+        summary: Tokens, context window, prompt as specification, structured output və validation.
+        status: authored
+        level: foundation
+        prerequisites: [python-engineering, http-apis]
+        outcomes:
+          - Token sayının xərc, latency və context limitinə təsirini hesablamaq
+          - Promptu ölçülə bilən spesifikasiya kimi yazmaq
+          - Model cavabını schema ilə validasiya edib retry etmək
+        effort_hours: [5, 9]
+        practical_task: Sərbəst mətndən strukturlaşdırılmış JSON çıxaran və onu validasiya edən funksiya yaz.
+        mastery_criteria:
+          - Model cavabına niyə "etibar etməyib yoxlamaq" lazım olduğunu kodla göstərə bilirsən
+        lessons:
+          - llm-tokens-structured-output
+      - id: retrieval-rag
+        title: Embeddings, retrieval və RAG
+        summary: Semantic search, chunking, RAG pipeline, citations və evaluation.
+        status: authored
+        level: core
+        prerequisites: [llm-foundations, linear-algebra]
+        outcomes:
+          - Embedding-lərlə semantic search qurmaq
+          - Chunking strategiyasını əsaslandırmaq
+          - RAG sistemini retrieval və generation səviyyəsində qiymətləndirmək
+        effort_hours: [8, 14]
+        practical_task: Kiçik sənəd toplusu üçün retrieval + citation edən RAG prototipi və 20 sualdan ibarət eval set qur.
+        mastery_criteria:
+          - Pis RAG cavabının retrieval, yoxsa generation problemi olduğunu diaqnoz edə bilirsən
+        lessons:
+          - llm-embeddings-semantic-search
+          - llm-rag-pipeline-evaluation
+      - id: tools-agents
+        title: Tool calling, workflows və agents
+        summary: Modelin alətlərdən istifadəsi, deterministik workflow vs agent, permissions və human approval.
+        status: authored
+        level: core
+        prerequisites: [llm-foundations]
+        outcomes:
+          - Tool calling dövrünü (model → tool call → execution → nəticə → model) izah etmək
+          - Agent əvəzinə deterministik workflow-u nə vaxt seçməyi bilmək
+          - Təhlükəli əməliyyatlar üçün permission və human approval dizayn etmək
+        effort_hours: [5, 10]
+        practical_task: İki tool-lu (read-only və write) workflow yaz; write əməliyyatı üçün təsdiq tələb et və hər şeyi log et.
+        mastery_criteria:
+          - Verilmiş agent dizaynında təhlükəsizlik boşluğunu tapa bilirsən
+        lessons:
+          - llm-tool-calling-workflows
+      - id: llm-ops-safety
+        title: AI Model Fine-Tuning (LoRA), Evaluation at Scale, Security və Reliability
+        summary: Prompting vs RAG vs Fine-Tuning qərar matrisi, LoRA aşağı-ranklı adaptasiya riyaziyyatı, reqressiya eval qapıları, prompt injection müdafiəsi və keşləmə.
+        status: authored
+        level: advanced
+        prerequisites: [retrieval-rag, tools-agents]
+        outcomes:
+          - Prompting, RAG və Fine-Tuning (SFT / LoRA) arasında mühəndislik və iqtisadi əsaslarla seçim etmək
+          - "LoRA-nın $\\Delta W = (\\alpha / r) B A$ riyaziyyatını və öyrədilən parametr/VRAM qənaətini hesablamaq"
+          - Regression eval gate, LLM-as-judge kalibrasiyası və dolayısı (indirect) prompt injection müdafiəsi qurmaq
+        effort_hours: [10, 18]
+        practical_task: "Mini-Project: 50 suallıq Golden Eval dəsti üzərində Prompting vs LoRA müqayisəsi və avtomatik reqressiya + təhlükəsizlik qapısı qur."
+        mastery_criteria:
+          - Verilmiş d_in, d_out və rank r üçün LoRA parametr azalma faizini dəqiq hesablaya bilirsən
+          - Prompt və ya model dəyişikliyinin keyfiyyət və p95 gecikmə reqressiyası yaratdığını avtomatik qapı ilə tuta bilirsən
+        lessons:
+          - llm-finetuning-lora-vs-rag
+          - llm-eval-security-reliability
+
+  # =====================================================================
+  - id: production
+    code: F
+    title: Production AI / MLOps
+    summary: Modeli və ya LLM sistemini real istifadəçilərə etibarlı şəkildə çatdırmaq.
+    why: Notebook-da işləyən model hələ məhsul deyil. Production — validation, reproducibility, monitoring, secrets və xərc nəzarəti deməkdir.
+    modules:
+      - id: serving-deployment
+        title: Model serving və deployment
+        summary: FastAPI ilə model serving, input validation, Docker, config və secrets.
+        status: authored
+        level: core
+        prerequisites: [python-engineering, http-apis]
+        outcomes:
+          - Modeli validasiyalı FastAPI endpoint-i arxasında xidmət etmək
+          - Reproducible Docker image qurmaq
+          - Secrets-i koddan ayırmaq
+        effort_hours: [6, 12]
+        practical_task: Train olunmuş kiçik modeli FastAPI + Docker ilə xidmət et, testlər və /health əlavə et.
+        mastery_criteria:
+          - Endpoint-in səhv inputa necə reaksiya verdiyini testlə sübut edə bilirsən
+        lessons:
+          - prod-fastapi-model-serving
+          - prod-docker-config-secrets
+      - id: observability
+        title: Logging və monitoring
+        summary: Structured logs, latency/error/cost metrikləri, data drift.
+        status: authored
+        level: core
+        prerequisites: [serving-deployment]
+        outcomes:
+          - Hər sorğu üçün faydalı structured log yazmaq
+          - Latency percentiles və error rate-i hesablamaq
+          - Data drift-i sadə statistikalarla aşkarlamaq
+        effort_hours: [4, 8]
+        practical_task: Serving API-nə structured logging və p50/p95 latency hesabatı əlavə et.
+        mastery_criteria:
+          - Ortalama latency-nin niyə kifayət etmədiyini izah edə bilirsən
+        lessons:
+          - prod-logging-monitoring
+      - id: cicd-versioning
+        title: CI/CD, Data/Model Versioning, Canary Rollouts və Reliability
+        summary: Avtomatik keyfiyyət qapıları, Artifact Triad (code + data + weights) versiyalanması, canary trafik bölgüsü və circuit breaker.
+        status: authored
+        level: advanced
+        prerequisites: [serving-deployment, observability]
+        outcomes:
+          - Hər commit-də sxem, unit test və golden eval qapılarını işə salan CI/CD axını dizayn etmək
+          - Kod, dataset və model çəkilərini SHA-256 ilə əlaqələndirib tam izlənilə bilənlik (lineage) qurmaq
+          - Canary rollout sağlamlıq yoxlaması (promote vs rollback) və Circuit Breaker vəziyyət maşını yazmaq
+        effort_hours: [6, 12]
+        practical_task: "Mini-Project: Model serving API-n üçün CI keyfiyyət qapısı, canary rollback qərarvericisi və circuit breaker qoruyucusu yaz."
+        mastery_criteria:
+          - Canary versiyasında error rate və ya p95 latency həddi aşdıqda avtomatik rollback qərarı verən məntiqi yaza bilirsən
+          - Circuit Breaker-in CLOSED, OPEN və HALF_OPEN keçidlərini dəqiq proqnozlaşdırırsan
+        lessons:
+          - prod-cicd-versioning-reliability
+
+  # =====================================================================
+  - id: specializations
+    code: G
+    title: Specializations
+    optional: true
+    summary: Maraq və layihələrə görə seçilən istiqamətlər. Bünövrə track-lərindən sonra.
+    why: Hər AI Engineer hər sahəni bilmək məcburiyyətində deyil. Robotics, drones və computer vision kimi maraqlarını burada dərinləşdirəcəksən.
+    modules:
+      - id: computer-vision
+        title: CNN və Computer Vision Engineering
+        summary: 2D konvolyusiya riyaziyyatı, stride/padding ölçü düsturu, object detection bounding box-ları, IoU və Non-Maximum Suppression.
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [neural-network-basics]
+        outcomes:
+          - "Konvolyusiya çıxış ölçüsünü ($\\lfloor (W - K + 2P)/S \\rfloor + 1$) və parametr sayını hesablamaq"
+          - "İki bounding box üçün Intersection over Union (IoU) göstəricisini sıfırdan hesablamaq"
+          - Non-Maximum Suppression (NMS) və mAP-ın iş prinsipini izah etmək
+        effort_hours: [12, 24]
+        practical_task: "Mini-Project: 2D konvolyusiya ölçü yoxlayıcısı və bounding box IoU + NMS filtri yaz, video/şəkil deteksiyalarını qiymətləndir."
+        mastery_criteria:
+          - Kəsişməyən və qismən kəsişən qutular üçün IoU-nu həm əl ilə, həm kodla səhvsiz hesablayırsan
+        lessons:
+          - spec-cnn-computer-vision
+      - id: robotics-autonomy
+        title: Robotics, Autonomous Systems və Control Loops
+        summary: Perception → state estimation (EMA/Kalman) → PID control dövrü, aktuatorda doyma (saturation) və təhlükəsiz dayanma (failsafe).
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [neural-network-basics]
+        outcomes:
+          - Küylü sensor ölçmələrini EMA / 1D Kalman filtri ilə hamarlamaq və kadr itkisində failsafe tətbiq etmək
+          - "Diskret PID tənzimləyicisini ($K_p e + K_i \\int e + K_d de/dt$) anti-windup və çıxış sərhədi ilə kodlamaq"
+        effort_hours: [14, 28]
+        practical_task: "Mini-Project: Simulyasiyada hədəfi izləyən dron/robot üçün EMA state estimator + sərhədlənmiş PID controller dövrü qur."
+        mastery_criteria:
+          - Verilmiş setpoint, ölçmə və dt üçün PID çıxışını əl ilə və kodla hesablaya bilirsən
+          - Sensor siqnalı kəsildikdə robotun niyə son komandada ilişib qalmamalı olduğunu (failsafe) izah edə bilirsən
+        lessons:
+          - spec-robotics-perception-control
+      - id: nlp-speech
+        title: Multilingual NLP, Tokenization Fertility və Speech (ASR)
+        summary: Aqqlütinativ dillərdə (Azərbaycan dili) subword tokenization yükü, ASR arxitekturası və Word Error Rate (WER / Levenshtein).
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [retrieval-rag]
+        outcomes:
+          - Tokenizer fertility (söz başına token sayı) göstəricisinin xərc və kontekst pəncərəsinə təsirini ölçmək
+          - "Söz səviyyəli Levenshtein məsafəsi ilə ASR Word Error Rate ($\\text{WER} = (S + D + I) / N$) hesablamaq"
+        effort_hours: [10, 20]
+        practical_task: "Mini-Project: Azərbaycan və İngilis mətnləri üçün tokenizer fertility müqayisəsi və ASR transkripsiya WER qiymətləndiricisi yaz."
+        mastery_criteria:
+          - İstənilən istinad və hipotez cümləsi üçün əvəzləmə (S), silmə (D), əlavə (I) və WER-i dəqiq hesablayırsan
+        lessons:
+          - spec-nlp-speech-wer
+      - id: recsys-timeseries
+        title: Recommendation Systems və Time Series Forecasting
+        summary: Zaman sıralarında gələcək sızmasının qarşısının alınması, Walk-Forward validation, Seasonal Naive baseline və Collaborative Filtering.
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [ml-generalization]
+        outcomes:
+          - Zaman sıralarında random split əvəzinə Walk-Forward (Expanding Window) bölgüsü qurmaq
+          - Seasonal Naive baseline qurub mürəkkəb modeli onunla müqayisə etmək
+          - İstifadəçi-məhsul matris faktorizasiyası (dot product) və cold-start problemini izah etmək
+        effort_hours: [10, 20]
+        practical_task: "Mini-Project: Gündəlik tələbat datası üçün Walk-Forward validator və Seasonal Naive baseline müqayisə modulu yaz."
+        mastery_criteria:
+          - Time series-də KFold(shuffle=True) istifadəsinin niyə saxta yüksək R² verdiyini izah edə bilirsən
+        lessons:
+          - spec-recsys-timeseries-forecasting
+      - id: edge-ai-security
+        title: Edge AI Quantization və Adversarial Security
+        summary: Simmetrik INT8 kvantizasiya riyaziyyatı, yaddaş/gecikmə büdcəsi, dekvantizasiya xətası və fiziki/rəqəmsal adversarial hücumlar.
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [neural-network-basics]
+        outcomes:
+          - "FP32 çəkilərini simmetrik INT8 aralığına ($[-127, 127]$) kvantizasiya və dekvantizasiya etmək"
+          - Kvantizasiya sonrası 4x yaddaş qənaətini və RMSE təhrifini hesablamaq
+          - Adversarial həmlələrin (FGSM / fiziki yamaq) təhlükəsizlik kritik sistemlərə təsirini qiymətləndirmək
+        effort_hours: [10, 20]
+        practical_task: "Mini-Project: Model çəki matrisini INT8-ə sıxan və outlier çəkilərin yaratdığı təhrifi ölçən kvantizasiya analizatoru yaz."
+        mastery_criteria:
+          - Verilmiş FP32 vektor üçün scale faktorunu, INT8 massivini və bərpa olunmuş dəyərləri əl ilə və kodla tapırsan
+        lessons:
+          - spec-edge-ai-quantization-security
+      - id: distributed-data-engineering
+        title: Distributed Systems, Data Engineering və Inference Optimization
+        summary: Sütun əsaslı Parquet + DuckDB analitikası, DDP vs FSDP (ZeRO) çox-GPU təlimi, KV-Cache yaddaş düsturu (GQA) və vLLM Continuous Batching + PagedAttention.
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [cicd-versioning, dl-architectures]
+        outcomes:
+          - Columnar Parquet (column pruning + predicate pushdown) və DuckDB ilə böyük analitik datasetləri səmərəli emal etmək
+          - DDP ilə FSDP/ZeRO sharding arasındakı VRAM və şəbəkə fərqlərini izah etmək
+          - "KV-Cache yaddaş büdcəsini ($2 \\cdot L \\cdot n_{\\text{kv}} \\cdot d_{\\text{head}} \\cdot S \\cdot B \\cdot b$) və GPU-ya sığan maksimum batch ölçüsünü dəqiq hesablamaq"
+        effort_hours: [16, 32]
+        practical_task: "Mini-Project: GPU VRAM & KV-Cache tutum kalkulyatoru və DuckDB + Parquet üzərində p95 latency analitik pipeline-ı hazırla."
+        mastery_criteria:
+          - "Verilmiş model parametrləri, kontekst uzunluğu və GPU VRAM-a görə KV-Cache ölçüsünü və maksimum paralel batch sayını hesablayırsan"
+        lessons:
+          - spec-distributed-data-inference-opt
+        planned_topics: []
+      - id: multimodal-research-reading
+        title: Multimodal AI və Elmi Məqalə Oxuma (Research Paper Reading)
+        summary: Contrastive Learning (CLIP / simmetrik InfoNCE), Vision-Language modellər (ViT visual tokenləri) və arXiv məqalələrini 3-keçidli metod + ablasion cədvəli ilə tənqidi təhlil etmək.
+        status: authored
+        level: specialization
+        optional: true
+        prerequisites: [dl-architectures, computer-vision]
+        outcomes:
+          - CLIP simmetrik InfoNCE itkisini L2-normallaşdırılmış embedding-lərlə sıfırdan hesablamaq və kodlamaq
+          - ViT patch ölçüsünə əsasən VLM visual token xərcini hesablamaq
+          - Yeni AI məqaləsinin ablasion cədvəlini, compute büdcəsini və benchmark məhdudiyyətlərini tənqidi təhlil etmək
+        effort_hours: [12, 24]
+        practical_task: "Mini-Project: Simmetrik CLIP loss implementasiyası və seçilmiş bir arXiv məqaləsi üçün 3-keçidli tənqidi mühəndislik icmalı hazırla."
+        mastery_criteria:
+          - "Bir elmi məqalənin nəticələrinin həqiqi metod töhfəsi, yoxsa data/compute artımı olduğunu ablasion cədvəlindən sübut edirsən"
+        lessons:
+          - spec-multimodal-research-papers
+        planned_topics: []
+
+  # =====================================================================
+  - id: product
+    code: H
+    title: Product & Startup Engineering
+    summary: Real istifadəçi problemi tapmaq, MVP qurmaq, xərci və dəyəri ölçmək.
+    why: Texniki cəhətdən gözəl, amma heç kimin ehtiyacı olmayan sistem uğursuzdur. AI məhsullarında inference xərci və etibarlılıq birbaşa biznes modelinə təsir edir.
+    modules:
+      - id: product-discovery-mvp
+        title: Problem discovery, MVP və unit economics
+        summary: Konkret problem, qərəzsiz müsahibələr, ölçülə bilən MVP və inference xərci.
+        status: authored
+        level: foundation
+        prerequisites: []
+        outcomes:
+          - Problemi konkret istifadəçi və ölçülə bilən nəticə ilə təsvir etmək
+          - Qərəzsiz müsahibə sualları yazmaq
+          - Bir AI xüsusiyyətinin istifadəçi başına aylıq xərcini hesablamaq
+        effort_hours: [4, 8]
+        practical_task: Bir AI ideyası üçün 5 müsahibə sualı, MVP scope və aylıq xərc hesablaması hazırla.
+        mastery_criteria:
+          - "'Gələcəkdə alardınızmı?' tipli sualın niyə zəif olduğunu izah edə bilirsən"
+        lessons:
+          - product-problem-mvp-costs
+      - id: product-validation
+        title: Willingness to Pay, Build vs Buy vs API və Iteration
+        summary: Davranış əsaslı ödəmə istəyi testləri, kommersiya API vs Self-Hosted GPU kəsişmə nöqtəsi (breakeven), məxfilik/hüquqi yoxlama və kohort iterasiyası.
+        status: authored
+        level: core
+        prerequisites: [product-discovery-mvp]
+        outcomes:
+          - Yalançı təriflərlə (vanity metrics) real ödəmə öhdəliyini (paid pilot, LOI, depozit) ayırd etmək
+          - Kommersiya LLM API-si ilə öz GPU serverini (self-hosting) saxlamaq arasındakı aylıq token kəsişmə həddini (breakeven) hesablamaq
+          - Production-a çıxmazdan əvvəl PII, data retention və insan nəzarəti (human-in-the-loop) yoxlamasını aparmaq
+        effort_hours: [5, 10]
+        practical_task: "Mini-Project: Startapın üçün API vs Self-Host GPU iqtisadi kəsişmə kalkulyatoru və məxfilik/təhlükəsizlik buraxılış cədvəli qur."
+        mastery_criteria:
+          - Verilmiş GPU saatlıq qiyməti və API token qiyməti üçün hansı həcmdən sonra self-hosting-in sərfəli olduğunu rəqəmlə hesablayırsan
+        lessons:
+          - product-validation-iteration

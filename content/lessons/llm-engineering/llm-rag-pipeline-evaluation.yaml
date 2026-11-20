@@ -1,0 +1,342 @@
+id: llm-rag-pipeline-evaluation
+track: llm-engineering
+module: retrieval-rag
+title: "RAG Pipeline Arxitekturası, Chunking və Axtarış/Generasiya Qiymətləndirilməsi"
+summary: "Tam RAG (Retrieval-Augmented Generation) zəncirini — ingestion, overlap ilə chunking, retrieval, reranking və sitatlı generasiyanı — qurmağı, həmçinin retrieval (Recall@k, MRR) ilə generasiyanı (groundedness) ayrı-ayrılıqda ölçməyi öyrənəcəksən."
+level: core
+estimated_minutes: [55, 75]
+prerequisites: [llm-embeddings-semantic-search]
+next: llm-tool-calling-workflows
+skills: [llm-rag, llm-evaluation]
+objectives:
+  - "RAG arxitekturasının mərhələlərini (ingestion, chunking, indexing, retrieval, reranking, grounded generation) dizayn etmək"
+  - "Chunk ölçüsü və overlap seçimindəki mühəndislik trade-off-larını təhlil etmək"
+  - "Retrieval keyfiyyətini (Recall@k, MRR) generasiya keyfiyyətindən (faithfulness, citation accuracy) ayrı qiymətləndirmək"
+  - "Prompting, RAG və Fine-tuning arasında düzgün qərar matrisini tətbiq etmək"
+why_it_matters: |
+  Bir çox komanda RAG sistemi quranda sadəcə PDF-ləri təsadüfi kəsib vector DB-yə atır və bir neçə sualla əl ilə yoxlayıb *"işləyir"* deyir. İki həftə sonra istifadəçilər modelin uydurma rəqəmlər (hallucination) dediyini bildirəndə komanda problemi harada axtaracağını bilmir: düzgün sənəd tapılmayıb (retrieval xətası), yoxsa model tapılan sənədi səhv oxuyub (generation xətası)?
+
+  Retrieval və generasiyanı ayrı metriklərlə (`Recall@k` vs `Faithfulness`) ölçəndə isə diaqnoz dəqiq olur: hansı mərhələnin sındığını rəqəmlə görür və yalnız həmin hissəni təkmilləşdirirsən.
+terms:
+  - term: RAG (Retrieval-Augmented Generation)
+    definition: "İstifadəçi sorğusuna cavab verməzdən əvvəl xarici bilik bazasından əlaqəli sənəd parçalarını tapıb prompt kontekstinə əlavə edən arxitektura."
+  - term: Chunking və Overlap
+    definition: "Uzun sənədlərin kiçik mətn parçalarına (chunks) bölünməsi; overlap isə cümlə və fikrin sərhəddə kəsilməməsi üçün qonşu parçalar arasında paylaşılan ortaq hissədir."
+  - term: Reranker (Cross-Encoder)
+    definition: "İlkin sürətli axtarışın gətirdiyi top-N namizədi sorğu ilə birlikdə daha dərindən qiymətləndirib ən dəqiq top-k sırasına düzən ikinci mərhələ modeli."
+  - term: Recall@k
+    definition: "Axtarışın qaytardığı ilk $k$ nəticə içərisində həqiqətən uyğun (relevant) sənədlərin neçə faizinin tapıldığını göstərən metrik."
+  - term: MRR (Mean Reciprocal Rank)
+    definition: "İlk düzgün sənədin neçənci sırada ($r$) çıxdığını ölçən metrik ($1/r$ ortalaması); düzgün sənədin 1-ci sırada çıxmasını mükafatlandırır."
+  - term: Groundedness (Faithfulness)
+    definition: "Modelin verdiyi cavabdakı hər bir iddianın yalnız təqdim olunmuş kontekst parçalarına əsaslanması və kontekstdən kənar uydurma olmaması."
+sections:
+  - id: rag-architecture-eval
+    kind: explanation
+    title: "Tam RAG Pipeline, Chunking və İkiqat Qiymətləndirmə"
+    body: |
+      ### 1. RAG Pipeline-ın iki axını: Offline Ingestion və Online Query
+      RAG sistemi iki müstəqil zəncirdən ibarətdir:
+      1. **Offline Ingestion (İndeksləmə):** Xam sənədlərin təmizlənməsi → **Chunking** (overlap ilə parçalara bölmə) → Embedding modelindən keçirmə → Metadata (mənbə ID, tarix, icazə) ilə birlikdə indeksə yazma.
+      2. **Online Query (Sorğu vaxtı):** İstifadəçi sualı → Hybrid Retrieval (top-$N$, məs. 20 namizəd) → **Reranking** (ən uyğun top-$k$, məs. 4 parça) → Prompt-a mənbə ID-ləri ilə yerləşdirmə → **Grounded Generation** (sitatlarla cavab və ya məlumat yoxdursa imtina).
+
+      ### 2. Chunking və Overlap riyaziyyatı
+      Mətni $L$ uzunluqlu parçalara (`chunk_size`) və $O$ uzunluqlu üst-üstə düşməyə (`overlap`, burada $0 \le O < L$) böldükdə hər növbəti parça əvvəlkindən bu addımla başlayır:
+
+      $$\text{step} = L - O$$
+
+      - **Chunk çox kiçikdirsə** (məs. 50 simvol): Cümlə kontekstdən qopur (*"Bu məbləğ 14 gün ərzində qaytarılır"* — hansı məbləğ?).
+      - **Chunk çox böyükdürsə** (məs. 5000 söz): Embedding vektoru çoxlu mövzunun ortalamasına çevrilir (axtarış dəqiqliyi düşür) və prompta lazımsız səs-küy dolur.
+      - **Overlap ($O$):** Adətən chunk ölçüsünün 10%–20%-i qədər seçilir ki, parçanın sərhədinə düşən fikir yarıda kəsilməsin.
+
+      ### 3. Niyə Retrieval və Generation AYRI qiymətləndirilməlidir?
+      RAG-da son cavab səhvdirsə, iki fərqli günahkar ola bilər:
+
+      | Mərhələ | Sual | Əsas Metriklər |
+      |---|---|---|
+      | **1. Retrieval** | Lazım olan sənəd parçası tapılıb prompta düşdümü? | $\text{Recall@}k = \frac{\lvert R_k \cap G \rvert}{\lvert G \rvert}$, $\text{MRR} = \frac{1}{\text{rank}_1}$ |
+      | **2. Generation** | Model verilən parçaya sadiq qaldımı və düzgün sitat gətirdimi? | **Faithfulness / Groundedness**, **Citation Accuracy**, **Correct Refusal** |
+
+      Burada $R_k$ axtarışın qaytardığı ilk $k$ sənəd, $G$ isə həqiqi uyğun (relevant / golden) sənədlər çoxluğudur. Əgər $\text{Recall@}k = 0$-dırsa, ən güclü LLM belə düzgün cavab verə bilməz ("garbage in, garbage out").
+
+      ### 4. Prompting vs RAG vs Fine-tuning qərar matrisi
+      - **Prompting (Few-shot):** Tapşırıq ümumidir, əlavə xarici bazaya ehtiyac yoxdur, qayda və nümunələr prompta yerləşir.
+      - **RAG:** Məlumat tez-tez yenilənir (qiymətlər, stok, daxili sənədlər), cavabda **mənbə sitatı** tələb olunur və uydurmanın qarşısı alınmalıdır.
+      - **Fine-tuning:** Modelə yeni fakt öyrətmək üçün **deyil**; modelin danışma üslubunu, xüsusi formatını və ya dar sahə davranışını sabitləşdirmək üçündür (və çox vaxt RAG ilə birlikdə işlədilir).
+  - id: open-book-exam-analogy
+    kind: analogy
+    title: "Mental model: açıq kitab imtahanı"
+    body: |
+      - **Fine-tuning = İmtahana aylarla hazırlaşıb əzbərləmək:** Tələbə kitabı bağlayıb yaddaşından cavab verir. Dünən dəyişən qanunu bilə bilməz və bəzən əmin səslə yanlış fakt uydurur.
+      - **RAG = Açıq kitab imtahanı:** Tələbəyə sual verilir, o əvvəlcə kitabın mündəricatından lazımi səhifəni tapır (**Retrieval**), sonra həmin səhifəni oxuyub *"Səhifə 42-yə əsasən..."* deyə cavab yazır (**Grounded Generation**).
+      - **Ayrı qiymətləndirmə:** Əgər tələbə səhv cavab yazıbsa, müəllim yoxlayır: tələbə səhv səhifəni açıb (**aşağı Recall@k**), yoxsa düzgün səhifəni açıb amma oradakı cümləni təhrif edib (**aşağı Faithfulness**)?
+  - id: rag-pipeline-diagram
+    kind: diagram
+    title: "RAG axını və qiymətləndirmə nöqtələri"
+    body: |
+      ```mermaid
+      flowchart LR
+        D["Sənədlər"] --> C["Chunking (size, overlap)"]
+        C --> I["Hybrid İndeks"]
+        Q["Sual"] --> R["Retrieval + Rerank"]
+        I --> R
+        R --> E1{{"Eval 1: Recall@k / MRR"}}
+        R --> G["LLM + Grounded Prompt"]
+        G --> A["Sitatlı Cavab / İmtina"]
+        A --> E2{{"Eval 2: Faithfulness"}}
+      ```
+
+      Sxemdə göründüyü kimi, `Eval 1` axtarış çıxışını, `Eval 2` isə LLM-in kontekstə sadiqliyini yoxlayır.
+  - id: worked-chunk-recall
+    kind: worked_example
+    title: "Chunking addımları və Recall@k hesabı"
+    body: |
+      **1. Chunking nümunəsi:**
+      Mətn: `"ABCDEFGHIJ"` (uzunluq $10$ simvol), `chunk_size = 4`, `overlap = 1`.
+      - Addım: $\text{step} = 4 - 1 = 3$.
+      - İndeks `0`: `"ABCD"` (`text[0:4]`)
+      - İndeks `3`: `"DEFG"` (`text[3:7]`) — `"D"` hərfi overlap olaraq hər iki parçada var!
+      - İndeks `6`: `"GHIJ"` (`text[6:10]`)
+      - İndeks `9`: `"J"` (`text[9:13]`)
+
+      **2. Recall@k nümunəsi:**
+      Sual üçün həqiqi cavabı ehtiva edən sənədlər (ground truth): `relevant_ids = {"doc_2", "doc_7"}` ($\lvert G \rvert = 2$).
+      Axtarış sisteminin qaytardığı sıralı siyahı: `retrieved = ["doc_5", "doc_2", "doc_9", "doc_7", "doc_1"]`.
+      - **$\text{Recall@}2$:** İlk 2 nəticə `["doc_5", "doc_2"]`. Kəsişmə: `{"doc_2"}` (1 ədəd).
+
+        $$\text{Recall@}2 = \frac{1}{2} = 0.50$$
+
+      - **$\text{Recall@}4$:** İlk 4 nəticə `["doc_5", "doc_2", "doc_9", "doc_7"]`. Kəsişmə: `{"doc_2", "doc_7"}` (2 ədəd).
+
+        $$\text{Recall@}4 = \frac{2}{2} = 1.00$$
+
+      - **Reciprocal Rank (RR):** İlk düzgün sənəd (`doc_2`) 2-ci sıradadır → $\text{RR} = \frac{1}{2} = 0.50$.
+  - id: code-chunk-recall
+    kind: code
+    title: "Kod: Overlap ilə Chunking və Recall@k"
+    body: |
+      ```python
+      def chunk_text(text: str, chunk_size: int, overlap: int = 0) -> list[str]:
+          """Mətni chunk_size uzunluqlu və overlap üst-üstə düşməli parçalara bölür."""
+          if chunk_size <= 0:
+              raise ValueError("chunk_size must be positive")
+          if overlap < 0 or overlap >= chunk_size:
+              raise ValueError("overlap must satisfy 0 <= overlap < chunk_size")
+          if not text:
+              return []
+
+          step = chunk_size - overlap
+          chunks: list[str] = []
+          for start in range(0, len(text), step):
+              piece = text[start : start + chunk_size]
+              chunks.append(piece)
+              if start + chunk_size >= len(text):
+                  break
+          return chunks
+
+
+      def recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+          """İlk k axtarış nəticəsi üzrə Recall@k metrikasını hesablayır."""
+          if k <= 0 or not relevant_ids:
+              return 0.0
+          top_k = set(retrieved_ids[:k])
+          hits = len(top_k & relevant_ids)
+          return hits / len(relevant_ids)
+
+
+      print(chunk_text("ABCDEFGHIJ", chunk_size=4, overlap=1))
+      # ['ABCD', 'DEFG', 'GHIJ']
+      print(recall_at_k(["d5", "d2", "d9", "d7"], {"d2", "d7"}, k=2))
+      # 0.5
+      ```
+
+      Diqqət et:
+      - `overlap >= chunk_size` olarsa `step <= 0` olar və dövr sonsuzluğa düşər! Ona görə ilkin şərt (`0 <= overlap < chunk_size`) açıq yoxlanılır.
+      - `if start + chunk_size >= len(text): break` şərti sonuncu tam parça mətnin sonuna çatdıqda artıq qısa quyruq təkrarının yaranmasının qarşısını alır.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. `overlap >= chunk_size` yoxlamasını unutmaq**
+      Konfiqurasiya faylından səhvən `chunk_size=500, overlap=500` gələndə `step = 0` olur və ingestion skripti sonsuz dövrə düşüb yaddaşı doldurur.
+
+      **2. Modelə "bilmədikdə imtina et" qaydası verməmək**
+      Promptda *"Əgər cavab təqdim olunan kontekstdə yoxdursa, özündən təxmin etmə və 'Verilən sənədlərdə bu barədə məlumat yoxdur' de"* təlimatı olmadıqda, LLM öz ümumi training yaddaşından köhnə və ya uydurma cavab qaytarır.
+
+      **3. Tez-tez dəyişən faktlar üçün Fine-tuning etmək**
+      Məhsul qiymətləri və ya şirkət qaydaları hər həftə dəyişirsə, modeli fine-tune etmək həm çox bahadır, həm də köhnə faktları modelin yaddaşından silməyə zəmanət vermir. Faktlar üçün RAG, üslub və format üçün fine-tuning seçilir.
+
+      **4. Yalnız son cavaba baxıb RAG-ı tənzimləmək**
+      `Recall@k` ölçmədən promptu dəfələrlə dəyişmək vaxt itkisidir — əgər doğru chunk heç prompta gəlmirsə, heç bir prompt mühəndisliyi kömək etməyəcək.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri və məhdudiyyətlər"
+    body: |
+      - **Kiçik chunk vs Böyük chunk (Parent-Child həlli):** Kiçik chunk (məs. 200 token) axtarış zamanı dəqiq cümləni tapır, amma LLM-ə cavab yazmaq üçün ətraf kontekst çatmır. Yaxşı həll: axtarışı kiçik chunk üzrə aparıb, LLM-ə onun aid olduğu daha geniş paraqrafı (parent chunk) göndərməkdir.
+      - **Top-$k$ sayını artırmaq vs Reranker əlavə etmək:** $k$-nı 3-dən 25-ə qaldırmaq `Recall@k`-nı artırır, amma prompt xərcini, gecikməni və səs-küyü çoxaldır. Daha effektiv yol: sürətli hybrid axtarışla top-20 götürüb, cross-encoder **reranker** ilə ən dəqiq top-4 parçanı LLM-ə ötürməkdir.
+      - **Sitat tələbi (Citations):** LLM-dən hər iddianın yanında `[doc_id]` göstərməsini tələb etmək həm istifadəçiyə yoxlama imkanı verir, həm də post-processing ilə yalançı sitatları avtomatik tutmağa şərait yaradır.
+mastery_criteria:
+  - "Overlap və sərhəd şərtlərini düzgün idarə edən chunk_text funksiyasını və Recall@k metrikasını Python-da yaza bilirsən"
+  - "RAG sistemindəki xətanın retrieval yoxsa generation mərhələsindən qaynaqlandığını metriklərlə diaqnoz edə bilirsən"
+  - "Verilmiş biznes tələbi üçün Prompting, RAG və ya Fine-tuning seçimini əsaslandıra bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-llmrag-recall-calc
+      type: numeric
+      title: "Recall@3 hesabı"
+      prompt: |
+        Bir sual üçün bazada cəmi **4 uyğun (relevant) sənəd** var: `{"d1", "d4", "d7", "d9"}`.
+        Axtarış sistemi bu sıralı siyahını qaytarıb: `["d4", "d2", "d9", "d1", "d8"]`.
+
+        **$\text{Recall@}3$** dəyəri neçədir?
+      skills: [llm-evaluation, llm-rag]
+      category: ml-metric
+      answer: 0.5
+      tolerance: 0.01
+      hints:
+        - "İlk 3 nəticəyə bax: ['d4', 'd2', 'd9']."
+        - "Bunlardan neçəsi relevant çoxluğundadır ({'d1', 'd4', 'd7', 'd9'})? Həmin sayı ümumi relevant sayına (4) böl."
+      explanation: "İlk 3 nəticə içində 'd4' və 'd9' uyğundur (2 ədəd). Ümumi uyğun sənəd sayı 4 olduğu üçün Recall@3 = 2 / 4 = 0.5."
+    - id: q-llmrag-rag-vs-finetune
+      type: mcq
+      title: "RAG vs Fine-tuning qərarı"
+      prompt: "E-ticarət şirkəti hər saat yenilənən anbar qalığı və qaytarma qaydaları əsasında müştərilərə mənbə linki ilə cavab verən AI köməkçi qurmaq istəyir. Hansı yanaşma seçilməlidir?"
+      skills: [llm-rag]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Hər saat modeli yeni anbar datası üzərində Fine-tune etmək"
+          feedback: "Xeyr — hər saat fine-tuning həm astronomik xərcdir, həm də dəqiq stok rəqəmlərinə və mənbə sitatına zəmanət vermir."
+        - id: b
+          text: "Qaydalar üçün RAG + anbar qalığı üçün canlı baza/API axtarışı və mənbə sitatlı grounded prompt"
+          feedback: "Doğrudur. Tez-tez dəyişən faktlar və mənbə sitatı tələbi birbaşa RAG və retrieval istifadəsini tələb edir."
+        - id: c
+          text: "Heç bir məlumat vermədən yalnız baza LLM-dən istifadə etmək"
+          feedback: "Baza LLM şirkətin daxili anbar qalığını bilə bilməz."
+      answer: b
+      explanation: "Dinamik yenilənən məlumatlar, uydurmanın qarşısının alınması və mənbə sitatı tələb olunduqda doğru arxitektura RAG-dır."
+    - id: q-llmrag-diagnose-stage
+      type: mcq
+      title: "RAG xətasının diaqnozu"
+      prompt: "Qiymətləndirmə zamanı görürsən ki, sistemin `Recall@5` göstəricisi `0.96`-dır (doğru sənəd demək olar ki, həmişə tapılıb prompta qoyulur), amma son cavablarda uydurma rəqəmlər çıxır. Problem hansı mərhələdədir?"
+      skills: [llm-evaluation, llm-rag]
+      category: debug
+      options:
+        - id: a
+          text: "Embedding modelində — bütün bazanı yenidən indeksləmək lazımdır"
+          feedback: "Recall@5 = 0.96 olduğu üçün axtarış (retrieval) artıq çox yaxşı işləyir."
+        - id: b
+          text: "Generasiya və prompt mərhələsində — model kontekstə sadiq qalmır (aşağı faithfulness) və ya top-5 içindəki səs-küylü parçalar modeli çaşdırır"
+          feedback: "Doğrudur. Axtarış düzgün sənədi gətirirsə, problem reranking/kontekst təmizliyində və ya grounded generation təlimatındadır."
+        - id: c
+          text: "Vector DB-nin disk sürətində"
+          feedback: "Disk sürəti gecikməyə təsir edir, modelin uydurma rəqəm yazmasına yox."
+      answer: b
+      explanation: "Yüksək Recall@k axtarışın işlədiyini sübut edir. Xəta generasiya mərhələsindədir (groundedness təlimatı, sitat tələbi və ya reranker ilə səs-küyün azaldılması lazımdır)."
+exercises:
+  - id: ex-llmrag-chunk-and-recall
+    type: code
+    title: "chunk_text və recall_at_k funksiyalarını yaz"
+    prompt: |
+      RAG pipeline və onun qiymətləndirilməsi üçün iki funksiya yaz:
+
+      1. `chunk_text(text: str, chunk_size: int, overlap: int = 0) -> list[str]`
+         - `chunk_size <= 0` və ya `overlap < 0` və ya `overlap >= chunk_size` olarsa `ValueError` qaldır.
+         - `text` boşdursa (`""`) `[]` qaytar.
+         - Mətni `step = chunk_size - overlap` addımı ilə `chunk_size` uzunluqlu parçalara böl. Əgər cari parça mətnin sonuna çatıbsa (`start + chunk_size >= len(text)`), dövrü dayandır ki, artıq qısa quyruq təkrarı yaranmasın.
+
+      2. `recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float`
+         - `k <= 0` və ya `relevant_ids` boşdursa `0.0` qaytar.
+         - İlk `k` axtarış nəticəsi (`retrieved_ids[:k]`) içində tapılan unikal `relevant_ids` elementlərinin sayını `len(relevant_ids)`-ə bölərək qaytar.
+    skills: [llm-rag, llm-evaluation]
+    category: python
+    difficulty: 2
+    hints:
+      - "`if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size: raise ValueError(...)`"
+      - "`for start in range(0, len(text), chunk_size - overlap):` dövründə `chunks.append(text[start:start + chunk_size])` etdikdən sonra `if start + chunk_size >= len(text): break` yaz."
+      - "`recall_at_k` içində `len(set(retrieved_ids[:k]) & relevant_ids) / len(relevant_ids)` ifadəsindən istifadə et."
+    starter_code: |
+      def chunk_text(text: str, chunk_size: int, overlap: int = 0) -> list[str]:
+          # TODO: parametrləri doğrula və overlap ilə chunk siyahısı qaytar
+          pass
+
+
+      def recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+          # TODO: ilk k nəticə üzrə Recall@k hesabla
+          pass
+    tests:
+      - name: "chunk_text overlap ilə düzgün parçalayır"
+        code: |
+          assert chunk_text("ABCDEFGHIJ", 4, 1) == ["ABCD", "DEFG", "GHIJ"]
+          assert chunk_text("ABCDEF", 4, 2) == ["ABCD", "CDEF"]
+          assert chunk_text("ABC", 5, 1) == ["ABC"]
+          assert chunk_text("", 4, 1) == []
+      - name: "chunk_text səhv parametrlərdə ValueError qaldırır"
+        code: |
+          for cs, ov in [(0, 0), (-3, 0), (4, -1), (4, 4), (4, 5)]:
+              try:
+                  chunk_text("hello", cs, ov)
+                  assert False, f"({cs}, {ov}) üçün ValueError qaldırılmalı idi"
+              except ValueError:
+                  pass
+      - name: "recall_at_k düzgün hesablayır"
+        code: |
+          rel = {"doc1", "doc3", "doc5", "doc7"}
+          ret = ["doc2", "doc3", "doc1", "doc9", "doc5"]
+          assert recall_at_k(ret, rel, k=2) == 0.25
+          assert recall_at_k(ret, rel, k=3) == 0.5
+          assert recall_at_k(ret, rel, k=0) == 0.0
+          assert recall_at_k(ret, set(), k=3) == 0.0
+    solution: |
+      def chunk_text(text: str, chunk_size: int, overlap: int = 0) -> list[str]:
+          if chunk_size <= 0 or overlap < 0 or overlap >= chunk_size:
+              raise ValueError("Invalid chunk_size or overlap")
+          if not text:
+              return []
+          step = chunk_size - overlap
+          chunks: list[str] = []
+          for start in range(0, len(text), step):
+              chunks.append(text[start : start + chunk_size])
+              if start + chunk_size >= len(text):
+                  break
+          return chunks
+
+
+      def recall_at_k(retrieved_ids: list[str], relevant_ids: set[str], k: int) -> float:
+          if k <= 0 or not relevant_ids:
+              return 0.0
+          hits = len(set(retrieved_ids[:k]) & relevant_ids)
+          return hits / len(relevant_ids)
+    explanation: |
+      `chunk_text` əvvəlcə sonsuz dövr yarada biləcək `overlap >= chunk_size` halını rədd edir, sonra `step = chunk_size - overlap` ilə irəliləyir. `recall_at_k` isə çoxluqların kəsişməsi ilə ilk `k` nəticədə tapılan həqiqi sənədlərin payını tapır.
+  - id: ex-llmrag-debug-diagnosis
+    type: explain
+    title: "İzah et: RAG sistemində aşağı dəqiqliyin diaqnozu"
+    prompt: |
+      Komandan daxili HR qaydaları üzrə RAG botu qurub. İstifadəçilər məzuniyyət günləri barədə sual verəndə bot tez-tez səhv cavab qaytarır.
+
+      Səndən problemi tapmaq istənilir. Əlində 50 sualdan ibarət test dəsti var. **Retrieval** və **Generation** mərhələlərini bir-birindən ayırmaq üçün hansı iki ölçməni aparacaqsan və hər birinin nəticəsinə görə hansı düzəlişi tətbiq edəcəksən?
+    skills: [llm-rag, llm-evaluation]
+    category: debug
+    difficulty: 2
+    hints:
+      - "Əvvəlcə 50 sual üçün düzgün cavabın hansı chunk-da olduğunu qeyd et və axtarışın onları tapıb-tapmadığını (`Recall@k`) ölç."
+      - "Əgər `Recall@k` aşağıdırsa nəyi dəyişirsən? Əgər `Recall@k` yüksəkdirsə, amma cavab yenə səhvdirsə nəyi dəyişirsən?"
+    rubric:
+      - "50 suallıq test dəstində hər sual üçün gözlənilən mənbə chunk/sənəd ID-lərini müəyyənləşdirib Recall@k (və ya MRR) ilə Retrieval mərhələsini ayrıca ölçməyi qeyd edir"
+      - "Retrieval zəifdirsə (aşağı Recall@k): chunking/overlap, hybrid search (BM25 + embedding) və ya reranker ilə axtarışı düzəltməyi təklif edir"
+      - "Retrieval güclüdürsə, amma son cavab səhvdirsə (aşağı Faithfulness/Groundedness): promptda yalnız kontekstə əsaslanma, sitat tələbi və məlumat yoxdursa imtina qaydasını gücləndirməyi təklif edir"
+    model_answer: |
+      1. **Addım 1 — Retrieval qiymətləndirilməsi (`Recall@k`):** 50 test sualının hər biri üçün HR sənədlərindəki həqiqi cavab parçalarını işarələyirəm və LLM-i işə salmadan yalnız axtarışın `Recall@5` göstəricisini ölçürəm.
+         - **Əgər `Recall@5` aşağıdırsa:** Problem axtarışdadır. Chunk ölçüsünü və overlap-i tənzimləyirəm, cədvəllərin kəsilmədiyini yoxlayıram və BM25 + Embedding **Hybrid Search** əlavə edirəm.
+      2. **Addım 2 — Generation qiymətləndirilməsi (`Faithfulness / Groundedness`):** Əgər `Recall@5` yüksəkdirsə (doğru parça tapılır), deməli LLM həmin parçanı səhv şərh edir və ya digər parçalarla qarışdırır.
+         - **Düzəliş:** Reranker ilə prompta gedən səs-küylü parçaları azaldıram (məs. top-15-dən top-3-ə), promptda hər rəqəm üçün mənbə sitatı (`[chunk_id]`) tələb edirəm və kontekstdə açıq yazılmayan halda imtina qaydası qoyuram.
+    explanation: "Retrieval və generasiyanı ayrı ölçmək kor-koranə təxminləri aradan qaldırır və mühəndis vaxtını həqiqi darboğaza yönəldir."
+references:
+  - title: "Anthropic — Contextual Retrieval"
+    url: https://www.anthropic.com/news/contextual-retrieval
+    note: "Chunking, BM25 hybrid search və reranking-in Recall@k üzərindəki təsiri"
+  - title: "RAGAS — Evaluation framework for RAG pipelines"
+    url: https://docs.ragas.io/en/stable/concepts/metrics/available_metrics/
+    note: "Context Recall, Faithfulness və Answer Relevance metrikləri"

@@ -1,0 +1,384 @@
+id: dl-pytorch-training-loop
+track: deep-learning
+module: neural-network-basics
+title: PyTorch training loop — batch, epoch, optimizer və 4 klassik bug
+summary: PyTorch təlim dövrünün 5 əsas addımını (zero_grad, forward, loss, backward, step), validation rejimini (model.eval + torch.no_grad) və dərin öyrənmədə ən çox rast gəlinən 4 səssiz bug-ı tapıb düzəltməyi öyrənəcəksən.
+level: core
+estimated_minutes: [55, 75]
+prerequisites: [dl-neuron-forward-backprop]
+next: dl-attention-transformers
+skills: [dl-training-loop, dl-forward-pass, dl-backprop]
+objectives:
+  - PyTorch təlim dövrünün 5 kanonik sətirinin (`optimizer.zero_grad()`, `model(xb)`, `criterion(preds, yb)`, `loss.backward()`, `optimizer.step()`) rolunu və icra sırasını izah etmək
+  - "`Batch`, `Step` (iterasiya) və `Epoch` anlayışlarını fərqləndirmək və mini-batch bölgüsünü pure Python-da yazmaq"
+  - Validation dövründə `model.eval()` ilə `with torch.no_grad():` blokunun bir-birindən fərqli iki iş gördüyünü əsaslandırmaq
+  - Dörd klassik PyTorch bug-ını (`zero_grad` unutmaq, `model.eval` unutmaq, `CrossEntropyLoss`-a `softmax` vermək, `(N, 1)` vs `(N,)` shape mismatch) kodda tapıb düzəltmək
+why_it_matters: |
+  `scikit-learn`-də təlim tək bir `model.fit(X, y)` çağırışıdır. PyTorch-da isə təlim dövrünü (training loop) mühəndis özü açıq yazır. Bu açıqlıq sənə nəhəng güc verir — gradient clipping, mixed precision, custom loss, multi-GPU paylama kimi hər detalı idarə edə bilirsən.
+
+  Amma bu güc həm də təhlükəli **səssiz bug-lar** deməkdir. PyTorch-da `optimizer.zero_grad()` sətrini unutsan və ya `(32, 1)` ölçülü proqnozla `(32,)` ölçülü hədəfi `MSELoss`-a versən, Python heç bir xəta (`Exception`) qaldırmayacaq! Kod saatlarla işləyəcək, GPU qızacaq, amma model tamamilə mənasız çəkilər öyrənəcək. Bu dərs səni həmin bahalı səhvlərdən qoruyacaq.
+terms:
+  - term: Mini-batch (Batch)
+    definition: Bir addımda (step) şəbəkədən birlikdə keçirilən nümunələr qrupu (məsələn, $B = 32$ və ya $64$ sətir). Həm GPU paralelliyini təmin edir, həm də gradienti stabilləşdirir.
+  - term: Epoch
+    definition: Bütün training datasının mini-batch-lər şəklində şəbəkədən tam bir dəfə keçməsi. $N=1000$ nümunə və $B=100$ batch ölçüsü varsa, $1\text{ epoch} = 10\text{ step}$ edir.
+  - term: optimizer.zero_grad()
+    definition: Bütün parametrlərin `.grad` buferini sıfırlayan əmr. PyTorch default olaraq yeni gradientləri köhnələrin üzərinə toplayır (`+=`).
+  - term: loss.backward()
+    definition: Autograd mühərrikini işə salaraq loss-dan geriyə doğru hər bir `requires_grad=True` parametrinin `.grad` atributunu hesablayan əmr.
+  - term: optimizer.step()
+    definition: Hesablanmış `.grad` dəyərlərindən istifadə edərək parametrləri yeniləyən əmr (məsələn, SGD-də $\theta \leftarrow \theta - \eta \cdot \theta.\text{grad}$).
+  - term: model.train() vs model.eval()
+    definition: "`Dropout` və `BatchNorm` kimi qatların davranış rejimini dəyişən açar: `train()` rejimində Dropout neyronları təsadüfi söndürür, `eval()` rejimində isə bütün neyronlar aktiv olur."
+  - term: torch.no_grad()
+    definition: Autograd hesablama qrafının qurulmasını müvəqqəti dayandıran kontekst meneceri; validation və inference zamanı GPU yaddaşına qənaət edir və hesablamaları sürətləndirir.
+  - term: Logits
+    definition: Təsnifat şəbəkəsinin son xətti qatından çıxan xam, normallaşdırılmamış ədədlər ($z \in (-\infty, +\infty)$) — `Softmax` və ya `Sigmoid`-dən əvvəlki dəyərlər.
+sections:
+  - id: training-loop-anatomy
+    kind: explanation
+    title: PyTorch təlim və validation dövrünün anatomiyası
+    body: |
+      ### 1. Batch vs Epoch
+      1 milyon şəkli eyni anda GPU yaddaşına yerləşdirmək mümkün deyil; tək-tək ($B=1$) keçirmək isə GPU-nun paralel nüvələrini boş saxlayır. Ona görə datanı **mini-batch**-lərə (məsələn, $B=32$ və ya $64$) bölürük:
+      - **1 Step (İterasiya):** Tək bir mini-batch üzərində forward + backward + ağırlıq yeniləməsi.
+      - **1 Epoch:** Bütün mini-batch-lərin (bütün training datasının) tam bir dövrü ($\lceil N / B \rceil$ step).
+
+      ### 2. Təlim dövrünün (Training Loop) 5 müqəddəs addımı
+      Hər epoch-da `model.train()` çağırılır və hər mini-batch (`xb, yb`) üçün bu **5 addım dəqiq bu ardıcıllıqla** icra olunur:
+
+      1. **`optimizer.zero_grad()`** — Əvvəlki batch-dən qalan `.grad` dəyərlərini təmizlə (sıfırla).
+      2. **`preds = model(xb)`** — Forward pass: girişdən proqnozları (logits) hesabla.
+      3. **`loss = criterion(preds, yb)`** — Proqnozla həqiqi hədəf arasındakı skalyar itkini ($L$) hesabla.
+      4. **`loss.backward()`** — Backward pass: chain rule ilə bütün parametrlərin `.grad` dəyərlərini hesabla.
+      5. **`optimizer.step()`** — Optimizer qaydası ilə (SGD, AdamW) çəkiləri yenilə ($\theta \leftarrow \theta - \eta \nabla L$).
+
+      ### 3. Validation dövrünün 2 qoruyucusu
+      Hər epoch-un sonunda modeli validation dəstində yoxlayarkən **həm** `model.eval()`, **həm də** `with torch.no_grad():` yazılmalıdır:
+      - `model.eval()` $\rightarrow$ `Dropout`-u söndürür və `BatchNorm`-u sabit statistikaya keçirir (*diqqət: bu, autograd-ı söndürmür!*).
+      - `with torch.no_grad():` $\rightarrow$ Autograd qrafının yaddaşda saxlanmasını söndürür (RAM-a 2x qənaət edir və sürəti artırır).
+  - id: archery-practice-analogy
+    kind: analogy
+    title: "Mental model: Oxatma məşqi — hədəf lövhəsini təmizləmək və yarış rejimi"
+    body: |
+      Təlim dövrünü oxatma məşqinə bənzədək:
+
+      1. **`optimizer.zero_grad()` — Hədəf lövhəsindən köhnə oxları çıxarmaq:** Əgər əvvəlki atışın oxlarını lövhədən çıxarmasan, yeni atışın sapmasını ölçəndə köhnə və yeni oxların cəminə baxıb yayını tam səhv tərəfə buracaqsan!
+      2. **`preds = model(xb)` — Oxu atmaq (Forward pass).**
+      3. **`loss = criterion(preds, yb)` — Mərkəzdən nə qədər uzaq düşdüyünü xətkeşlə ölçmək.**
+      4. **`loss.backward()` — Küləyin və yayın gərginliyinin bu sapmaya nə qədər təsir etdiyini hesablamaq.**
+      5. **`optimizer.step()` — Yayın nişangahını bir klik düzəltmək.**
+
+      **`model.train()` vs `model.eval()`:**
+      Məşq vaxtı (`model.train()`) məşqçi sənin bəzi əzələlərini gücləndirmək üçün gözünün birini təsadüfi bağlayır və ya ayağına ağırlıq taxır (**Dropout**). Rəsmi yarışa və ya sınaq yoxlamasına çıxanda isə (`model.eval()`) göz sarğısını çıxarıb tam güclə atış etməlisən! Yarışda göz sarğısını çıxarmağı unutsan, nəticən süni şəkildə bərbad çıxacaq.
+  - id: pytorch-loop-diagram
+    kind: diagram
+    title: PyTorch Epoch — Training və Validation fazalarının axını
+    body: |
+      ```mermaid
+      flowchart TD
+        E["Epoch başlanğıcı"] --> T0["model.train()"]
+        T0 --> B1["Mini-batch (xb, yb) götür"]
+        B1 --> S1["1. optimizer.zero_grad()"]
+        S1 --> S2["2. preds = model(xb)"]
+        S2 --> S3["3. loss = criterion(preds, yb)"]
+        S3 --> S4["4. loss.backward()"]
+        S4 --> S5["5. optimizer.step()"]
+        S5 --> V0["Validation fazası: model.eval() + with torch.no_grad():"]
+        V0 --> V1["val_preds = model(x_val) -> val_loss hesabla (backward YOXDUR)"]
+      ```
+  - id: worked-batch-and-sgd
+    kind: worked_example
+    title: "Rəqəmlərlə: Batch sayı və zero_grad() unudulanda baş verən fəlakət"
+    body: |
+      **1. Batch və Step hesabı:**
+      Training datasında $N = 10$ nümunə var və `batch_size = 4` seçmişik.
+      - Batch 1: indekslər `[0, 1, 2, 3]` (4 nümunə)
+      - Batch 2: indekslər `[4, 5, 6, 7]` (4 nümunə)
+      - Batch 3 (son qalıq batch): indekslər `[8, 9]` (2 nümunə)
+      Deməli, $1\text{ epoch} = \lceil 10 / 4 \rceil = 3\text{ step}$ (3 dəfə `optimizer.step()` çağırılır).
+
+      **2. `zero_grad()` unudulanda rəqəmlərlə nə baş verir?**
+      Tutaq ki, çəkimiz $w_0 = 2.0$, learning rate $\eta = 0.1$-dir. Ardıcıl iki batch-də həqiqi gradientlər $g_1 = +4.0$ və $g_2 = -1.0$ çıxmalıdır.
+
+      - **Düzgün (`zero_grad()` var):**
+        - Step 1: $\text{grad} = 4.0 \implies w_1 = 2.0 - 0.1 \times 4.0 = 1.60$
+        - Step 2: $\text{grad}$ sıfırlanır, yeni $\text{grad} = -1.0 \implies w_2 = 1.60 - 0.1 \times (-1.0) = 1.70$
+      - **Səhv (`zero_grad()` unudulub!):**
+        - Step 1: $\text{grad} = 4.0 \implies w_1 = 1.60$
+        - Step 2: yeni gradient köhnənin **üzərinə toplanır**: $\text{grad} = 4.0 + (-1.0) = +3.0$ (işarə belə səhvdir!).
+        - $w_2 = 1.60 - 0.1 \times 3.0 = 1.30$ ($1.70$ əvəzinə tam əks istiqamətə getdi!).
+  - id: code-pytorch-and-pure-python
+    kind: code
+    title: "Kod: Kanonik PyTorch dövrü və Pure-Python Batching / SGD"
+    body: |
+      **1. Standart PyTorch Təlim və Validation Şablonu:**
+      ```python
+      # PyTorch şablonu (istinad üçün):
+      # for epoch in range(num_epochs):
+      #     model.train()
+      #     for xb, yb in train_loader:
+      #         optimizer.zero_grad()
+      #         logits = model(xb)               # Softmax YOX, xam logits!
+      #         loss = criterion(logits, yb)
+      #         loss.backward()
+      #         optimizer.step()
+      #
+      #     model.eval()
+      #     val_loss = 0.0
+      #     with torch.no_grad():
+      #         for xb, yb in val_loader:
+      #             logits = model(xb)
+      #             val_loss += criterion(logits, yb).item()
+      ```
+
+      **2. Pərdə arxasında `DataLoader` və `SGD.step()` necə işləyir? (Pure Python):**
+      ```python
+      def make_batches(dataset: list, batch_size: int) -> list[list]:
+          """Split dataset into consecutive mini-batches of size `batch_size`."""
+          if batch_size <= 0:
+              raise ValueError("batch_size must be positive")
+          return [
+              dataset[i : i + batch_size]
+              for i in range(0, len(dataset), batch_size)
+          ]
+
+
+      def sgd_step(
+          params: list[float], grads: list[float], lr: float
+      ) -> list[float]:
+          """Return updated parameters: p_new = p - lr * g (does not mutate input)."""
+          if len(params) != len(grads):
+              raise ValueError("params and grads must have the same length")
+          if lr <= 0:
+              raise ValueError("lr must be positive")
+          return [p - lr * g for p, g in zip(params, grads)]
+
+
+      print(make_batches([10, 20, 30, 40, 50], batch_size=2))
+      # [[10, 20], [30, 40], [50]]
+      print(sgd_step([2.0, -1.0], [4.0, -2.0], lr=0.1))
+      # [1.6, -0.8]
+      ```
+  - id: four-classic-bugs
+    kind: mistakes
+    title: 4 klassik PyTorch bug-ı (və onları necə tutmalı)
+    body: |
+      **Bug 1: `optimizer.zero_grad()` çağırışını unutmaq**
+      PyTorch-da `loss.backward()` gradientləri əvəzləmir, `.grad += new_grad` edir (bu, böyük batch-ləri simulyasiya edən *gradient accumulation* üçündür). Adi dövrdə `zero_grad()` unudularsa, gradientlər hər addımda şişir və təlim partlayır.
+
+      **Bug 2: Validation/Test zamanı `model.eval()` unutmaq**
+      Yalnız `with torch.no_grad():` yazmaq kifayət deyil! `model.eval()` çağırılmasa, `Dropout` validation zamanı da neyronların yarısını söndürür, `BatchNorm` isə öyrənilmiş statistika əvəzinə cari validation batch-inin ortalamasını işlədir.
+
+      **Bug 3: `nn.CrossEntropyLoss`-a `Softmax`-dan keçmiş ehtimallar vermək**
+      `nn.CrossEntropyLoss` daxilində ədədi stabillik üçün **özü `LogSoftmax` tətbiq edir** və giriş kimi xam **logits** gözləyir. Əgər modelin sonuna `nn.Softmax()` qoyub çıxışı `CrossEntropyLoss`-a versən, **ikiqat softmax** baş verir — gradientlər əzilir və model çox zəif öyrənir. (Eynilə binary təsnifatda `BCEWithLogitsLoss` də `Sigmoid`-siz xam logit gözləyir).
+
+      **Bug 4: Shape mismatch — `(N, 1)` və `(N,)` arasında gizli broadcasting!**
+      ```python
+      # TƏHLÜKƏLİ SƏSSİZ BUG:
+      # preds.shape == (32, 1), yb.shape == (32,)
+      # (preds - yb) fərqi (32, 1) yox, (32, 32) matrisinə çevrilir!
+      ```
+      `preds` ölçüsü `(32, 1)` və `yb` ölçüsü `(32,)` olduqda, `MSELoss(preds, yb)` hər proqnozu yalnız öz hədəfi ilə yox, batch-dəki **bütün 32 hədəflə** cüt-cüt çıxır (`(32, 32)` matrisi) və model həmişə sabit ortalamanı proqnozlaşdırmağa başlayır! **Qayda:** `preds.squeeze(-1)` və ya `assert preds.shape == yb.shape` işlət.
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Batch size seçimi ($B=32$ vs $B=4096$):** Böyük batch GPU-nu tam yükləyir və epoch-u sürətli bitirir, amma çox iti (sharp) minimumlara düşüb generalization-u zəiflədə bilər və böyük VRAM tələb edir. Kiçik batch ($32-128$) gradientə faydalı stokastik səs-küy qatır və daha yaxşı ümumiləşdirir.
+      - **SGD vs AdamW:** `AdamW` hər parametr üçün adaptiv learning rate saxladığından Transformer və dərin şəbəkələrdə çox sürətli konvergensiya verir. Lakin hər parametr üçün 2 əlavə moment buferi ($m_t, v_t$) saxladığı üçün sadə `SGD`-dən **2-3 dəfə çox optimizer yaddaşı** sərf edir.
+      - **Sanity check — "Overfit a single batch":** Böyük datada saatlarla təlim başlatmazdan əvvəl yalnız **1 mini-batch** (məsələn, 8 nümunə) götür və modeli həmin 1 batch üzərində 200 addım öyrət. Əgər model 8 nümunədə loss-u $\approx 0$-a endirə bilmirsə, təlim dövründə və ya arxitekturada 100% bug var!
+mastery_criteria:
+  - PyTorch təlim və validation dövrünün bütün addımlarını düzgün ardıcıllıqla düzə və hər sətirin məqsədini izah edə bilirsən
+  - Pure Python-da mini-batch generatorunu və SGD parametr yeniləməsini müqaviləyə uyğun yaza bilirsən
+  - Verilmiş sınmış PyTorch kodunda `zero_grad`, `model.eval`, `CrossEntropyLoss + Softmax` və `(N, 1)` vs `(N,)` broadcasting bug-larını tapıb düzəldirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-dlptl-forgot-zero-grad
+      type: mcq
+      title: optimizer.zero_grad() unudularsa nə baş verir?
+      prompt: PyTorch təlim dövründə `optimizer.zero_grad()` sətrini yazmağı unutsan, `loss.backward()` hər yeni mini-batch-də nə edəcək?
+      skills: [dl-training-loop, dl-backprop]
+      category: debug
+      options:
+        - id: a
+          text: Python dərhal `RuntimeError` qaldırıb proqramı dayandıracaq
+          feedback: Xeyr, PyTorch bunu xəta saymır (gradient accumulation üçün bilərəkdən belə dizayn edilib).
+        - id: b
+          text: Yeni hesablanan gradientləri əvvəlki batch-lərdən qalan `.grad` dəyərlərinin üzərinə toplayacaq (`+=`) və addımlar yanlış istiqamətə gedəcək
+          feedback: Doğru! Sıfırlanmayan `.grad` buferi bütün əvvəlki addımların gradientlərini üst-üstə yığır.
+        - id: c
+          text: Gradientləri avtomatik sıfırlayıb yalnız cari batch-i saxlayacaq
+          feedback: PyTorch `.grad` buferini özbaşına sıfırlamır; bunu açıq şəkildə `optimizer.zero_grad()` ilə etməlisən.
+      answer: b
+      explanation: PyTorch-da `.backward()` gradientləri mövcud `.grad` tensorunun üzərinə əlavə edir. Hər adi optimizer addımından əvvəl onları sıfırlamaq məcburidir.
+    - id: q-dlptl-eval-vs-nograd
+      type: mcq
+      title: model.eval() və torch.no_grad() fərqi
+      prompt: Validation dövründə həm `model.eval()`, həm də `with torch.no_grad():` istifadə etməyin səbəbi nədir?
+      skills: [dl-training-loop]
+      category: concept
+      options:
+        - id: a
+          text: İkisi də tamamilə eyni işi görür, sadəcə oxunaqlılıq üçün ikisi də yazılır
+          feedback: Xeyr! Onlar tamamilə fərqli mexanizmləri idarə edirlər.
+        - id: b
+          text: "`model.eval()` Dropout və BatchNorm qatlarını inference rejiminə keçirir; `torch.no_grad()` isə autograd qrafının qurulmasını dayandırıb yaddaşa və vaxta qənaət edir"
+          feedback: Doğru! Təkcə `no_grad()` yazsan Dropout açıq qalar; təkcə `eval()` yazsan lazımsız autograd qrafı RAM-ı doldurar.
+        - id: c
+          text: "`model.eval()` çəkiləri sıfırlayır, `torch.no_grad()` isə learning rate-i azaldır"
+          feedback: Heç biri çəkiləri və ya learning rate-i dəyişmir.
+      answer: b
+      explanation: "`model.eval()` qatların davranışını (Dropout/BatchNorm), `torch.no_grad()` isə autograd mühərrikinin gradient izləməsini idarə edir."
+    - id: q-dlptl-crossentropy-logits
+      type: mcq
+      title: CrossEntropyLoss hansı girişi gözləyir?
+      prompt: "`criterion = nn.CrossEntropyLoss()` istifadə edərkən modelin son qatının çıxışı necə olmalıdır?"
+      skills: [dl-training-loop, dl-forward-pass]
+      category: debug
+      options:
+        - id: a
+          text: "`nn.Softmax(dim=-1)` qatından keçmiş $[0, 1]$ aralığındakı ehtimallar"
+          feedback: Səhv! `CrossEntropyLoss` daxilində artıq `LogSoftmax` var; əvvəldən Softmax tətbiq etmək ikiqat softmax bug-ı yaradır.
+        - id: b
+          text: Aktivasiyasız son xətti qatdan çıxan xam **logits** ($z \in (-\infty, +\infty)$)
+          feedback: Doğru! `nn.CrossEntropyLoss` birbaşa xam logitləri qəbul edir və daxildə ədədi stabil `log_softmax` hesablayır.
+        - id: c
+          text: "`argmax` ilə alınmış tam ədəd sinif indeksləri"
+          feedback: "`argmax` törəməsi olmayan kəsilən əməliyyatdır — loss funksiyasına proqnoz kimi verilə bilməz."
+      answer: b
+      explanation: PyTorch-da `nn.CrossEntropyLoss` = `nn.LogSoftmax` + `nn.NLLLoss`. Ona görə modelin son qatı xam logitlər qaytarmalıdır.
+    - id: q-dlptl-shape-broadcast-bug
+      type: mcq
+      title: "(32, 1) vs (32,) broadcasting tələsi"
+      prompt: "Batch ölçüsü 32 olan reqressiya modelində `preds.shape == (32, 1)` və `yb.shape == (32,)` olarsa, `preds - yb` əməliyyatının nəticəsi hansı ölçüdə (shape) olar?"
+      skills: [dl-training-loop, dl-forward-pass]
+      category: debug
+      options:
+        - id: a
+          text: "`(32,)` — uyğun elementlər bir-birindən çıxılar"
+          feedback: NumPy/PyTorch broadcasting qaydasına görə `(32, 1)` və `(1, 32)` kimi genişlənib matris yaradır!
+        - id: b
+          text: "`(32, 32)` — broadcasting üzündən hər proqnoz bütün 32 hədəflə cüt-cüt çıxılar və loss tamamilə səhv hesablanar"
+          feedback: Doğru! Bu, PyTorch-da ən təhlükəli səssiz bug-lardan biridir; `preds.squeeze(-1)` ilə hər ikisi `(32,)` edilməlidir.
+        - id: c
+          text: ShapeError qaldırılar
+          feedback: Təəssüf ki, `1` ölçüsü broadcasting üçün uyğun sayıldığı üçün heç bir xəta qaldırılmır!
+      answer: b
+      explanation: "`(N, 1)` sütun vektoru ilə `(N,)` sətir vektoru çıxıldıqda broadcasting `(N, N)` xarici fərq matrisi yaradır. Həmişə `preds.shape == yb.shape` olduğunu yoxla."
+exercises:
+  - id: ex-dlptl-batches-and-sgd
+    type: code
+    title: Mini-batch generatoru və SGD step funksiyasını yaz
+    prompt: |
+      Təlim dövrünün iki əsas mexanizmini pure Python-da implementasiya et:
+
+      1. `make_batches(dataset: list, batch_size: int) -> list[list]`:
+         - `dataset` elementlərini sırasını dəyişmədən uzunluğu `batch_size` olan ardıcıl alt-siyahılara (mini-batch-lərə) bölür.
+         - Sonuncu batch-də `batch_size`-dan az element qala bilər (məsələn, 5 elementi `batch_size=2` ilə böləndə `[[a, b], [c, d], [e]]`).
+         - `dataset` boşdursa `[]` qaytarır.
+         - `batch_size <= 0` olarsa, `ValueError` qaldır.
+
+      2. `sgd_step(params: list[float], grads: list[float], lr: float) -> list[float]`:
+         - Hər bir parametr üçün $p_{\text{new}} = p - \text{lr} \cdot g$ hesablayıb **yeni** list qaytarır (input `params` list-i dəyişdirilmir).
+         - Əgər `len(params) != len(grads)` və ya `lr <= 0` olarsa, `ValueError` qaldır.
+    skills: [dl-training-loop, dl-backprop]
+    category: python
+    difficulty: 1
+    hints:
+      - "`range(0, len(dataset), batch_size)` addımı ilə dilimləmə (`dataset[i : i + batch_size]`) istifadə et."
+      - "`sgd_step` içində list comprehension `[p - lr * g for p, g in zip(params, grads)]` həm təmizdir, həm də yeni list yaradır."
+    starter_code: |
+      def make_batches(dataset: list, batch_size: int) -> list[list]:
+          # TODO: ardıcıl mini-batch-lər siyahısı qaytar
+          pass
+
+
+      def sgd_step(
+          params: list[float], grads: list[float], lr: float
+      ) -> list[float]:
+          # TODO: p - lr * g ilə yenilənmiş yeni parametr siyahısı qaytar
+          pass
+    tests:
+      - name: make_batches tam və qalıqlı bölgünü düzgün edir
+        code: |
+          assert make_batches([1, 2, 3, 4, 5], 2) == [[1, 2], [3, 4], [5]]
+          assert make_batches([1, 2, 3, 4], 2) == [[1, 2], [3, 4]]
+          assert make_batches([], 4) == []
+      - name: sgd_step parametrləri yeniləyir və input-u dəyişmir
+        code: |
+          p = [2.0, -1.0, 0.5]
+          g = [4.0, -2.0, 0.0]
+          updated = sgd_step(p, g, 0.1)
+          assert abs(updated[0] - 1.6) < 1e-9
+          assert abs(updated[1] - (-0.8)) < 1e-9
+          assert abs(updated[2] - 0.5) < 1e-9
+          assert p == [2.0, -1.0, 0.5] and updated is not p, "input mutasiya olunmamalıdır"
+      - name: Yanlış arqumentlərdə ValueError qaldırır
+        code: |
+          for bad_bs in [0, -3]:
+              try:
+                  make_batches([1, 2], bad_bs)
+                  assert False, f"batch_size={bad_bs} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+          for bad_args in [([1.0], [1.0, 2.0], 0.1), ([1.0], [1.0], 0.0), ([1.0], [1.0], -0.01)]:
+              try:
+                  sgd_step(*bad_args)
+                  assert False, f"{bad_args} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def make_batches(dataset: list, batch_size: int) -> list[list]:
+          if batch_size <= 0:
+              raise ValueError("batch_size must be positive")
+          return [
+              dataset[i : i + batch_size]
+              for i in range(0, len(dataset), batch_size)
+          ]
+
+
+      def sgd_step(
+          params: list[float], grads: list[float], lr: float
+      ) -> list[float]:
+          if len(params) != len(grads):
+              raise ValueError("params and grads must have equal length")
+          if lr <= 0:
+              raise ValueError("lr must be positive")
+          return [p - lr * g for p, g in zip(params, grads)]
+    explanation: |
+      `make_batches` PyTorch `DataLoader`-in mini-batch dilimləməsini, `sgd_step` isə `torch.optim.SGD.step()` metodunun parametr yeniləməsini təmiz funksional müqavilə ilə icra edir.
+  - id: ex-dlptl-order-training-step
+    type: order
+    title: PyTorch təlim addımlarını düzgün ardıcıllıqla düz
+    prompt: |
+      Bir epoch daxilində təlim mərhələsinin 6 əsas əməliyyatını **icra olunmalı olduğu düzgün ardıcıllıqla** yuxarıdan aşağıya sırala:
+    skills: [dl-training-loop, dl-forward-pass, dl-backprop]
+    category: python
+    difficulty: 1
+    hints:
+      - "Əvvəlcə modeli təlim rejiminə keçir (`model.train()`), sonra hər batch-in əvvəlində köhnə gradientləri təmizlə (`optimizer.zero_grad()`)."
+      - "Proqnoz (`model(xb)`) olmadan `loss` hesablana bilməz; `loss.backward()` olmadan isə `optimizer.step()` çəkiləri yeniləyə bilməz."
+    items:
+      - id: s1
+        text: "model.train() — modeli təlim rejiminə keçir"
+      - id: s2
+        text: "optimizer.zero_grad() — köhnə gradientləri sıfırla"
+      - id: s3
+        text: "logits = model(xb) — forward pass ilə proqnozları hesabla"
+      - id: s4
+        text: "loss = criterion(logits, yb) — itki funksiyasını hesabla"
+      - id: s5
+        text: "loss.backward() — autograd ilə gradientləri geriyə yay"
+      - id: s6
+        text: "optimizer.step() — hesablanmış gradientlərlə çəkiləri yenilə"
+    answer: [s1, s2, s3, s4, s5, s6]
+    explanation: |
+      Əvvəlcə epoch başında `model.train()` aktivləşdirilir, sonra hər batch üçün `zero_grad()` -> `forward` -> `loss` -> `backward()` -> `step()` zənciri işləyir.
+references:
+  - title: PyTorch Tutorials — Optimizing Model Parameters
+    url: https://pytorch.org/tutorials/beginner/basics/optimization_tutorial.html
+    note: Rəsmi PyTorch təlim və validation dövrü bələdçisi
+  - title: Andrej Karpathy — A Recipe for Training Neural Networks
+    url: https://karpathy.github.io/2019/04/25/recipe/
+    note: Neyron şəbəkələrində səssiz bug-ları tapmaq və "overfit a single batch" metodikası

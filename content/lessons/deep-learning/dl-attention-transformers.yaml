@@ -1,0 +1,484 @@
+id: dl-attention-transformers
+track: deep-learning
+module: dl-architectures
+title: "Transformers və Attention Mexanizmi — müasir AI-ın mühərriki"
+summary: "Ardıcıl RNN-lərin niyə uzun kontekstdə və GPU paralelləşdirməsində ilişdiyini, Scaled Dot-Product Attention düsturunu, nə üçün kökaltı d_k-ya böldüyümüzü, Causal Masking, Multi-Head Attention və tam Transformer blokunu (Residual + LayerNorm + MLP) dərindən öyrənəcəksən."
+level: advanced
+estimated_minutes: [60, 80]
+prerequisites: [dl-pytorch-training-loop, math-matrices-shapes]
+next: dl-advanced-training-transfer
+skills: [dl-architectures, matrices-shapes, dl-forward-pass]
+objectives:
+  - "Scaled Dot-Product Attention düsturunu ($\\text{softmax}(QK^T / \\sqrt{d_k})V$) matris ölçüləri (shapes) ilə birlikdə izah və tətbiq etmək"
+  - "$\\sqrt{d_k}$ miqyaslama vuruğunun softmax doyma (saturation) və sıfır qradiyent probleminin qarşısını necə aldığını əsaslandırmaq"
+  - "Avtoreqressiv modellərdə (GPT) gələcək tokenlərə baxmağı əngəlləyən Causal Masking ($j > i \\implies -\\infty$) mexanizmini qurmaq"
+  - "Transformer blokunun (Multi-Head Attention, Residual Connection, LayerNorm, Feed-Forward MLP) axınını və $O(T^2)$ hesablama mürəkkəbliyini təhlil etmək"
+why_it_matters: |
+  2017-ci ildə nəşr olunan *"Attention Is All You Need"* məqaləsi süni intellekt tarixini iki hissəyə böldü. Bu gün istifadə etdiyin bütün böyük dil modelləri (GPT, Claude, Gemini, Llama), müasir görmə modelləri (ViT) və multimodal sistemlər **Transformer** arxitekturası üzərində işləyir.
+
+  LLM Engineering track-inə keçdikdə `context window`, `KV-cache`, `attention sink`, `flash attention` və $O(T^2)$ yaddaş sərhədi kimi anlayışlarla hər gün qarşılaşacaqsan. Scaled Dot-Product Attention matris vurmasını əllə və kodla qurmuş mühəndis üçün bu anlayışlar "qara qutu" yox, sadə xətti cəbr nəticəsidir.
+terms:
+  - term: Self-Attention (Özünə-diqqət)
+    definition: "Ardıcıllıqdakı hər bir tokenin eyni ardıcıllıqdakı bütün digər tokenlərlə birbaşa əlaqə çəkisini hesablayıb kontekstual təsvir yaratması mexanizmi."
+  - term: Query (Q), Key (K), Value (V)
+    definition: "Giriş token matrisinin ($X$) üç fərqli öyrənilən çəki matrisi ($W_Q, W_K, W_V$) ilə xətti proyeksiyası: $Q$ 'nə axtarıram?', $K$ 'məndə nə var?', $V$ 'hansı məlumatı ötürürəm?' rolunu oynayır."
+  - term: Scaled Dot-Product Attention
+    definition: "$\\text{Attention}(Q, K, V) = \\text{softmax}\\!\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V$ düsturu ilə sorğu və açarların oxşarlığından diqqət çəkiləri çıxarıb dəyərləri çəkili toplayan əməliyyat."
+  - term: Causal Masking (Səbəb maskalanması)
+    definition: "Decoder (GPT tipli) modellərdə $i$-ci tokenin gələcək $j > i$ mövqelərinə baxmaması üçün softmax-dan əvvəl yuxarı üçbucaq elementlərinə $-\\infty$ yazılması."
+  - term: Multi-Head Attention (MHA)
+    definition: "$Q, K, V$-ni $h$ paralel 'başa' (head) bölərək modelin eyni anda həm sintaktik, həm semantik, həm də mövqe əlaqələrinə fərqli alt-fəzalarda diqqət yetirməsi."
+  - term: Residual Connection (Skip Connection)
+    definition: "Layın çıxışını onun girişinə birbaşa toplamaq ($x + \\text{SubLayer}(x)$); dərin şəbəkələrdə qradiyentlərin sönmədən geri axmasını təmin edir."
+  - term: Layer Normalization (LayerNorm)
+    definition: "Hər bir token vektorunun öz daxili xüsusiyyətləri üzrə ortalamasını $0$, dispersiyasını $1$ edərək aktivasiyaları sabitləşdirən normallaşdırma."
+sections:
+  - id: rnn-bottleneck-and-attention-math
+    kind: explanation
+    title: "RNN darboğazından Scaled Dot-Product Attention və Transformer blokuna"
+    body: |
+      ### 1. Niyə RNN-lər ilişdi və Self-Attention nəyi dəyişdi?
+
+      Transformer-dən əvvəl mətn ardıcıllıqları **RNN (LSTM / GRU)** ilə emal olunurdu: token $t$-nin gizli vəziyyəti ($h_t$) yalnız $h_{t-1}$ hesablandıqdan sonra tapılırdı:
+
+      $$h_t = f(h_{t-1}, x_t)$$
+
+      Bu ardıcıl (sequential) asılılığın iki ağır problemi var idi:
+      1. **GPU-da paralelləşmə mümkünsüzdür:** 1000-ci sözü emal etmək üçün əvvəlki 999 addımın bitməsini gözləməlisən.
+      2. **Uzun məsafəli informasiya darlığı (bottleneck):** Cümlənin 1-ci sözü ilə 500-cü sözü arasındakı əlaqə 500 ardıcıl matris vurmasından keçərkən unudulur və qradiyent sönür.
+
+      **Self-Attention** ardıcıl zənciri ləğv edir: **hər bir token birbaşa bütün digər tokenlərə $O(1)$ yol uzunluğu ilə baxır** və bütün tokenlər üçün bu əməliyyat tək bir matris vurması kimi GPU-da tam paralel icra olunur!
+
+      ---
+
+      ### 2. Scaled Dot-Product Attention Düsturu və Matris Ölçüləri (Shapes)
+
+      Girişimizdə $T$ (`seq_len`) sayda token var və hər token $d_{\text{model}}$ ölçülü vektordur: $X \in \mathbb{R}^{T \times d_{\text{model}}}$.
+      Üç öyrənilən proyeksiya matrisi ilə **Query ($Q$)**, **Key ($K$)** və **Value ($V$)** yaradırıq:
+      - $Q = X W_Q \in \mathbb{R}^{T \times d_k}$
+      - $K = X W_K \in \mathbb{R}^{T \times d_k}$
+      - $V = X W_V \in \mathbb{R}^{T \times d_v}$
+
+      **Scaled Dot-Product Attention** düsturu:
+
+      $$\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{Q K^T}{\sqrt{d_k}}\right) V$$
+
+      Simvollar və ölçülər (shapes):
+      - $Q \in \mathbb{R}^{T \times d_k}$ — sorğu (Query) matrisi ($T$ token, hər biri $d_k$ ölçüdə)
+      - $K^T \in \mathbb{R}^{d_k \times T}$ — açar (Key) matrisinin transponirə olunmuş forması
+      - $S = \frac{Q K^T}{\sqrt{d_k}} \in \mathbb{R}^{T \times T}$ — miqyaslanmış oxşarlıq (attention scores / logits) matrisi. Burada $S_{i,j}$ elementi $i$-ci tokenin $j$-ci tokenə nə qədər uyğun gəldiyini göstərir.
+      - $d_k$ — bir attention başının (head) açar/sorğu ölçüsü (məsələn, $d_k = 64$)
+      - $\text{softmax}(\cdot)$ — $T \times T$ matrisinin **hər sətri üzrə** tətbiq olunur ki, $i$-ci tokenin bütün $j$ tokenlərinə verdiyi diqqət çəkiləri müsbət olsun və cəmi $1.0$ etsin: $A \in \mathbb{R}^{T \times T}$.
+      - $V \in \mathbb{R}^{T \times d_v}$ — dəyər (Value) matrisi. Yekun vurma $A V \in \mathbb{R}^{(T \times T) \times (T \times d_v)} = \mathbb{R}^{T \times d_v}$ hər token üçün digər tokenlərin dəyərlərinin çəkili ortalamasını qaytarır.
+
+      ---
+
+      ### 3. Niyə $\sqrt{d_k}$-ya bölürük? (Softmax Saturation problemi)
+
+      Tutaq ki, $q$ və $k$ vektorlarının elementləri sıfır ortalı və vahid dispersiyalı ($\mu=0, \sigma^2=1$) müstəqil təsadüfi kəmiyyətlərdir. Onda onların skalyar hasilinin ($q \cdot k = \sum_{r=1}^{d_k} q_r k_r$) ortalaması $0$, **dispersiyası isə $d_k$** (standart meyli $\sqrt{d_k}$) olur!
+
+      Əgər $d_k = 64$ olarsa, skalyar hasillər $\pm 24$ kimi böyük ədədlər ala bilər. Softmax funksiyasına $[24, -8]$ kimi böyük fərqli ədədlər daxil olduqda:
+      $$\text{softmax}([24, -8]) \approx [0.99999999999999, \; 10^{-14}]$$
+      Softmax **doyma (saturation)** bölgəsinə düşür: ən böyük element $1.0$, digərləri $0.0$ olur və softmax-ın törəməsi (qradiyenti) **sıfıra yaxınlaşır (vanishing gradients)**. Skalyar hasili $\sqrt{d_k} = \sqrt{64} = 8$-ə böldükdə isə dispersiya yenidən $1$-ə qayıdır və qradiyentlər sağlam axır.
+
+      ---
+
+      ### 4. Causal Masking, Multi-Head Attention və Tam Transformer Bloku
+
+      - **Causal Masking (Avtoreqressiv dil modelləri / GPT):**
+        Mətn generasiya edərkən $i$-ci mövqedəki sözü proqnozlaşdıranda model gələcək $j > i$ sözlərini **görməməlidir** (əks halda cavabı kopyalayar). Bunun üçün softmax-dan əvvəl $S$ matrisinin yuxarı üçbucağına ($j > i$) $-\infty$ yazılır: $\exp(-\infty) = 0$ olduğu üçün gələcək tokenlərin diqqət çəkisi tam $0.0$ olur.
+      - **Multi-Head Attention (MHA):**
+        Tək bir $d_{\text{model}} = 512$ ölçülü attention əvəzinə, vektoru $h = 8$ paralel başa ($d_k = 512 / 8 = 64$) bölürük. Baş 1 əvəzliyin hansı ismə aid olduğunu ("*it*"), Baş 2 felin zamanını, Baş 3 yaxın qonşu sözləri izləyir. Sonda bütün başların çıxışı birləşdirilib (`concat`) $W_O$ matrisinə vurulur.
+      - **Tam Transformer Bloku (Pre-Norm arxitekturası):**
+        1. $H = X + \text{MultiHeadAttention}(\text{LayerNorm}(X))$  *(Residual + Attention — tokenlər öz aralarında danışır)*
+        2. $Y = H + \text{MLP}(\text{LayerNorm}(H))$  *(Residual + Feed-Forward MLP — hər token topladığı məlumatı fərdi emal edir)*
+      - **Position Encoding (Mövqe kodlaması):** Matris vurması tokenlərin sırasını bilmir (sözlərin yerini dəyişsən, sadəcə sətirlərin yeri dəyişər). Ona görə girişdə hər tokenə onun mövqeyini bildirən vektor (Sinusoidal, Learned və ya **RoPE — Rotary Position Embedding**) əlavə olunur.
+  - id: database-lookup-analogy
+    kind: analogy
+    title: "Mental model: Yumşaq kitabxana axtarışı (Query, Key, Value)"
+    body: |
+      Təsəvvür et ki, cümlədəki `"Bank"` sözü öz mənasını dəqiqləşdirmək üçün cümlədəki digər sözlərdən (`"çayın"`, `"sahilindəki"`, `"köhnə"`) məlumat toplamaq istəyir:
+
+      - **Query ($q_{\text{bank}}$) — Axtarış sorğusu:** `"Bank"` sözünün əlində tutduğu elan: *"Mən çoxmənalı isiməm; yanımda coğrafiya, yoxsa maliyyə ilə bağlı sözlər var?"*
+      - **Key ($k_j$) — Kitabların üzərindəki etiket:** Hər sözün öz üzərindəki açar etiket. `"çayın"` və `"sahilindəki"` sözlərinin $k$ vektoru *"təbiət / coğrafiya"* istiqamətindədir.
+      - **Oxşarlıq ($q \cdot k / \sqrt{d_k}$) və Softmax:** `"Bank"` öz sorğusunu hər sözün açarı ilə skalyar vurur. `"çayın"` ($0.55$) və `"sahilindəki"` ($0.35$) yüksək bal alır, `"köhnə"` ($0.10$) aşağı bal alır.
+      - **Value ($v_j$) — Kitabın içindəki məzmun:** İndi `"Bank"` sözü həmin sözlərin içindəki məzmun vektorlarını ($V$) bu faizlərlə toplayır: $0.55 \cdot v_{\text{çayın}} + 0.35 \cdot v_{\text{sahilindəki}} + 0.10 \cdot v_{\text{köhnə}}$. Nəticədə `"Bank"` sözünün yeni vektoru artıq maliyyə bankı yox, *çay sahili* mənasını daşıyır!
+  - id: transformer-block-diagram
+    kind: diagram
+    title: "Scaled Dot-Product Attention və Transformer Blokunun Arxitekturası"
+    body: |
+      ```mermaid
+      flowchart TD
+        X["Giriş X: (T, d_model) + Positional Encoding"] --> LN1["LayerNorm"]
+        LN1 --> Q["Q = X_norm * W_Q (T, d_k)"]
+        LN1 --> K["K = X_norm * W_K (T, d_k)"]
+        LN1 --> V["V = X_norm * W_V (T, d_v)"]
+        Q --> SCORES["Scores = (Q * K^T) / sqrt(d_k)  [shape: T x T]"]
+        K --> SCORES
+        SCORES --> MASK["Causal Mask (j > i -> -inf)"]
+        MASK --> SM["A = Softmax(Scores, axis=-1)  [shape: T x T]"]
+        SM --> ATTN["Out = A * V  [shape: T x d_v]"]
+        V --> ATTN
+        ATTN --> RES1["Residual Add: H = X + W_O(Out)"]
+        X --> RES1
+        RES1 --> LN2["LayerNorm"]
+        LN2 --> MLP["Feed-Forward MLP (Linear -> GELU -> Linear)"]
+        MLP --> RES2["Residual Add: Y = H + MLP"]
+        RES1 --> RES2
+      ```
+
+      Diaqramdakı iki paralel yan keçidə (**Residual Add**) diqqət yetir: onlar qradiyent üçün "sürətli şosse" yaradır, beləliklə 32, 64 və ya 128 qatlı Transformer şəbəkələri qradiyent sönmədən öyrənə bilir.
+  - id: worked-2token-attention
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: 2 token üçün Scaled Dot-Product Attention"
+    body: |
+      Tutaq ki, $T = 2$ tokenimiz var, açar ölçüsü $d_k = 4$ ($\implies \sqrt{d_k} = \sqrt{4} = 2.0$) və dəyər ölçüsü $d_v = 2$-dir:
+
+      $$Q = \begin{bmatrix} 2 & 0 & 0 & 0 \\ 0 & 2 & 0 & 0 \end{bmatrix}, \quad K = \begin{bmatrix} 2 & 0 & 0 & 0 \\ 2 & 2 & 0 & 0 \end{bmatrix}, \quad V = \begin{bmatrix} 10 & 0 \\ 0 & 20 \end{bmatrix}$$
+
+      **Addım 1: $Q K^T$ matris vurması ($2 \times 4$ vurulsun $4 \times 2 \to 2 \times 2$)**
+      - Sətir 0 ($q_0 = [2, 0, 0, 0]$):
+        - $q_0 \cdot k_0 = 2(2) + 0 + 0 + 0 = 4$
+        - $q_0 \cdot k_1 = 2(2) + 0(2) + 0 + 0 = 4$
+      - Sətir 1 ($q_1 = [0, 2, 0, 0]$):
+        - $q_1 \cdot k_0 = 0(2) + 2(0) + 0 + 0 = 0$
+        - $q_1 \cdot k_1 = 0(2) + 2(2) + 0 + 0 = 4$
+
+      $$Q K^T = \begin{bmatrix} 4 & 4 \\ 0 & 4 \end{bmatrix}$$
+
+      **Addım 2: $\sqrt{d_k} = 2.0$-yə bölmə (Scaling)**
+
+      $$S = \frac{Q K^T}{\sqrt{4}} = \begin{bmatrix} 2.0 & 2.0 \\ 0.0 & 2.0 \end{bmatrix}$$
+
+      **Addım 3: Hər sətir üzrə Softmax ($A = \text{softmax}(S)$)**
+      - **Sətir 0 (`[2.0, 2.0]`):** İki element bərabər olduğu üçün ehtimallar tam yarıbayarı bölünür:
+        $$A_{0} = [0.5, \; 0.5]$$
+      - **Sətir 1 (`[0.0, 2.0]`):** $e^0 = 1.0$, $e^2 \approx 7.389$, cəm $= 8.389$:
+        $$A_{1} = \left[\frac{1.0}{8.389}, \; \frac{7.389}{8.389}\right] \approx [0.1192, \; 0.8808]$$
+
+      **Addım 4: Diqqət çəkilərini $V$ matrisinə vurmaq ($\text{Out} = A V$)**
+      - **Token 0 çıxışı:** $0.5 \cdot [10, 0] + 0.5 \cdot [0, 20] = [5.0, \; 10.0]$
+      - **Token 1 çıxışı:** $0.1192 \cdot [10, 0] + 0.8808 \cdot [0, 20] \approx [1.192, \; 17.616]$
+
+      *(Qeyd: Əgər **Causal Mask** aktiv olsaydı, Sətir 0-da $j=1 > i=0$ mövqeyi $-\infty$ ediləcəkdi, ona görə $A_0 = [1.0, 0.0]$ və Token 0-ın çıxışı yalnız öz dəyəri $[10.0, 0.0]$ olacaqdı!)*
+  - id: attention-python-code
+    kind: code
+    title: "Kod: Saf Python-da və PyTorch-da Scaled Dot-Product Attention"
+    body: |
+      Əvvəlcə heç bir xarici kitabxana olmadan, yalnız `math.exp` və `math.sqrt` ilə rəqəmsal dayanıqlı (numerically stable) Scaled Dot-Product Attention yazaq:
+
+      ```python
+      import math
+
+
+      def softmax_rows(matrix: list[list[float]]) -> list[list[float]]:
+          """Apply numerically stable softmax independently to each row."""
+          result: list[list[float]] = []
+          for row in matrix:
+              max_val = max(row)
+              exps = [math.exp(x - max_val) for x in row]
+              total = sum(exps)
+              result.append([e / total for e in exps])
+          return result
+
+
+      def scaled_dot_product_attention(
+          Q: list[list[float]],
+          K: list[list[float]],
+          V: list[list[float]],
+          causal: bool = False,
+      ) -> list[list[float]]:
+          """Compute Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V."""
+          seq_len = len(Q)
+          d_k = len(Q[0])
+          d_v = len(V[0])
+          scale = math.sqrt(d_k)
+
+          # 1. Scores: S_{i, j} = (q_i . k_j) / sqrt(d_k)
+          scores: list[list[float]] = []
+          for i in range(seq_len):
+              row_scores: list[float] = []
+              for j in range(seq_len):
+                  if causal and j > i:
+                      row_scores.append(-1e9)  # -inf qarşılığı
+                  else:
+                      dot = sum(Q[i][r] * K[j][r] for r in range(d_k))
+                      row_scores.append(dot / scale)
+              scores.append(row_scores)
+
+          # 2. Row-wise Softmax -> A (seq_len x seq_len)
+          weights = softmax_rows(scores)
+
+          # 3. Output = A * V (seq_len x d_v)
+          output: list[list[float]] = []
+          for i in range(seq_len):
+              out_vec = [
+                  sum(weights[i][j] * V[j][col] for j in range(seq_len))
+                  for col in range(d_v)
+              ]
+              output.append(out_vec)
+          return output
+      ```
+
+      **PyTorch 2.x-də FlashAttention dəstəkli rəsmi funksiya:**
+
+      ```python
+      import torch
+      import torch.nn.functional as F
+
+      # Shape: (batch_size=2, num_heads=8, seq_len=128, head_dim=64)
+      q = torch.randn(2, 8, 128, 64)
+      k = torch.randn(2, 8, 128, 64)
+      v = torch.randn(2, 8, 128, 64)
+
+      # PyTorch daxildə sqrt(d_k) bölməsini, causal mask-ı və FlashAttention kernelini icra edir
+      out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+      print(out.shape)  # torch.Size([2, 8, 128, 64])
+      ```
+  - id: attention-common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər və debugging"
+    body: |
+      **1. Causal Mask-ı softmax-dan SONRA tətbiq etmək**
+      Əgər əvvəlcə bütün sətir üzrə softmax hesablayıb sonra $j > i$ elementlərini sıfırlasan, qalan $j \le i$ çəkilərinin cəmi $1.0$ olmayacaq (üstəlik məxrəcdə gələcək tokenlərin eksponenti iştirak etdiyi üçün gələcəkdən məlumat sızacaq — **future leakage**!). **Düzəliş:** Mask həmişə **softmax-dan əvvəl** $-\infty$ (və ya `-1e9`) əlavə etməklə qoyulur.
+
+      **2. Softmax-ı yanlış ox (`axis=0` / sütun) üzrə tətbiq etmək**
+      $S_{i,j}$ matrisində $i$ sorğu verən token (sətir), $j$ isə baxılan açar tokendir (sütun). Hər $i$-ci tokenin payladığı diqqətin cəmi $1.0$ olmalıdır, ona görə softmax həmişə **sonuncu ox (`dim=-1` / hər sətir)** üzrə hesablanır.
+
+      **3. $\sqrt{d_k}$ əvəzinə $\sqrt{d_{\text{model}}}$ və ya $\sqrt{T}$-yə bölmək**
+      Skalyar hasilin dispersiyası ardıcıllıq uzunluğundan ($T$) asılı deyil, yalnız toplanan koordinatların sayından — yəni **həmin başın ölçüsündən ($d_k = d_{\text{model}} / h$)** asılıdır.
+
+      **4. Padding mask ilə Causal mask-ı qarışdırmaq**
+      Batch daxilində qısa cümlələrin sonuna əlavə edilən `<PAD>` tokenlərinə heç bir token diqqət yetirməməlidir (padding mask), causal mask isə hər tokenin özündən sağdakı həqiqi tokenləri görməsini əngəlləyir. Praktikada hər iki mask birləşdirilir.
+  - id: transformer-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndis seçimləri: $O(T^2)$ yaddaş divarı, FlashAttention və KV-Cache"
+    body: |
+      - **$O(T^2)$ hesablama və yaddaş mürəkkəbliyi:**
+        $Q K^T$ vurması $T \times T$ ölçülü matris yaradır. Kontekst uzunluğu $T = 2\,000$-dən $T = 32\,000$-ə ($16\times$) çıxanda attention matrisinin ölçüsü $16^2 = 256\times$ böyüyür! Uzun kontekstli LLM-lərdə GPU yaddaşını (VRAM) dolduran əsas səbəb budur.
+      - **FlashAttention:**
+        $T \times T$ matrisini tam şəkildə yavaş GPU HBM yaddaşına yazıb-oxumaq əvəzinə, blok-blok sürətli SRAM-da softmax hesablayır — riyazi nəticə 100% eyni qalır, amma yaddaş sərfi $O(T)$-yə düşür və sürət $2\text{--}4\times$ artır.
+      - **Inference zamanı KV-Cache:**
+        Yeni token generasiya edərkən əvvəlki tokenlərin $K$ və $V$ vektorlarını hər addımda yenidən hesablamaq əvəzinə GPU yaddaşında keşləyirik (**KV-Cache**). Bu, generasiyanı kəskin sürətləndirir, lakin uzun söhbətlərdə VRAM sərfiyyatının əsas hissəsinə çevrilir.
+mastery_criteria:
+  - "$Q, K, V$ matrislərinin ölçülərini və $\\text{softmax}(QK^T / \\sqrt{d_k})V$ əməliyyatının hər mərhələsindəki tensor formasını (shape) dəqiq müəyyən edirsən"
+  - "$\\sqrt{d_k}$ miqyaslamasının və softmax-dan əvvəlki Causal Masking-in riyazi səbəbini izah edə bilirsən"
+  - "Saf Python-da həm normal, həm də causal maskalı Scaled Dot-Product Attention funksiyasını sıfırdan yaza bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-dlatt-output-shape
+      type: mcq
+      title: "Attention matris ölçüləri (Shapes)"
+      prompt: |
+        Tutaq ki, bir attention başında ardıcıllıq uzunluğu $T = 10$, açar/sorğu ölçüsü $d_k = 64$, dəyər ölçüsü isə $d_v = 32$-dir:
+        - $Q \in \mathbb{R}^{10 \times 64}$
+        - $K \in \mathbb{R}^{10 \times 64}$
+        - $V \in \mathbb{R}^{10 \times 32}$
+
+        Diqqət çəkiləri matrisi $A = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right)$ və yekun çıxış $\text{Out} = A V$ matrislərinin ölçüləri (shapes) uyğun olaraq necədir?
+      skills: [dl-architectures, matrices-shapes]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "A: (64, 64) və Out: (64, 32)"
+          feedback: "Xeyr — $Q (10 \\times 64)$ ilə $K^T (64 \\times 10)$ vurulduqda $64$ ölçüsü ixtisar olunur."
+        - id: b
+          text: "A: (10, 10) və Out: (10, 32)"
+          feedback: "Doğru! $QK^T \\to (10, 64) \\times (64, 10) = (10, 10)$, sonra $A V \\to (10, 10) \\times (10, 32) = (10, 32)$."
+        - id: c
+          text: "A: (10, 64) və Out: (10, 64)"
+          feedback: "Xeyr — $A$ matrisi hər tokenin digər tokenlərə diqqətini göstərən $(T, T) = (10, 10)$ kvadrat matrisdir."
+      answer: b
+      explanation: "$QK^T$ hər token cütü arasındakı əlaqəni ölçdüyü üçün $(T, T) = (10, 10)$ ölçüsündədir. Onu $V (10, 32)$ matrisinə vurduqda $(10, 32)$ çıxışı alınır."
+    - id: q-dlatt-why-sqrt-dk
+      type: mcq
+      title: "Niyə kökaltı d_k-ya bölürük?"
+      prompt: "Scaled Dot-Product Attention düsturunda $QK^T$ hasilini $\\sqrt{d_k}$-ya bölməyin əsas riyazi məqsədi nədir?"
+      skills: [dl-architectures, dl-forward-pass]
+      category: concept
+      options:
+        - id: a
+          text: "Böyük $d_k$ ölçülərində skalyar hasilin dispersiyasını sabit saxlamaq ki, softmax doyma (saturation) bölgəsinə düşüb qradiyentləri sıfırlamasın"
+          feedback: "Doğru! Böyük skalyar hasillər softmax-ı 0 və 1 uclarına sıxışdırır, bu da backpropagation zamanı qradiyenti öldürür."
+        - id: b
+          text: "Matris vurmasının hesablama mürəkkəbliyini $O(T^2)$-dən $O(T)$-yə endirmək"
+          feedback: "Xeyr — skalyar ədədə bölmək matris vurmasının asimptotik mürəkkəbliyini dəyişmir."
+        - id: c
+          text: "Gələcək tokenləri maskalamaq (causal masking)"
+          feedback: "Xeyr — gələcək tokenlər $\\sqrt{d_k}$ ilə yox, yuxarı üçbucağa $-\\infty$ yazmaqla maskalanır."
+      answer: a
+      explanation: "$d_k$ artdıqca $q \\cdot k$ hasilinin dispersiyası $d_k$ qədər böyüyür. $\\sqrt{d_k}$-ya bölmək dispersiyanı yenidən $1$-ə qaytarır və softmax qradiyentlərini sağlam saxlayır."
+    - id: q-dlatt-causal-mask
+      type: mcq
+      title: "Causal Masking necə tətbiq olunur?"
+      prompt: "Avtoreqressiv (GPT tipli) Transformer-də $i$-ci tokenin gələcək $j > i$ tokenlərindən məlumat almaması üçün **Causal Mask** harada və necə tətbiq edilir?"
+      skills: [dl-architectures, dl-forward-pass]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Softmax-dan ƏVVƏL, $j > i$ mövqelərindəki score dəyərlərinə $-\\infty$ (və ya çox kiçik mənfi ədəd, məs. `-1e9`) yazmaqla"
+          feedback: "Doğru! $\\exp(-\\infty) = 0$ olduğu üçün softmax həmin mövqelərə tam $0.0$ çəki verir və qalan keçmiş mövqelərin cəmi $1.0$ olur."
+        - id: b
+          text: "Softmax-dan ƏVVƏL, $j > i$ mövqelərinə `0.0` yazmaqla"
+          feedback: "Yanlış — $\\exp(0.0) = 1.0 > 0$ olduğu üçün gələcək tokenlər sıfırlanmır, əksinə müsbət diqqət çəkisi alır!"
+        - id: c
+          text: "Yekun $A V$ matris vurmasından sonra çıxış vektorunun yarısını silməklə"
+          feedback: "Xeyr — $A V$ vurmasından sonra artıq gələcək tokenlərin dəyərləri keçmiş tokenlərlə qarışmış olur."
+      answer: a
+      explanation: "Softmax-da $0$ çəkisi almaq üçün giriş logit-i $0$ yox, $-\\infty$ olmalıdır ($\\exp(-\\infty) = 0$, halbuki $\\exp(0) = 1$)."
+    - id: q-dlatt-block-components
+      type: multi
+      title: "Transformer blokunun komponentləri"
+      prompt: "Standart Transformer blokunun daxilində aşağıdakılardan hansılar yer alır? **Hamısını seç.**"
+      skills: [dl-architectures]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Multi-Head Self-Attention qatı"
+          feedback: "Doğru — tokenlər arasında kontekstual məlumat mübadiləsini təmin edir."
+        - id: b
+          text: "Residual (Skip) bağlantılar ($x + \\text{SubLayer}(x)$) və Layer Normalization"
+          feedback: "Doğru — dərin şəbəkələrdə qradiyent axınını və aktivasiya sabitliyini qoruyur."
+        - id: c
+          text: "Mövqe üzrə müstəqil Feed-Forward MLP (Linear -> Qeyri-xətti aktivasiya -> Linear)"
+          feedback: "Doğru — hər tokenin topladığı məlumatı qeyri-xətti çevirmə ilə zənginləşdirir."
+        - id: d
+          text: "Gini Impurity əsasında budaqlanan qərar ağacı yarpaqları"
+          feedback: "Yanlış — Gini Impurity qərar ağaclarına aiddir, Transformer diferensiallanan neyron şəbəkədir."
+      answers: [a, b, c]
+      explanation: "Hər bir Transformer bloku Multi-Head Attention, Feed-Forward MLP, LayerNorm və hər iki alt-qatın ətrafındakı Residual bağlantılardan ibarətdir."
+exercises:
+  - id: ex-dlatt-scaled-attention
+    type: code
+    title: "Saf Python-da Scaled Dot-Product Attention (normal və causal) yaz"
+    prompt: |
+      Yalnız Python standart kitabxanasından (`math.exp`, `math.sqrt`) istifadə edərək iki funksiyanı implementasiya et:
+
+      1. `softmax_rows(matrix: list[list[float]]) -> list[list[float]]`:
+         - 2D matrisin **hər bir sətrinə** müstəqil olaraq rəqəmsal dayanıqlı softmax ($\exp(x_j - \max) / \sum \exp(x_r - \max)$) tətbiq edir və yeni 2D list qaytarır.
+
+      2. `scaled_dot_product_attention(Q, K, V, causal=False) -> list[list[float]]`:
+         - `Q` və `K` ölçüsü `(seq_len, d_k)`, `V` ölçüsü `(seq_len, d_v)` olan 2D float siyahılarıdır.
+         - $S_{i,j} = \frac{Q_i \cdot K_j}{\sqrt{d_k}}$ hesablayır.
+         - Əgər `causal=True` olarsa, $j > i$ olan bütün gələcək mövqelərin diqqət çəkisi sıfır olmalıdır (bunun üçün softmax-dan əvvəl həmin mövqelərə `-1e9` və ya `-math.inf` yaza bilərsən).
+         - Sətirlər üzrə softmax tətbiq edib alınan $(T \times T)$ çəki matrisini $V$ $(T \times d_v)$ matrisinə vuraraq $(T \times d_v)$ ölçülü yeni 2D list qaytarır.
+    skills: [dl-architectures, matrices-shapes, dl-forward-pass]
+    category: llm-architecture
+    difficulty: 3
+    hints:
+      - "`softmax_rows` içində hər `row` üçün `m = max(row)`, `exps = [math.exp(v - m) for v in row]` və `s = sum(exps)` hesabla."
+      - "`scale = math.sqrt(len(Q[0]))` tap. Hər `(i, j)` cütü üçün `causal and j > i` doğrudursa score-u `-1e9` (və ya `-math.inf`) et, əks halda `sum(Q[i][r] * K[j][r] for r in range(d_k)) / scale`."
+      - "Yekun çıxışda `i`-ci sətir və `col`-cu sütun elementi `sum(weights[i][j] * V[j][col] for j in range(seq_len))` ifadəsidir."
+    starter_code: |
+      import math
+
+
+      def softmax_rows(matrix: list[list[float]]) -> list[list[float]]:
+          # TODO: hər sətir üzrə rəqəmsal dayanıqlı softmax hesabla
+          return []
+
+
+      def scaled_dot_product_attention(
+          Q: list[list[float]],
+          K: list[list[float]],
+          V: list[list[float]],
+          causal: bool = False,
+      ) -> list[list[float]]:
+          # TODO: softmax((Q @ K^T) / sqrt(d_k)) @ V (causal=True olduqda j > i maskalanır)
+          return []
+    tests:
+      - name: "softmax_rows: sətir cəmləri 1.0 və rəqəmsal dayanıqlılıq"
+        code: |
+          sm = softmax_rows([[2.0, 2.0], [1000.0, 1000.0]])
+          assert abs(sm[0][0] - 0.5) < 1e-7 and abs(sm[0][1] - 0.5) < 1e-7
+          assert abs(sm[1][0] - 0.5) < 1e-7 and abs(sm[1][1] - 0.5) < 1e-7
+      - name: "Worked example yoxlaması (causal=False)"
+        code: |
+          Q = [[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+          K = [[2.0, 0.0, 0.0, 0.0], [2.0, 2.0, 0.0, 0.0]]
+          V = [[10.0, 0.0], [0.0, 20.0]]
+          out = scaled_dot_product_attention(Q, K, V, causal=False)
+          assert len(out) == 2 and len(out[0]) == 2
+          assert abs(out[0][0] - 5.0) < 1e-6 and abs(out[0][1] - 10.0) < 1e-6
+          assert abs(out[1][0] - 1.192029) < 1e-4 and abs(out[1][1] - 17.61594) < 1e-4
+      - name: "Causal Masking (causal=True): 0-cı token gələcək 1-ci tokeni görmür"
+        code: |
+          Q = [[2.0, 0.0, 0.0, 0.0], [0.0, 2.0, 0.0, 0.0]]
+          K = [[2.0, 0.0, 0.0, 0.0], [2.0, 2.0, 0.0, 0.0]]
+          V = [[10.0, 0.0], [0.0, 20.0]]
+          out_causal = scaled_dot_product_attention(Q, K, V, causal=True)
+          # 0-cı token yalnız özünə (j=0) baxa bilər -> çıxışı V[0] = [10.0, 0.0] olmalıdır
+          assert abs(out_causal[0][0] - 10.0) < 1e-6, f"Alınan: {out_causal[0]}"
+          assert abs(out_causal[0][1] - 0.0) < 1e-6, f"Alınan: {out_causal[0]}"
+          # 1-ci token həm j=0, həm j=1-ə baxa bilir
+          assert abs(out_causal[1][0] - 1.192029) < 1e-4
+    solution: |
+      import math
+
+
+      def softmax_rows(matrix: list[list[float]]) -> list[list[float]]:
+          result: list[list[float]] = []
+          for row in matrix:
+              max_val = max(row)
+              exps = [math.exp(x - max_val) for x in row]
+              total = sum(exps)
+              result.append([e / total for e in exps])
+          return result
+
+
+      def scaled_dot_product_attention(
+          Q: list[list[float]],
+          K: list[list[float]],
+          V: list[list[float]],
+          causal: bool = False,
+      ) -> list[list[float]]:
+          seq_len = len(Q)
+          d_k = len(Q[0])
+          d_v = len(V[0])
+          scale = math.sqrt(d_k)
+
+          scores: list[list[float]] = []
+          for i in range(seq_len):
+              row: list[float] = []
+              for j in range(seq_len):
+                  if causal and j > i:
+                      row.append(-math.inf)
+                  else:
+                      dot = sum(Q[i][r] * K[j][r] for r in range(d_k))
+                      row.append(dot / scale)
+              scores.append(row)
+
+          weights = softmax_rows(scores)
+          output: list[list[float]] = []
+          for i in range(seq_len):
+              out_row = [
+                  sum(weights[i][j] * V[j][col] for j in range(seq_len))
+                  for col in range(d_v)
+              ]
+              output.append(out_row)
+          return output
+    explanation: |
+      `softmax_rows` hər sətirdən həmin sətrin maksimumunu çıxaraq `math.exp` daşmasının (overflow) qarşısını alır. `scaled_dot_product_attention` isə $QK^T / \sqrt{d_k}$ hesablayır, `causal=True` olduqda $j > i$ xanalarına $-\infty$ qoyur ($\exp(-\infty) = 0.0$) və alınan diqqət çəkilərini $V$ matrisinə vurur.
+  - id: ex-dlatt-scale-factor-numeric
+    type: numeric
+    title: "Miqyaslanmış diqqət balının (Scaled Score) hesablanması"
+    prompt: |
+      Bir Transformer modelində hər attention başının ölçüsü $d_k = 64$-dür.
+      Əgər $i$-ci sorğu vektoru ilə $j$-ci açar vektorunun xam skalyar hasili $q_i \cdot k_j = 24$ olarsa, softmax-a daxil olmazdan əvvəl **miqyaslanmış bal** ($\frac{q_i \cdot k_j}{\sqrt{d_k}}$) neçəyə bərabər olar?
+    skills: [dl-architectures, dl-forward-pass]
+    category: math
+    difficulty: 1
+    answer: 3.0
+    tolerance: 0.01
+    hints:
+      - "Əvvəlcə $\\sqrt{d_k} = \\sqrt{64}$ dəyərini tap."
+      - "Xam skalyar hasili ($24$) həmin ədədə böl."
+    explanation: "$\\sqrt{d_k} = \\sqrt{64} = 8$. Miqyaslanmış bal $= \\frac{24}{8} = 3.0$."
+references:
+  - title: "Attention Is All You Need (Vaswani et al., 2017)"
+    url: https://arxiv.org/abs/1706.03762
+    note: "Orijinal Transformer arxitekturasını təqdim edən fundamental məqalə"
+  - title: "PyTorch Documentation — torch.nn.functional.scaled_dot_product_attention"
+    url: https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+    note: "PyTorch-da FlashAttention dəstəkli rəsmi SDPA funksiyası"

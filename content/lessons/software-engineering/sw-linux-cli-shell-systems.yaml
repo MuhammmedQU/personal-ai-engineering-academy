@@ -1,0 +1,448 @@
+id: sw-linux-cli-shell-systems
+track: software-engineering
+module: linux-cli-fundamentals
+title: "Linux, Command Line, POSIX İcazələri və AI Server Əməliyyatları"
+summary: "AI modellərinin 99%-i Linux serverlərdə və konteynerlərdə işləyir. POSIX fayl icazələrinin (chmod 600 vs 755) bit riyaziyyatını, stdin/stdout/stderr axınlarını, pipe zəncirlərini, təhlükəsiz bash skriptlərini (set -euo pipefail), proses idarəsini (SIGTERM vs SIGKILL, tmux, systemd) və GPU server diaqnostikasını (nvidia-smi) öyrənəcəksən."
+level: foundation
+estimated_minutes: [45, 65]
+prerequisites: [sw-git-debugging-structured-logging]
+next: null
+skills: [linux-cli, debugging, prod-docker-config]
+objectives:
+  - POSIX fayl icazələrinin (`r=4, w=2, x=1`) səkkizlik (octal) hesablamasını aparmaq və gizli açar faylları (`chmod 600`) üçün minimal imtiyaz prinsipini tətbiq etmək
+  - Standart axınları (`stdin`, `stdout`, `stderr`), pipe (`|`), yönləndirmə (`>`, `2>&1`) və exit code (`$?`) mexanizmləri ilə log analizi qurmaq
+  - "`set -euo pipefail` ilə səssiz xətaların qarşısını alan etibarlı shell skriptləri yazmaq"
+  - Uzaq Linux/GPU serverlərində prosesləri (`ps`, `htop`, `SIGTERM` vs `SIGKILL`), uzun təlim sessiyalarını (`tmux`, `systemd`) və `nvidia-smi` VRAM göstəricilərini diaqnoz etmək
+why_it_matters: |
+  Sənin noutbukun Windows və ya macOS ola bilər, lakin **Docker konteynerlərinin, bulud GPU klasterlərinin, CI/CD runner-lərinin və production API serverlərinin demək olar ki hamısı Linux-dur**.
+
+  Bir AI mühəndisi kimi qarşılaşacağın ən tipik real problemlər bunlardır:
+  - SSH açarı və ya `.env` faylı `chmod 644` (hər kəs oxuya bilir) qaldığı üçün SSH qoşulmur və ya API açarı sızır.
+  - 12 saatlıq PyTorch fine-tuning skriptini adi SSH terminalında başlatmısan; internetin 5 saniyəlik kəsilir, terminal bağlanır (`SIGHUP`) və 11 saatlıq təlim yarımçıq qırılır (çünki `tmux` və ya `systemd` işlətməmisən).
+  - 2 GB-lıq server log faylını Excel və ya VS Code ilə açmağa çalışırsan və kompüter donur — halbuki `grep`, `awk`, `sort | uniq -c` 1 saniyəyə cavab verir.
+terms:
+  - term: POSIX Permissions (chmod)
+    definition: Fayl və qovluqlar üçün Sahibi (User), Qrup (Group) və Digərləri (Other) üzrə Oxuma (`r=4`), Yazma (`w=2`) və İcra (`x=1`) icazə bitləri.
+  - term: Standard Streams (stdin/stdout/stderr)
+    definition: "Hər Linux prosesinin 3 standart kanalı — giriş (`0: stdin`), normal çıxış (`1: stdout`) və xəta çıxışı (`2: stderr`)."
+  - term: Exit Code (Çıxış Kodu)
+    definition: Proses bitdikdə əməliyyat sisteminə qaytardığı tam ədəd; `0` uğur, `1–255` isə xəta deməkdir.
+  - term: Pipe (`|`)
+    definition: Bir əmrin `stdout` çıxışını aralıq fayl yaratmadan birbaşa növbəti əmrin `stdin` girişinə ötürən axın operatoru.
+  - term: SIGTERM vs SIGKILL
+    definition: "`SIGTERM` (15) prosesə təmiz şəkildə dayanmaq (checkpoint yazmaq, bağlantını bağlamaq) şansı verir; `SIGKILL` (9) prosesi dərhal və zorla öldürür."
+  - term: tmux (Terminal Multiplexer)
+    definition: SSH bağlantısı qopsa belə serverdə arxa fonda işləməyə davam edən davamlı (persistent) terminal sessiya meneceri.
+sections:
+  - id: permissions-streams-processes
+    kind: explanation
+    title: "POSIX İcazələri, Standart Axınlar, Shell Təhlükəsizliyi və Proseslər"
+    body: |
+      ### 1. POSIX İcazə Riyaziyyatı (`chmod`)
+      Linux-da `ls -l` əmri hər fayl üçün 9 icazə simvolu göstərir — 3 qrup (hər biri 3 bit):
+      - **User (Sahib — u):** ilk 3 simvol
+      - **Group (Qrup — g):** orta 3 simvol
+      - **Other (Hamı — o):** son 3 simvol
+
+      Hər qrupun dəyəri ikilik çəkilərin cəmidir:
+      $$\text{read } (r) = 4, \quad \text{write } (w) = 2, \quad \text{execute } (x) = 1, \quad \text{yox } (-) = 0$$
+
+      | Simvolik | Səkkizlik (Octal) | Mənası | AI Mühəndisliyində İstifadəsi |
+      |---|---|---|---|
+      | `rw-------` | `600` | Yalnız sahib oxuyub yaza bilər | `.env`, `local-secrets.json`, `~/.ssh/id_ed25519` |
+      | `rw-r--r--` | `644` | Sahib yazır, hamı oxuyur | Konfiqurasiya şablonları, ictimai YAML/README |
+      | `rwxr-xr-x` | `755` | Sahib yazır/icra edir, hamı icra edir | Deploy skriptləri (`train.sh`), qovluqlar |
+      | `rwxrwxrwx` | `777` | Hamı hər şeyi dəyişib icra edə bilər | **HEÇ VAXT İSTİFADƏ ETMƏ** (kritik təhlükəsizlik boşluğu!) |
+
+      ---
+
+      ### 2. Standart Axınlar (`0`, `1`, `2`), Pipes və `set -euo pipefail`
+      Hər əmr iki fərqli çıxış kanalına yazır: normal data **`1` (`stdout`)**, xətalar isə **`2` (`stderr`)** kanalına.
+      - `python train.py > run.log 2>&1` — həm `stdout`, həm də `stderr`-i eyni fayla yönləndirir.
+      - `grep "ERROR" api.log | awk '{print $4}' | sort | uniq -c | sort -nr | head -n 5` — 2 GB-lıq logu RAM-a tam yükləmədən (streaming!) ən çox xəta verən 5 endpoint-i tapır.
+
+      **Bash skriptlərində qızıl ilk sətir:**
+      ```bash
+      #!/usr/bin/env bash
+      set -euo pipefail
+      ```
+      - `-e` (`errexit`): İstənilən əmr sıfırdan fərqli exit code qaytarsa skripti dərhal dayandır.
+      - `-u` (`nounset`): Təyin olunmamış dəyişən (məs. `$MODEL_DIR` boşdursa `rm -rf $MODEL_DIR/*` fəlakəti!) istifadə olunanda xəta ver.
+      - `-o pipefail`: `cmd1 | cmd2` zəncirində `cmd1` uğursuz olsa belə, `cmd2` uğurlu bitdiyinə görə xətanın gizlədilməsinə imkan vermə.
+
+      ---
+
+      ### 3. Proses İdarəsi, `tmux`, `systemd` və GPU Diaqnostikası
+      - **İlişmiş prosesi təmiz dayandırmaq:** Əvvəlcə `kill -TERM <PID>` (siqnal `15`) göndər ki, PyTorch modeli son checkpoint-i yaza və ya FastAPI cari HTTP sorğularını tamamlaya bilsin. Yalnız proses cavab vermədikdə `kill -9 <PID>` (`SIGKILL`) istifadə et.
+      - **`tmux`:** Uzun təlimi `tmux new -s train_lora` içində başlat; ayrılmaq üçün `Ctrl+B`, sonra `D`; sabah geri qayıtmaq üçün `tmux attach -t train_lora`.
+      - **`nvidia-smi`:** GPU VRAM istifadəsini, temperaturu və hansı PID-in yaddaşı tutduğunu göstərir. Əgər `GPU-Util` 5%-dirsə, amma VRAM 95%-dirsə — darboğaz GPU-da deyil, CPU `DataLoader` (I/O) tərəfindədir!
+  - id: factory-assembly-line-analogy
+    kind: analogy
+    title: "Mental model: Konveyer xətti (Pipes) və Seyf açarı (chmod 600)"
+    body: |
+      Unix fəlsəfəsini bir zavod konveyeri kimi düşün:
+      - **Hər CLI aləti bir ixtisaslaşmış işçi kimidir:** `grep` yalnız zədəli detalları seçir, `awk` yalnız etiket nömrəsini kəsib götürür, `sort` onları qruplaşdırır, `uniq -c` sayır.
+      - **Pipe (`|`)** bu işçilər arasındakı konveyer lentidir: birinci işçi 1 milyon detalın hamısını bitirib anbara yığmağı gözləmir — hər detalı tapdıqca dərhal növbəti işçiyə ötürür. Buna görə 10 GB-lıq log faylı cəmi bir neçə MB RAM ilə saniyələr içində analiz olunur!
+      - **`chmod 600`** isə şəxsi seyfin açarını yalnız öz cibində saxlamaqdır; `chmod 777` etmək isə seyfin qapısını açıq qoyub binadakı hər kəsə "buyurun, istədiyinizi dəyişin" deməkdir.
+  - id: linux-pipeline-diagram
+    kind: diagram
+    title: "Linux Axınları (stdin/stdout/stderr) və Uzaq GPU Server İş Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        SSH["Lokal PC (SSH + Key 600)"] --> TMUX["Uzaq Linux Server (tmux sessiyası)"]
+        TMUX --> TRAIN["python train.py"]
+        TRAIN -- "fd 1 (stdout)" --> LOG["train.log"]
+        TRAIN -- "fd 2 (stderr)" --> ERR["errors.log (və ya 2>&1)"]
+        LOG --> GREP["grep 'ERROR'"]
+        GREP --> AWK["awk / cut (endpoint çıxar)"]
+        AWK --> UNIQ["sort | uniq -c | sort -nr"]
+        UNIQ --> REPORT["Top Xəta Hesabatı"]
+        TRAIN -. "Monitorinq" .-> NV["nvidia-smi & htop"]
+      ```
+
+      Bu axın sayəsində SSH əlaqəsi kəsilsə belə `tmux` prosesi yaşayır, bütün çıxışlar log fayllarına düşür və səhvlər axın (pipe) ilə anında diaqnoz edilir.
+  - id: worked-chmod-and-exit-codes
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: chmod bit hesabı və Pipe exit-code fərqi"
+    body: |
+      ### Hissə A: `rwxr-x---` icazəsini səkkizlik (octal) ədədə çevirmək
+      9 simvolu 3-3 bölürük: `rwx` | `r-x` | `---`
+
+      | Qrup | Simvollar | Bit hesabı ($r=4, w=2, x=1$) | Rəqəm |
+      |---|---|---|---|
+      | User (Sahib) | `rwx` | $4 + 2 + 1$ | **$7$** |
+      | Group (Qrup) | `r-x` | $4 + 0 + 1$ | **$5$** |
+      | Other (Digərləri) | `---` | $0 + 0 + 0$ | **$0$** |
+
+      Yekun octal kod: **`750`** (`chmod 750 deploy.sh`).
+      İndi müqayisə et: əgər `.env` faylı `rw-r--r--` (`644`) olarsa:
+      - User = $4+2+0 = 6$
+      - Group = $4+0+0 = 4$ (qrup üzvləri API açarını oxuya bilir!)
+      - Other = $4+0+0 = 4$ (serverdəki bütün digər istifadəçilər oxuya bilir!)
+      **Düzəliş:** `chmod 600 .env` (`rw-------` $\implies 6, 0, 0$).
+
+      ---
+
+      ### Hissə B: `pipefail` olmadan gizlənən xəta
+      Təsəvvür et ki, CI/CD skriptində yazmısan:
+      ```bash
+      python eval_model.py | tee eval.log
+      ```
+      - `eval_model.py` çöksə və `exit code = 1` qaytarsa belə, `tee eval.log` əmri öz işini uğurla bitirib `exit code = 0` qaytarır!
+      - **`set -o pipefail` yoxdursa:** bütün sətirin çıxış kodu son əmrin kodu (`0`) olur və CI/CD yaşıl (PASS) göstərərək sınıq modeli production-a buraxır!
+      - **`set -o pipefail` varsa:** zəncirdə sıfırdan fərqli çıxış kodu (`1`) olduğu üçün bütün pipeline `1` (FAIL) qaytarır və buraxılışı dayandırır.
+  - id: cli-and-python-log-code
+    kind: code
+    title: "Kod: Bash Təlim Skripti + Python-da POSIX İcazə və Log Analizatoru"
+    body: |
+      **1. Təhlükəsiz Production / Training Bash şablonu:**
+      ```bash
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      : "${MODEL_DIR:?MODEL_DIR env dəyişəni təyin olunmalıdır}"
+      chmod 600 .env
+      python -u train.py --out "$MODEL_DIR" 2>&1 | tee -a "$MODEL_DIR/train.log"
+      ```
+
+      **2. Python-da POSIX simvolik icazə analizatoru (təhlükəsizlik auditi üçün):**
+      ```python
+      def parse_chmod_octal(perm: str) -> dict[str, int | bool]:
+          """Convert 9-char POSIX permission string (e.g. 'rw-------') to octal int & secret-safety flag."""
+          if len(perm) != 9:
+              raise ValueError("permission string must have exactly 9 characters")
+          weights = (4, 2, 1)
+          expected = ("r", "w", "x")
+          digits: list[int] = []
+          for group_idx in range(3):
+              chunk = perm[group_idx * 3 : (group_idx + 1) * 3]
+              val = 0
+              for ch, exp_ch, w in zip(chunk, expected, weights):
+                  if ch == exp_ch:
+                      val += w
+                  elif ch != "-":
+                      raise ValueError(f"invalid permission char '{ch}' in '{chunk}'")
+              digits.append(val)
+          octal_int = digits[0] * 100 + digits[1] * 10 + digits[2]
+          safe_for_secrets = (digits[1] == 0) and (digits[2] == 0)
+          return {"octal": octal_int, "safe_for_secrets": safe_for_secrets}
+
+
+      print(parse_chmod_octal("rw-------"))  # {'octal': 600, 'safe_for_secrets': True}
+      print(parse_chmod_octal("rwxr-xr-x"))  # {'octal': 755, 'safe_for_secrets': False}
+      ```
+  - id: common-linux-mistakes
+    kind: mistakes
+    title: "Ən çox edilən Linux və CLI səhvləri"
+    body: |
+      **1. İcazə xətasını "həll etmək" üçün `chmod 777` işlətmək**
+      `Permission denied` xətası aldıqda `chmod 777` yazmaq təhlükəsizlik baxımından fəlakətdir və SSH/Docker kimi sistemlər hətta `777` açar fayllarını qəsdən rədd edir. Həmişə faylın sahibini (`chown`) və minimal lazımi icazəni (`600` gizli fayl, `644` normal fayl, `755` skript) təyin et.
+
+      **2. Uzun ML təlimini `tmux` / `screen` olmadan birbaşa SSH-da işlətmək**
+      Wi-Fi kəsildiyi anda SSH sessiyası prosesə `SIGHUP` göndərir və 8 saatlıq GPU təlimi yarımçıq ölür. Həmişə `tmux` sessiyasında işlət və ya uzunmüddətli API-ləri `systemd` / Docker restart policy ilə idarə et.
+
+      **3. `set -e` və `pipefail` olmadan deploy skripti yazmaq**
+      Səssiz uğursuz olan `pytest | tee test.log` və ya boş `$TARGET_DIR` dəyişəni fəlakətli deploy və ya fayl silinməsinə səbəb olur. Hər skriptin əvvəlinə `set -euo pipefail` əlavə et.
+
+      **4. Prosesi dərhal `kill -9` ilə öldürmək**
+      `SIGKILL` (`-9`) prosesin fayl buffer-lərini boşaltmasına (flush) və SQLite/checkpoint yazısını tamamlamasına imkan vermir — fayl korlana bilər. Həmişə əvvəlcə `kill -TERM` (15) göndər.
+  - id: linux-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: Shell Pipes vs Python Skripti və tmux vs systemd"
+    body: |
+      - **Bash Pipes vs Python:** 1–3 sətirlik sürətli log axtarışı (`grep | awk | sort | uniq -c`) üçün shell pipes rəqibsiz sürətlidir. Lakin mürəkkəb JSON parsinqi, şərtli biznes məntiqi, retry və unit test tələb olunduqda Bash-ı uzatma — dərhal Python-a keç.
+      - **`tmux` vs `systemd` / Docker:** İnteraktiv eksperimentlər və bir dəfəlik GPU təlimləri üçün `tmux` idealdır. Lakin 7/24 işləməli olan FastAPI model serveri üçün `tmux` işlətmə — server yenidən başlayanda (reboot) `tmux` avtomatik qalxmır; bunun üçün `systemd` və ya Docker `restart: unless-stopped` lazımdır.
+mastery_criteria:
+  - İstənilən 9 simvollu POSIX icazəsini səkkizlik (octal) koda çevirə və gizli açar faylı üçün təhlükəsiz olub-olmadığını müəyyən edə bilirsən
+  - "`set -euo pipefail`, standart axın yönləndirməsi (`2>&1`) və `SIGTERM` vs `SIGKILL` fərqini izah edə bilirsən"
+  - Server log sətirlərindən 5xx xəta faizini və ən problemli endpoint-ləri avtomatik çıxaran Python/CLI analizatoru yaza bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-linux-chmod-secrets
+      type: mcq
+      title: "API açarı və SSH gizli açarı üçün düzgün chmod"
+      prompt: "Uzaq Linux GPU serverində API açarlarını saxlayan `.env` faylı üçün **ən təhlükəsiz** POSIX icazəsi hansıdır?"
+      skills: [linux-cli, prod-docker-config]
+      category: production
+      options:
+        - id: a
+          text: "`chmod 600 .env` (`rw-------`) — yalnız faylın sahibi oxuyub yaza bilər"
+          feedback: "Doğrudur! Qrup və digər istifadəçilərin heç bir oxuma/yazma icazəsi yoxdur (least privilege)."
+        - id: b
+          text: "`chmod 644 .env` (`rw-r--r--`) — hər kəs oxuya bilər"
+          feedback: "Yanlışdır — serverdəki digər istifadəçilər və ya aşağı imtiyazlı proseslər açarları oxuya bilər."
+        - id: c
+          text: "`chmod 777 .env` (`rwxrwxrwx`) — tam giriş"
+          feedback: "Kritik təhlükəsizlik səhvidir; hər kəs faylı həm oxuya, həm də dəyişə bilər."
+      answer: a
+      explanation: "Gizli açarlar (`id_ed25519`, `.env`, `local-secrets.json`) üçün minimum imtiyaz `600` (`rw-------`)-dir; hətta OpenSSH `644` olan gizli açarı rədd edir."
+    - id: q-linux-pipefail
+      type: mcq
+      title: "CI/CD-də set -o pipefail niyə vacibdir?"
+      prompt: "CI pipeline skriptində `pytest tests/ | tee test.log` yazılıb və `set -o pipefail` aktiv deyil. `pytest` uğursuz olub `exit code = 1` qaytarsa, `tee` isə uğurla yazıb `0` qaytarsa nə baş verər?"
+      skills: [linux-cli, debugging]
+      category: production
+      options:
+        - id: a
+          text: "Bütün pipeline exit code 0 (Uğurlu) qaytarır və sınmış testlərə baxmayaraq CI yaşıl görünür"
+          feedback: "Doğrudur! Standart Bash-da pipe-ın çıxış kodu yalnız ən sonuncu əmrin (`tee`) kodudur; `set -o pipefail` bu təhlükəli xətanın qarşısını alır."
+        - id: b
+          text: "Linux avtomatik olaraq `tee` prosesini bloklayır və 1 qaytarır"
+          feedback: "Yanlışdır — `pipefail` aktiv edilmədikcə Bash yalnız sonuncu əmrin koduna baxır."
+        - id: c
+          text: "`test.log` faylı boş qalır"
+          feedback: "Yanlışdır — `tee` çıxışı normal şəkildə fayla yazır və `0` qaytarır."
+      answer: a
+      explanation: "Standart halda Bash pipe-ın çıxış kodu ən sağdakı əmrin çıxış kodudur. `set -euo pipefail` əlavə etməklə zəncirin istənilən yerindəki xətanın CI-ı dayandırmasını təmin edirsən."
+    - id: q-linux-sigterm-vs-sigkill
+      type: mcq
+      title: "SIGTERM (15) vs SIGKILL (9)"
+      prompt: "Production-da işləyən model serving API-sini yeniləmək üçün dayandırmaq lazımdır. Niyə əvvəlcə `kill -TERM` (15) göndərib, dərhal `kill -9` işlətmirik?"
+      skills: [linux-cli]
+      category: concept
+      options:
+        - id: a
+          text: "`SIGTERM` prosesə cari sorğuları tamamlamaq, buffer-ləri və verilənlər bazası əməliyyatlarını təmiz bağlamaq (graceful shutdown) imkanı verir"
+          feedback: "Doğrudur! `SIGKILL` isə nüvə tərəfindən prosesi dərhal məhv edir, ona görə yarımçıq yazılmış fayl və ya kəsilmiş istifadəçi sorğuları qala bilər."
+        - id: b
+          text: "`kill -9` yalnız root istifadəçi tərəfindən işlədilə bilər"
+          feedback: "Yanlışdır — öz prosesinə istənilən siqnalı göndərə bilərsən; fərq təmiz bağlanma (graceful shutdown) mexanizmindədir."
+        - id: c
+          text: "`SIGTERM` prosesin yaddaşını ikiqat artırır"
+          feedback: "Yanlışdır — `SIGTERM` sadəcə proqramın tuta bildiyi təmiz dayanma siqnalıdır."
+      answer: a
+      explanation: "`SIGTERM` (15) tətbiq tərəfindən tutula bilir və graceful shutdown (checkpoint saxlama, açıq HTTP sorğularını bitirmə) edir; `SIGKILL` (9) yalnız donmuş proseslər üçün son çarədir."
+    - id: q-linux-gpu-triage
+      type: multi
+      title: "Uzaq GPU serverdə uzun təlim və diaqnostika qaydaları"
+      prompt: "Uzaq Linux GPU serverində 10 saatlıq model təlimi aparmaq üçün hansı mühəndislik addımları doğrudur? Hamısını seç."
+      skills: [linux-cli, debugging]
+      category: production
+      options:
+        - id: a
+          text: "Təlimi `tmux` (və ya `screen`) sessiyası daxilində başlatmaq ki, SSH əlaqəsi kəsildikdə proses qırılmasın"
+          feedback: "Bəli — `tmux` prosesi lokal terminal bağlantısından ayırır."
+        - id: b
+          text: "`nvidia-smi` ilə həm VRAM istifadəsini, həm də GPU-Util faizini yoxlamaq (aşağı GPU-Util CPU DataLoader darboğazını göstərə bilər)"
+          feedback: "Bəli — yüksək VRAM + aşağı GPU-Util klassik data yükləmə darboğazıdır."
+        - id: c
+          text: "Həm `stdout`, həm `stderr` axınlarını (`2>&1 | tee train.log`) log faylına yazmaq"
+          feedback: "Bəli — Python traceback-ləri `stderr`-ə yazıldığı üçün `2>&1` olmadan xəta səbəbi loga düşməyə bilər."
+        - id: d
+          text: "Bütün layihə qovluğuna `chmod -R 777 .` tətbiq etmək ki, heç vaxt icazə xətası çıxmasın"
+          feedback: "Xeyr — `chmod 777` ciddi təhlükəsizlik zəifliyidir."
+      answers: [a, b, c]
+      explanation: "`tmux` sessiya davamlılığını, `2>&1 | tee` tam loglanmanı, `nvidia-smi` isə GPU vs CPU darboğaz diaqnostikasını təmin edir."
+exercises:
+  - id: ex-linux-chmod-audit
+    type: code
+    title: "POSIX icazə analizatoru (parse_chmod_octal) yaz"
+    prompt: |
+      9 simvollu POSIX icazə sətirini (məs. `"rw-------"` və ya `"rwxr-xr-x"`) səkkizlik (`octal`) ədədə çevirən və gizli açarlar üçün təhlükəsiz olub-olmadığını yoxlayan `parse_chmod_octal(perm: str) -> dict` funksiyasını yaz:
+
+      **Müqavilə (Contract):**
+      1. `perm` dəqiq 9 simvoldan ibarət olmalıdır (`len(perm) != 9` olarsa `ValueError` qaldır).
+      2. Hər 3 simvolluq qrupda (`User`, `Group`, `Other`):
+         - 0-cı simvol `'r'` (4) və ya `'-'` (0),
+         - 1-ci simvol `'w'` (2) və ya `'-'` (0),
+         - 2-ci simvol `'x'` (1) və ya `'-'` (0) olmalıdır; başqa simvol olarsa `ValueError` qaldır.
+      3. `octal` açarı 3 rəqəmli tam ədəd olsun: `u * 100 + g * 10 + o` (məs. `"rw-------"` -> `600`, `"rwxr-xr-x"` -> `755`).
+      4. `safe_for_secrets` açarı `True` olsun yalnız və yalnız **Group == 0 VƏ Other == 0** olduqda.
+    skills: [linux-cli, prod-docker-config]
+    category: python
+    difficulty: 1
+    hints:
+      - "Hər qrup üçün `perm[i*3 : (i+1)*3]` dilimini götür və `('r', 4)`, `('w', 2)`, `('x', 1)` cütləri üzrə simvolları yoxla."
+      - "Yalnız icazə verilən simvol (`'r'`/`'w'`/`'x'`) və ya `'-'` qəbul et; qalan hər simvolda `raise ValueError(...)`. `safe_for_secrets` isə `g == 0 and o == 0` şərtidir."
+    starter_code: |
+      def parse_chmod_octal(perm: str) -> dict:
+          # TODO: 9 simvollu POSIX icazəsini yoxla, octal hesabla və safe_for_secrets qaytar
+          return {"octal": 0, "safe_for_secrets": False}
+    solution: |
+      def parse_chmod_octal(perm: str) -> dict:
+          if not isinstance(perm, str) or len(perm) != 9:
+              raise ValueError("permission string must have length 9")
+          spec = (("r", 4), ("w", 2), ("x", 1))
+          digits = []
+          for idx in range(3):
+              chunk = perm[idx * 3 : (idx + 1) * 3]
+              val = 0
+              for ch, (expected, weight) in zip(chunk, spec):
+                  if ch == expected:
+                      val += weight
+                  elif ch != "-":
+                      raise ValueError(f"invalid char {ch!r}")
+              digits.append(val)
+          octal = digits[0] * 100 + digits[1] * 10 + digits[2]
+          return {
+              "octal": octal,
+              "safe_for_secrets": digits[1] == 0 and digits[2] == 0,
+          }
+    tests:
+      - name: "chmod 600 gizli açar faylı üçün təhlükəsizdir"
+        code: |
+          assert parse_chmod_octal("rw-------") == {"octal": 600, "safe_for_secrets": True}
+      - name: "chmod 755 skript üçün düzgündür, gizli açar üçün təhlükəsiz deyil"
+        code: |
+          assert parse_chmod_octal("rwxr-xr-x") == {"octal": 755, "safe_for_secrets": False}
+      - name: "chmod 640 qrup oxuma icazəsi olduğu üçün gizli açar üçün təhlükəsiz deyil"
+        code: |
+          assert parse_chmod_octal("rw-r-----") == {"octal": 640, "safe_for_secrets": False}
+      - name: "Səhv uzunluq və ya səhv simvol mövqeyi ValueError qaldırır"
+        code: |
+          for bad in ("rw-", "xr-------", "rw-r--r--x"):
+              try:
+                  parse_chmod_octal(bad)
+                  assert False, f"Should have failed for {bad}"
+              except ValueError:
+                  pass
+    explanation: "POSIX icazələri 3 bitlik üç qrupdur (r=4, w=2, x=1). Gizli açar fayllarında Group və Other bitləri mütləq 0 olmalıdır (`600` və ya `400`), əks halda serverdəki digər istifadəçilər açarı oxuya bilər."
+  - id: ex-linux-log-triage
+    type: code
+    title: "CLI log axınını (grep | awk | sort | uniq -c) Python-da yaz"
+    prompt: |
+      Server log sətirlərini (`"TIMESTAMP LEVEL METHOD ENDPOINT STATUS LATENCY_MS"` formatında) analiz edən `triage_access_logs(lines: list[str]) -> dict` funksiyasını yaz:
+
+      Nümunə sətir: `"2026-11-20T10:00:01Z ERROR POST /api/predict 503 840"`
+
+      **Müqavilə (Contract):**
+      1. Boş sətirləri ötür.
+      2. Hər etibarlı sətirdə boşluğa görə 6 sütun var: `endpoint = parts[3]`, `status = int(parts[4])`.
+      3. Yalnız `status >= 500` olan sətirləri server xətası (`error_5xx_count`) kimi say və hər xətalı endpoint-in neçə dəfə 5xx verdiyini hesabla.
+      4. Qaytar:
+         - `"total_requests"`: etibarlı sorğuların ümumi sayı (`int`)
+         - `"error_5xx_count"`: `status >= 500` olan sorğuların sayı (`int`)
+         - `"error_rate"`: `round(error_5xx_count / total_requests, 4)` (əgər `total_requests == 0`, onda `0.0`)
+         - `"top_failing_endpoint"`: ən çox 5xx verən endpoint adı (`str`), heç 5xx yoxdursa `None` (bərabərlik halında əlifba sırası ilə birinci endpoint).
+    skills: [linux-cli, debugging]
+    category: production
+    difficulty: 2
+    hints:
+      - "Hər sətri `line.strip().split()` ilə böl; boşdursa `continue`. `endpoint = parts[3]`, `status = int(parts[4])`."
+      - "5xx xətalarını `dict` və ya `Counter` içində topla. Bərabərlikdə əlifba sırası üçün `min(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]` üsulundan istifadə et."
+    starter_code: |
+      def triage_access_logs(lines: list[str]) -> dict:
+          # TODO: total_requests, error_5xx_count, error_rate və top_failing_endpoint hesabla
+          return {
+              "total_requests": 0,
+              "error_5xx_count": 0,
+              "error_rate": 0.0,
+              "top_failing_endpoint": None,
+          }
+    solution: |
+      def triage_access_logs(lines: list[str]) -> dict:
+          total = 0
+          err_5xx = 0
+          failing: dict[str, int] = {}
+          for raw in lines:
+              parts = raw.strip().split()
+              if len(parts) < 6:
+                  continue
+              total += 1
+              endpoint = parts[3]
+              status = int(parts[4])
+              if status >= 500:
+                  err_5xx += 1
+                  failing[endpoint] = failing.get(endpoint, 0) + 1
+          top_ep = (
+              min(failing.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+              if failing
+              else None
+          )
+          rate = round(err_5xx / total, 4) if total > 0 else 0.0
+          return {
+              "total_requests": total,
+              "error_5xx_count": err_5xx,
+              "error_rate": rate,
+              "top_failing_endpoint": top_ep,
+          }
+    tests:
+      - name: "Normal və 5xx logların statistikasını və top failing endpoint-i tapır"
+        code: |
+          logs = [
+              "2026-11-20T10:00:01Z INFO GET /health 200 4",
+              "2026-11-20T10:00:02Z ERROR POST /api/predict 503 840",
+              "2026-11-20T10:00:03Z WARN POST /api/predict 422 15",
+              "2026-11-20T10:00:04Z ERROR POST /api/predict 500 910",
+              "2026-11-20T10:00:05Z ERROR POST /api/embed 502 500",
+          ]
+          res = triage_access_logs(logs)
+          assert res == {
+              "total_requests": 5,
+              "error_5xx_count": 3,
+              "error_rate": 0.6,
+              "top_failing_endpoint": "/api/predict",
+          }
+      - name: "Xəta olmadıqda top_failing_endpoint None olur"
+        code: |
+          logs = [
+              "2026-11-20T10:00:01Z INFO GET /health 200 3",
+              "2026-11-20T10:00:02Z WARN GET /items 404 9",
+          ]
+          res = triage_access_logs(logs)
+          assert res["error_5xx_count"] == 0
+          assert res["error_rate"] == 0.0
+          assert res["top_failing_endpoint"] is None
+      - name: "Boş siyahı və bərabərlik halı (əlifba sırası) düzgün işləyir"
+        code: |
+          assert triage_access_logs(["", "   "]) == {
+              "total_requests": 0,
+              "error_5xx_count": 0,
+              "error_rate": 0.0,
+              "top_failing_endpoint": None,
+          }
+          tie_logs = [
+              "2026-11-20T10:00:01Z ERROR POST /z-api 500 100",
+              "2026-11-20T10:00:02Z ERROR POST /a-api 503 120",
+          ]
+          assert triage_access_logs(tie_logs)["top_failing_endpoint"] == "/a-api"
+    explanation: "Bu məntiq Linux terminalındakı `awk '$5 >= 500 {print $4}' access.log | sort | uniq -c | sort -nr | head -1` boru xəttinin ekvivalentidir — 4xx client xətaları ilə 5xx server nasazlıqlarını ayırır və deterministik olaraq ən problemli endpoint-i tapır."
+references:
+  - title: "The Missing Semester of Your CS Education (MIT) — Shell Tools & Scripting"
+    url: "https://missing.csail.mit.edu/"
+    note: "Linux CLI, pipes, permissions, proseslər və tmux üçün ən praktik universitet kursu."
+  - title: "GNU Bash Reference Manual — Set Builtin (-euo pipefail)"
+    url: "https://www.gnu.org/software/bash/manual/html_node/The-Set-Builtin.html"
+    note: "Bash skriptlərində səssiz xətaların qarşısını alan rəsmi sənəd."

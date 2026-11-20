@@ -1,0 +1,422 @@
+id: ml-framing-baselines-splits
+track: classical-ml
+module: ml-foundations
+title: Problem framing, sadə baseline-lar və train/val/test bölgüsü
+summary: Qeyri-müəyyən biznes istəyini dəqiq riyazi ML məsələsinə çevirməyi, ilk modeldən əvvəl "axmaq" baseline qurmağı və datanı train, validation, test hissələrinə düzgün (stratified və ya zamana görə) bölməyi öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 65]
+prerequisites: [py-functions-contracts]
+next: ml-data-leakage
+skills: [ml-problem-framing, ml-data-splitting]
+objectives:
+  - Qeyri-müəyyən məhsul tələbini formal ML spesifikasiyasına (target y, features X, prediction horizon və uğur metriki) çevirmək
+  - Hər hansı ML modelindən əvvəl sadə baseline (majority class, mean və ya qayda əsaslı heuristic) qurub onun nəticəsini ölçmək
+  - Train, validation və test dəstlərinin rollarını ayırd etmək və test dəstini "bir dəfə açılan seyfdə" saxlamaq
+  - Sinif disbalansı olanda stratified split, zaman faktorlu datada isə chronological (time-based) split tətbiq etmək
+why_it_matters: |
+  Real işdə heç kim sənə *"bu `X` matrisindən `y` vektorunu F1 metriki ilə proqnozlaşdır"* demir. Biznes tərəfi deyir: *"Müştərilər gedir, AI ilə qarşısını alaq"* və ya *"Satışları artırmaq üçün tövsiyə sistemi lazımdır"*. Əgər problemi səhv çərçivələsən (wrong framing), ən güclü neyron şəbəkə belə tamamilə lazımsız suala dəqiq cavab verəcək.
+
+  Digər tərəfdən, yeni başlayan mühəndislər həftələrlə mürəkkəb model qurub *"92% dəqiqlik aldım!"* deyə sevinirlər — halbuki datanın 92%-i onsuz da eyni sinifdir və 1 sətirlik `return 0` funksiyası (majority baseline) eyni nəticəni 0 saniyədə verir. Düzgün baseline və sərt train/validation/test bölgüsü səni özünü aldatmaqdan qoruyan ilk mühəndislik qalxanıdır.
+terms:
+  - term: Problem framing
+    definition: Biznes problemini müşahidə vahidi (row), giriş əlamətləri ($X$), hədəf dəyişəni ($y$), proqnoz üfüqü (prediction horizon) və qiymətləndirmə metriki şəklində rəsmiləşdirmək prosesi.
+  - term: Target (y) və Features (X)
+    definition: "$y$ modelin proqnozlaşdırmalı olduğu çıxış (label), $X$ isə proqnoz anında artıq məlum olan giriş sütunlarıdır (əlamətlər)."
+  - term: Prediction horizon
+    definition: Proqnozun hansı gələcək zaman pəncərəsi üçün verildiyi (məsələn, 'növbəti 14 gün ərzində abunəni ləğv edəcəkmi?').
+  - term: Baseline model
+    definition: ML öyrənməsi olmadan qurulan ən sadə istinad nöqtəsi — təsnifatda ən çox rast gəlinən sinif (majority class), reqressiyada ortalama (mean) və ya sadə `if-else` qaydası.
+  - term: Train / Validation / Test split
+    definition: Datanın üç müstəqil hissəyə bölünməsi — Train (modelin çəkilərini öyrənmək üçün), Validation (hiperparametr və arxitektura seçmək üçün), Test (yekun qərar və hesabat üçün yalnız ən sonda bir dəfə işlədilən dəst).
+  - term: Stratified split
+    definition: Sinif nisbətlərini (məsələn, 95% normal, 5% fırıldaq) həm train, həm validation, həm də test dəstlərində eyni saxlayan bölgü üsulu.
+  - term: Time-based (chronological) split
+    definition: Zaman sıralı datanı təsadüfi qarışdırmadan tarixə görə bölmək (məsələn, yanvar-oktyabr train, noyabr validation, dekabr test) ki, gələcək keçmişə sızmasın.
+sections:
+  - id: framing-and-splits
+    kind: explanation
+    title: Biznes sualından formal ML məsələsinə və düzgün data bölgüsünə
+    body: |
+      Hər hansı kod yazmazdan əvvəl ML mühəndisi **4 fundamental suala** yazılı cavab verməlidir:
+
+      1. **Müşahidə vahidi və proqnoz anı ($t_0$) nədir?** Hər sətir nəyi təmsil edir — bir istifadəçini, bir sifarişi, yoxsa bir istifadəçi-gün cütünü? Proqnoz hansı anda verilir?
+      2. **Hədəf dəyişəni ($y$) və proqnoz üfüqü (horizon) nədir?**
+         - $y \in \{0, 1\}$ və ya sonlu kateqoriyalar $\rightarrow$ **Classification** (Təsnifat)
+         - $y \in \mathbb{R}$ (kəsilməz ədəd) $\rightarrow$ **Regression** (Reqressiya)
+         - Məsələn: *"Müştəri gedəcəkmi?"* qeyri-müəyyəndir. *"Aktiv müştəri $t_0$ tarixindən sonrakı **30 gün ərzində** abunəni ləğv edəcəkmi ($y=1$)?"* isə dəqiqdir.
+      3. **Giriş əlamətləri ($X$) hansılardır?** Yalnız $t_0$ anında və ya ondan **əvvəl** sistemdə mövcud olan məlumatlar $X$-ə daxil edilə bilər.
+      4. **Uğuru hansı metriklə ölçürük və baseline nədir?**
+
+      ### Niyə həmişə "axmaq" Baseline ilə başlamalıyıq?
+      İlk gün mürəkkəb model qurmaq əvəzinə 5 dəqiqəyə **sıfır-intellektli baseline** qur:
+      - **Classification üçün Majority Class Baseline:** Training datasında ən çox hansı sinif varsa, bütün nümunələr üçün həmişə həmin sinfi qaytar.
+      - **Regression üçün Mean / Median Baseline:** Training datasındakı $y_{train}$ ortalamasını ($\bar{y}_{train} = \frac{1}{n}\sum_{i=1}^n y_i$) hesabla və hər kəs üçün həmin ədədi proqnozlaşdır.
+      - **Heuristic Baseline:** Sahə ekspertinin işlətdiyi 1-2 sətirlik `if-else` qaydası (məsələn, *"son 7 gündə tətbiqə girməyibsə, churn=1"*).
+
+      Əgər qurduğun ML modeli bu baseline-ı əhəmiyyətli dərəcədə keçmirsə, ya əlamətlərin ($X$) zəifdir, ya da pipeline-da bug var.
+
+      ### Train, Validation və Test — üç fərqli rol
+      Modelin əzbərləmədiyini (generalization) yoxlamaq üçün datanı üç yerə bölürük:
+      - **Train set (~70-80%):** Modelin parametrlərini (`fit`) öyrətdiyimiz data.
+      - **Validation set (~10-15%):** Model ailəsini, əlamətləri və hiperparametrləri seçdiyimiz sınaq meydançası.
+      - **Test set (~10-15%):** Bütün eksperimentlər bitəndən sonra **yalnız bir dəfə** yekun keyfiyyəti ölçmək üçün açılan toxunulmaz data. Test nəticəsinə baxıb modeli yenidən dəyişsən, test set artıq gizli validation setə çevrilir!
+  - id: exam-analogy
+    kind: analogy
+    title: "Mental model: Dərs kitabı, sınaq imtahanı və rəsmi qəbul imtahanı"
+    body: |
+      Təsəvvür et ki, universitetə qəbul imtahanına hazırlaşırsan:
+
+      - **Train set — dərs kitabı və ev tapşırıqlarıdır:** Sualları da, arxadakı cavabları da görürsən. Mövzunu buradan öyrənirsən.
+      - **Validation set — aylıq sınaq imtahanlarıdır:** Hansı mövzuda zəif olduğunu, hansı hazırlıq metodunun işlədiyini burada yoxlayırsan və strategiyanı dəyişirsən.
+      - **Test set — rəsmi qəbul imtahanıdır:** İldə bir dəfə girirsən. Sualları əvvəlcədən görsən və ya imtahandan çıxıb *"cavablara baxım, eyni suallarla bir də imtahan verim"* desən, aldığın bal sənin real biliyini yox, sualları əzbərlədiyini göstərər.
+      - **Baseline isə imtahana heç hazırlaşmadan girib bütün suallarda "A" variantını qaralamaqdır:** Əgər 3 ay kursa gedəndən sonra topladığın bal kor-koranə "A" yazan adamın balından çox deyilsə, hazırlıq metodun işləmir.
+  - id: split-workflow-diagram
+    kind: diagram
+    title: Problem framing və data splitting qərar axını
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Biznes istəyi: 'Gecikən sifarişləri azaldaq'"] --> B["Problem Framing: X (sifariş anı), y (gecikmə > 15 dəq), Metrik"]
+        B --> C{"Datanın təbiəti necədir?"}
+        C -- "Zaman asılılığı / trend var" --> D["Time-based Split (Keçmiş -> Train, Yaxın tarix -> Val, Ən yeni -> Test)"]
+        C -- "Zamandan asılı deyil, sinif disbalansı var" --> E["Stratified Split (Sinif faizlərini qoruyaraq böl)"]
+        C -- "Zamandan asılı deyil, balanslı / reqressiya" --> F["Random Split (Sabit random_state ilə)"]
+        D --> G["1. Train üzərində Baseline qur və Val-da ölç"]
+        E --> G
+        F --> G
+        G --> H["2. ML modellərini Train-də öyrət, Val-da müqayisə et"]
+        H --> I["3. Ən yaxşı modeli SEÇ və yalnız sonda Test-də 1 dəfə yoxla"]
+      ```
+
+      Diqqət et: hansı split növünü seçməyindən asılı olmayaraq, **Baseline** hər zaman ilk addımdır və **Test set** yalnız ən son qutuda açılır.
+  - id: worked-delivery-eta
+    kind: worked_example
+    title: "Addım-addım nümunə: Çatdırılma müddəti üçün хроnoloji split və baseline"
+    body: |
+      Bir yemək çatdırılma şirkəti sifarişin neçə dəqiqəyə çatacağını ($y \in \mathbb{R}$, reqressiya) proqnozlaşdırmaq istəyir. Əlimizdə tarixə görə sıralanmış 10 sifarişin çatdırılma müddəti (dəqiqə ilə) var:
+
+      $$\text{items} = [30, 34, 28, 32, 36, 40, 38, 42, 45, 50]$$
+
+      **1. Xronoloji bölgü (Time-based split):**
+      Nisbətlər: `train_ratio = 0.6` (60%), `val_ratio = 0.2` (20%), qalan 20% isə `test`.
+      - $n = 10$
+      - $n_{train} = \lfloor 10 \times 0.6 \rfloor = 6 \implies y_{train} = [30, 34, 28, 32, 36, 40]$
+      - $n_{val} = \lfloor 10 \times 0.2 \rfloor = 2 \implies y_{val} = [38, 42]$
+      - Qalanlar $\implies y_{test} = [45, 50]$
+
+      *(Niyə random bölmədik? Çünki şəhərdə tıxac və kuryer yükü son günlərdə artıb: son sifarişlər 40-50 dəqiqə çəkir. Random bölsəydik, gələcəkdəki tıxac məlumatı train-ə düşüb modeli süni şəkildə şişirdərdi.)*
+
+      **2. Mean Baseline qurulması (yalnız $y_{train}$ üzərində!):**
+
+      $$\bar{y}_{train} = \frac{30 + 34 + 28 + 32 + 36 + 40}{6} = \frac{200}{6} \approx 33.33\text{ dəq}$$
+
+      **3. Validation üzərində yoxlama:**
+      Baseline hər iki validation sifarişi üçün $\hat{y} = 33.33$ deyir.
+      Validation-da həqiqi dəyərlər $[38, 42]$-dir. Orta mütləq xəta (MAE):
+
+      $$\text{MAE}_{val} = \frac{|38 - 33.33| + |42 - 33.33|}{2} = \frac{4.67 + 8.67}{2} = 6.67\text{ dəq}$$
+
+      İndi hədəfimiz aydındır: quracağımız hər hansı ML modeli validation dəstində **6.67 dəqiqədən daha aşağı** xəta verməlidir.
+  - id: code-baselines-and-splits
+    kind: code
+    title: "Kod: Pure Python ilə baseline-lar və xronoloji split"
+    body: |
+      ```python
+      from collections import Counter
+
+
+      def majority_class_baseline(y_train: list[int], n_preds: int) -> list[int]:
+          """Return `n_preds` predictions equal to the most frequent class in `y_train`.
+
+          Contract:
+          - Raises ValueError if `y_train` is empty or `n_preds < 0`.
+          - Ties are broken deterministically by choosing the smaller class label.
+          """
+          if not y_train:
+              raise ValueError("y_train cannot be empty")
+          if n_preds < 0:
+              raise ValueError("n_preds must be non-negative")
+
+          counts = Counter(y_train)
+          # Ən yüksək tezlik, bərabərlik olarsa ən kiçik sinif etiketi:
+          best_class = min(counts.keys(), key=lambda c: (-counts[c], c))
+          return [best_class] * n_preds
+
+
+      def train_val_test_split_chronological(
+          items: list, train_ratio: float = 0.7, val_ratio: float = 0.15
+      ) -> tuple[list, list, list]:
+          """Split sequential data into (train, val, test) preserving time order."""
+          if not (0.0 < train_ratio < 1.0) or not (0.0 < val_ratio < 1.0):
+              raise ValueError("Ratios must be between 0 and 1")
+          if train_ratio + val_ratio >= 1.0:
+              raise ValueError("train_ratio + val_ratio must be strictly less than 1.0")
+
+          n = len(items)
+          train_end = int(n * train_ratio)
+          val_end = train_end + int(n * val_ratio)
+          return items[:train_end], items[train_end:val_end], items[val_end:]
+
+
+      # Nümunə istifadə:
+      history = [0, 0, 1, 0, 0, 0, 1, 0, 1, 1]
+      train, val, test = train_val_test_split_chronological(history, 0.6, 0.2)
+      preds = majority_class_baseline(train, len(val))
+      print("Train:", train)          # [0, 0, 1, 0, 0, 0]
+      print("Val:", val)              # [1, 0]
+      print("Baseline preds:", preds) # [0, 0]
+      ```
+
+      Vacib məqamlar:
+      - `majority_class_baseline` statistikasını **yalnız** `y_train`-dən öyrənir, `val` və ya `test` etiketlərinə baxmır.
+      - Bərabər sayda sinif olanda (`tie-breaking`) `Counter.most_common(1)` daxiletmə sırasından asılı ola bilər; `min(..., key=lambda c: (-counts[c], c))` isə həmişə deterministik nəticə verir.
+      - Xronoloji bölgüdə `items` qarışdırılmır (`shuffle=False`), çünki zaman sırasını pozmaq gələcəkdən keçmişə məlumat sızdırır.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Zaman sıralı datada `train_test_split(..., shuffle=True)` işlətmək**
+      Səhm qiymətləri, satış proqnozu, kredit gecikməsi və ya log datasında `scikit-learn`-ün standart `train_test_split` funksiyasını default parametrlə (`shuffle=True`) çağırmaq ən klassik səhvdir. Sabahın datası train-ə, dünənin datası test-ə düşür — model trendi əzbərləyir, production-da isə çökür.
+
+      **2. Disbalanslı datada adi random split işlətmək**
+      Əgər datada cəmi 1% pozitiv nümunə varsa (məsələn, 1000 sətirdən 10-u), kiçik test dəstinə təsadüfən 0 və ya 1 pozitiv nümunə düşə bilər. Təsnifatda zamandan asılı olmayan data üçün həmişə `stratify=y` istifadə et.
+
+      **3. Test dəstini dəfələrlə yoxlamaq (Test set overfitting)**
+      Modeli test dəstində yoxlayıb *"nəticə zəif çıxdı, gedim feature əlavə edim və yenə test-də yoxlayım"* demək test dəstini korlayır. Bütün axtarış və müqayisələr **validation** dəstində aparılmalıdır.
+
+      **4. Proqnoz anında ($t_0$) mövcud olmayan hədəf qurmaq**
+      Biznesə *"hansı müştəriyə endirim kuponu göndərək?"* qərarı sifariş tamamlanmazdan **əvvəl** lazımdır, amma mühəndis səhvən sifariş tamamlandıqdan sonrakı reytinq sütununu $X$-ə daxil edir.
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Heuristic baseline vs ML modeli:** Əgər 3 sətirlik `if-else` qaydası 83% dəqiqlik verirsə və mürəkkəb Gradient Boosting modeli 84% verirsə, çox vaxt sadə qaydanı production-a çıxarmaq daha doğrudur — ML modelinin saxlanma, monitoring və retrain xərci 1%-ə dəyməyə bilər.
+      - **Sabit Train/Val/Test split vs Cross-Validation:** Böyük datada (məsələn, >100,000 sətir) tək 80/10/10 split kifayətdir və sürətlidir. Kiçik datada (<5,000 sətir) tək validation split təsadüfi səs-küyə həssas olur; orada $k$-fold cross-validation üstünlük təşkil edir.
+      - **Time-based split-də köhnə datanın aktuallığı:** Xronoloji split-də test dəsti həmişə ən son dövrü əhatə edir, bu isə training modelinin ən son həftələrin datasını görməməsi deməkdir. Production-a çıxmazdan əvvəl seçilmiş arxitektura çox vaxt ən son datanı da daxil etməklə yenidən (`retrain`) öyrədilir.
+mastery_criteria:
+  - İstənilən məhsul ideyasını target y, features X, prediction horizon və baseline ilə dəqiq ML tapşırığı kimi yaza bilirsən
+  - Verilmiş problem üçün Random, Stratified və ya Time-based split-dən hansının və niyə seçilməli olduğunu əsaslandıra bilirsən
+  - Pure Python-da həm baseline funksiyasını, həm də xronoloji train/val/test bölgüsünü edge case-lərlə birlikdə yaza bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlfbs-baseline-purpose
+      type: mcq
+      title: Baseline modelin əsas məqsədi
+      prompt: ML layihəsinə başlayarkən ilk növbədə sadə baseline (məsələn, majority class və ya mean) qurmağın əsas mühəndislik səbəbi nədir?
+      skills: [ml-problem-framing]
+      category: concept
+      options:
+        - id: a
+          text: Baseline modeli birbaşa son istifadəçilərə ən yüksək dəqiqliklə xidmət göstərir
+          feedback: Baseline-ın məqsədi yüksək dəqiqlik yox, minimum istinad həddi yaratmaqdır.
+        - id: b
+          text: Mürəkkəb modelin həqiqətən dəyər qatıb-qatmadığını ölçmək üçün aşağı istinad həddi (benchmark) yaradır və pipeline-u erkən test edir
+          feedback: Doğru! Baseline-ı keçə bilməyən model ya faydasızdır, ya da kodda bug var.
+        - id: c
+          text: Training datasının həcmini iki dəfə artırır
+          feedback: Baseline data yaratmır, sadə qayda ilə proqnoz verir.
+      answer: b
+      explanation: Baseline həm uçdan-uca qiymətləndirmə pipeline-nı tez yoxlamağa imkan verir, həm də sonrakı ML modellərinin keçməli olduğu minimum keyfiyyət həddini müəyyən edir.
+    - id: q-mlfbs-split-strategy
+      type: mcq
+      title: Hansı split strategiyası seçilməlidir?
+      prompt: "2024-cü ilin yanvar-noyabr ayları üzrə gündəlik elektrik enerjisi sərfiyyatı datası var və məqsəd növbəti ayın sərfiyyatını proqnozlaşdırmaqdır. Datanı necə bölmək lazımdır?"
+      skills: [ml-data-splitting]
+      category: data
+      options:
+        - id: a
+          text: Bütün günləri təsadüfi qarışdırıb (random shuffle) 80/10/10 bölmək
+          feedback: Zaman sıralı datanı qarışdırdıqda gələcək günlər keçmişin proqnozunda iştirak edir və nəticə süni şəkildə şişir.
+        - id: b
+          text: Tarixə görə ardıcıl (time-based) bölmək — məsələn, yanvar-sentyabr train, oktyabr validation, noyabr test
+          feedback: Doğru! Real həyatda model keçmişdə öyrənib gələcəyi proqnozlaşdırır; split də bunu simulyasiya etməlidir.
+        - id: c
+          text: Yalnız cüt günləri train, tək günləri test etmək
+          feedback: Bu halda da ardıcıl günlər bir-birinə sızır və gələcək keçmişi proqnozlaşdırmaq üçün istifadə olunur.
+      answer: b
+      explanation: Zaman faktorlu (temporal) məsələlərdə train həmişə validation-dan əvvəl, validation isə test-dən əvvəl gəlməlidir.
+    - id: q-mlfbs-test-set-rule
+      type: mcq
+      title: Test dəstinin qızıl qaydası
+      prompt: Validation və Test dəstləri arasındakı fərq barədə hansı fikir doğrudur?
+      skills: [ml-data-splitting]
+      category: concept
+      options:
+        - id: a
+          text: Hiperparametrləri (məsələn, ağacın dərinliyini) Test dəstində seçib, ən sonda Validation dəstində hesabat veririk
+          feedback: Əksinə — seçim Validation dəstində edilir, yekun hesabat Test dəstində verilir.
+        - id: b
+          text: Model arxitekturası və hiperparametrlər Validation dəstində seçilir; Test dəsti isə yalnız bütün qərarlar bitdikdən sonra yekun qiymətləndirmə üçün bir dəfə işlədilir
+          feedback: Doğru! Test dəstinə baxıb qərar dəyişmək test dəstinə qarşı overfitting yaradır.
+        - id: c
+          text: Hər epoch-dan sonra modeli Test dəstində yoxlayıb learning rate-i ona görə tənzimləmək lazımdır
+          feedback: Bu, test dəstini birbaşa optimizasiya prosesinə qoşur və onun müstəqilliyini pozur.
+      answer: b
+      explanation: Hər hansı model seçimi qərarında iştirak edən data artıq müstəqil test dəsti sayılmır.
+    - id: q-mlfbs-majority-calc
+      type: text
+      title: Majority baseline dəqiqliyi
+      prompt: |
+        Bir fırıldaqçılıq (fraud) datasında 1000 əməliyyatdan 950-si normal (`0`), 50-si fırıldaqdır (`1`).
+        Həmişə majority class (`0`) proqnozlaşdıran baseline model bu datada neçə faiz Accuracy (dəqiqlik) alacaq? Yalnız ədədi yaz (məsələn: `80`).
+      skills: [ml-problem-framing]
+      category: ml-metric
+      accepted: ["95", "95%", "95.0"]
+      explanation: "1000 nümunənin hamısına `0` dedikdə 950 normal əməliyyat düz tapılır: 950 / 1000 = 95%."
+exercises:
+  - id: ex-mlfbs-chronological-and-baseline
+    type: code
+    title: Xronoloji split və majority baseline funksiyalarını yaz
+    prompt: |
+      İki pure-Python funksiyası implementasiya et:
+
+      1. `train_val_test_split_chronological(items, train_ratio, val_ratio)`:
+         - `items` list-ini sırasını **dəyişmədən** `(train, val, test)` tuple-na bölür.
+         - `train_end = int(len(items) * train_ratio)` və `val_end = train_end + int(len(items) * val_ratio)` indekslərindən istifadə et.
+         - Input list-dən kəsilmiş yeni dilimlər (slices) qaytarır.
+         - Əgər `train_ratio <= 0` və ya `val_ratio <= 0` və ya `train_ratio + val_ratio >= 1.0` olarsa, `ValueError` qaldır.
+
+      2. `majority_class_baseline(y_train, n_preds)`:
+         - `y_train` içində ən çox təkrarlanan sinfi tapır və uzunluğu `n_preds` olan `[best_class, ...]` list-i qaytarır.
+         - Əgər iki sinfin sayı bərabərdirsə (tie), **daha kiçik ədədi** seç (məsələn, `0` və `1` bərabərdirsə `0`).
+         - Əgər `y_train` boşdursa və ya `n_preds < 0` olarsa, `ValueError` qaldır.
+    skills: [ml-problem-framing, ml-data-splitting]
+    category: python
+    difficulty: 2
+    hints:
+      - "Nisbət yoxlaması: `if train_ratio <= 0 or val_ratio <= 0 or (train_ratio + val_ratio) >= 1.0: raise ValueError(...)`."
+      - "`from collections import Counter` ilə tezlikləri say, sonra `min(counts.keys(), key=lambda k: (-counts[k], k))` ilə ən çox təkrarlanan (bərabərlikdə ən kiçik) sinfi seç."
+    starter_code: |
+      from collections import Counter
+
+
+      def train_val_test_split_chronological(
+          items: list, train_ratio: float, val_ratio: float
+      ) -> tuple[list, list, list]:
+          # TODO: nisbətləri yoxla və (train, val, test) qaytar
+          pass
+
+
+      def majority_class_baseline(y_train: list[int], n_preds: int) -> list[int]:
+          # TODO: y_train-də ən çox rast gəlinən sinfi n_preds dəfə qaytar
+          pass
+    tests:
+      - name: Xronoloji split 10 elementi 60/20/20 bölür
+        code: |
+          data = list(range(10))
+          tr, va, te = train_val_test_split_chronological(data, 0.6, 0.2)
+          assert tr == [0, 1, 2, 3, 4, 5], f"train səhvdir: {tr}"
+          assert va == [6, 7], f"val səhvdir: {va}"
+          assert te == [8, 9], f"test səhvdir: {te}"
+      - name: Yanlış nisbətlərdə ValueError qaldırır
+        code: |
+          for bad in [(0.0, 0.2), (0.5, -0.1), (0.8, 0.2), (0.9, 0.3)]:
+              try:
+                  train_val_test_split_chronological([1, 2, 3], bad[0], bad[1])
+                  assert False, f"{bad} üçün ValueError qaldırılmalı idi"
+              except ValueError:
+                  pass
+      - name: Majority baseline əsas və bərabərlik (tie) halları
+        code: |
+          assert majority_class_baseline([1, 0, 1, 1, 0], 3) == [1, 1, 1]
+          assert majority_class_baseline([1, 0, 1, 0], 2) == [0, 0], "tie halında kiçik etiket seçilməlidir"
+          assert majority_class_baseline([2, 2], 0) == []
+      - name: Boş y_train və mənfi n_preds üçün ValueError
+        code: |
+          try:
+              majority_class_baseline([], 3)
+              assert False, "boş y_train üçün ValueError gözlənilirdi"
+          except ValueError:
+              pass
+          try:
+              majority_class_baseline([1, 0], -1)
+              assert False, "mənfi n_preds üçün ValueError gözlənilirdi"
+          except ValueError:
+              pass
+    solution: |
+      from collections import Counter
+
+
+      def train_val_test_split_chronological(
+          items: list, train_ratio: float, val_ratio: float
+      ) -> tuple[list, list, list]:
+          if train_ratio <= 0 or val_ratio <= 0 or (train_ratio + val_ratio) >= 1.0:
+              raise ValueError("Invalid split ratios")
+          n = len(items)
+          train_end = int(n * train_ratio)
+          val_end = train_end + int(n * val_ratio)
+          return items[:train_end], items[train_end:val_end], items[val_end:]
+
+
+      def majority_class_baseline(y_train: list[int], n_preds: int) -> list[int]:
+          if not y_train:
+              raise ValueError("y_train cannot be empty")
+          if n_preds < 0:
+              raise ValueError("n_preds must be non-negative")
+          counts = Counter(y_train)
+          best_class = min(counts.keys(), key=lambda c: (-counts[c], c))
+          return [best_class] * n_preds
+    explanation: |
+      `train_val_test_split_chronological` ardıcıllığı qoruyaraq kəsim nöqtələrini hesablayır, `majority_class_baseline` isə yalnız `y_train` tezliklərindən istifadə edib deterministik baseline proqnozu yaradır.
+  - id: ex-mlfbs-stratified-choice
+    type: mcq
+    title: Nadir xəstəlik diaqnostikasında split seçimi
+    prompt: |
+      Tibbi müayinə datasında 10,000 pasiyent var, onlardan yalnız 80 nəfərində (0.8%) nadir xəstəlik (`y=1`) aşkarlanıb. Pasiyentlər bir-birindən müstəqildir və zaman trendi yoxdur.
+
+      Train/validation/test bölgüsü üçün ən düzgün yanaşma hansıdır?
+    skills: [ml-data-splitting]
+    category: data
+    difficulty: 1
+    hints:
+      - "Adi təsadüfi bölgüdə 0.8%-lik nadir sinif kiçik validation/test dəstlərində təsadüfən çox az düşə bilər."
+      - "Sinif nisbətini hər üç dəstdə eyni saxlayan bölgü növü `stratify=y` parametridir."
+    options:
+      - id: a
+        text: Stratified split istifadə etmək ki, hər üç dəstdə (train, val, test) ~0.8% pozitiv xəstə nisbəti qorunsun
+        feedback: Doğru! Stratified split nadir sinfin bütün dəstlərdə proporsional təmsil olunmasını təmin edir.
+      - id: b
+        text: İlk 80 pozitiv xəstənin hamısını train dəstinə qoymaq ki, model onları yaxşı öyrənsin
+        feedback: Onda validation və test dəstlərində heç bir pozitiv xəstə qalmaz və modeli qiymətləndirmək mümkün olmaz!
+      - id: c
+        text: Yalnız 80 pozitiv xəstəni saxlayıb qalan 9,920 sağlam pasiyenti datadan silmək
+        feedback: Yalnız bir sinif qalsa model hər kəsə xəstə deyər və sağlam insanları ayırd edə bilməz.
+    answer: a
+    explanation: Sinif disbalansı güclü olduqda adi təsadüfi bölgü kiçik dəstlərdə nadir sinfin sayını təhrif edə bilər; stratified split bu nisbəti sabit saxlayır.
+  - id: ex-mlfbs-frame-churn
+    type: explain
+    title: "Problem Framing: Abunə ləğvi (Churn) məsələsini rəsmiləşdir"
+    prompt: |
+      Mobil musiqi tətbiqinin məhsul meneceri sənə deyir:
+      *"İstifadəçilər premium abunəni ləğv edir. ML modeli quraq ki, kimlərin gedəcəyini əvvəlcədən bilək və onlara hədiyyə təklif edək."*
+
+      Bu qeyri-müəyyən istəyi 4 bənddə formal ML spesifikasiyasına çevir:
+      1. Müşahidə vahidi, proqnoz anı ($t_0$) və hədəf dəyişəni ($y$ + prediction horizon)
+      2. Proqnoz anında icazəli olan ən azı 3 giriş əlaməti ($X$)
+      3. İlk gün quracağın sadə baseline (majority və ya heuristic)
+      4. Train/Val/Test split strategiyası və səbəbi
+    skills: [ml-problem-framing, ml-data-splitting]
+    category: concept
+    difficulty: 2
+    hints:
+      - "Hədəf üçün zaman pəncərəsi seç: məsələn, növbəti 14 və ya 30 gün ərzində abunəni yeniləməmək."
+      - "Əlamətlər yalnız $t_0$ tarixinə qədərki davranışlardan (dinləmə saatı, son giriş tarixi, ödəniş uğursuzluğu) ibarət olmalıdır."
+    rubric:
+      - "Hədəf dəyişənini ($y \\in \\{0, 1\\}$) konkret prediction horizon (məs. növbəti 30 gün) ilə təyin edir"
+      - "Proqnoz anında ($t_0$) məlum olan ən azı 3 tarixi əlamət ($X$) sadalayır"
+      - "Aydın bir baseline (majority class və ya 'son 7 gündə aktiv olmayıbsa churn=1' kimi heuristic) təklif edir"
+      - "Zaman kəsiyinə görə (time-based/cohort) və ya sinif disbalansını nəzərə alan split strategiyasını əsaslandırır"
+    model_answer: |
+      1. **Müşahidə vahidi və Hədəf ($y$):** Hər sətir $t_0$ tarixində aktiv premium abunəçidir. $y = 1$ əgər istifadəçi $[t_0, t_0 + 30\text{ gün}]$ pəncərəsində abunəsini ləğv edərsə, əks halda $y = 0$ (binary classification).
+      2. **Əlamətlər ($X$):** $t_0$-dan əvvəlki son 7 və 30 gündə dinlənilən dəqiqə sayı, son 7 gündə əvvəlki aya nisbətən aktivlik azalması, tətbiqə son girişdən keçən gün sayı, dəstək xidmətinə şikayət sayı.
+      3. **Baseline:** Majority class baseline (hamıya $y=0$) və sadə heuristic baseline: *"Son 10 gündə heç musiqi dinləməyibsə $\hat{y}=1$, əks halda $0$"*.
+      4. **Split strategiyası:** Mövsümi təsirləri və tətbiq yeniləmələrini nəzərə almaq üçün **xronoloji (time-based cohort) split** — məsələn, sentyabr kohortu train, oktyabr kohortu validation, noyabr kohortu test.
+    explanation: Yaxşı problem framing ML layihəsinin yarısıdır — horizon və $t_0$ dəqiq təyin ediləndə sonrakı data leakage riskləri də avtomatik görünür.
+references:
+  - title: Google Developers — Framing Machine Learning Problems
+    url: https://developers.google.com/machine-learning/problem-framing
+    note: Biznes problemini ML tapşırığına çevirmək üzrə praktiki bələdçi
+  - title: scikit-learn — Cross-validation and data splitting
+    url: https://scikit-learn.org/stable/modules/cross_validation.html
+    note: StratifiedKFold və TimeSeriesSplit sənədləri

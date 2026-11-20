@@ -1,0 +1,429 @@
+id: py-oop-architecture-protocols
+track: software-engineering
+module: oop-typing-packaging
+title: "OOP arxitekturası — Composition, frozen Dataclass və typing.Protocol"
+summary: "AI sistemlərində dərin irsiyyət (inheritance) zəncirlərinin niyə çökdüyünü, Composition over Inheritance prinsipini, dəyişməz (frozen) dataclass-ları və typing.Protocol ilə Dependency Injection arxitekturasını öyrənəcəksən."
+level: core
+estimated_minutes: [50, 75]
+prerequisites: [py-testing-pytest]
+next: py-generators-streaming-pipelines
+skills: [py-functions, py-data-structures, py-errors]
+objectives:
+  - "Dərin class inheritance iyerarxiyalarının AI sistemlərində yaratdığı kövrəkliyi (fragile base class) izah etmək və Composition ilə əvəzləmək"
+  - "`@dataclass(frozen=True)` ilə dəyişməz konfiqurasiya/nəticə obyektlərini stateful komponentlərdən (`fit`/`transform`) ayırmaq"
+  - "`typing.Protocol` vasitəsilə struktur interfeyslər təyin etmək və Dependency Injection ilə real LLM/Retriever əvəzinə test mock-u qoşmaq"
+  - "Addımlardan (steps) təşkil olunmuş modulyar və mutasiyadan qorunan `Pipeline` icraçısı yazmaq"
+why_it_matters: |
+  AI mühəndisliyində tək bir skript yazmaq asandır, amma real sistemdə **data təmizləyici**, **tokenizer**, **embedding modeli**, **vector retriever** və **LLM provider** birlikdə işləyir.
+  Əgər bu komponentləri bir-birinə sıx bağlasan (hardcoded importlar və ya 4 mərtəbəli `BaseLLM -> RetryLLM -> CachedRetryLLM -> OpenAICachedRetryLLM` irsiyyəti), yeni bir modelə keçmək və ya sadə bir unit test yazmaq kabusa çevrilir.
+
+  Yaxşı arxitektura üç sütun üzərində dayanır:
+  1. **Data və davranışın ayrılması:** Konfiqurasiya və proqnoz qeydləri dəyişməz (`frozen=True` dataclass) saxlanılır ki, pipeline boyunca heç bir addım əvvəlki məlumatı gizlicə korlamasın.
+  2. **Composition over Inheritance:** Kiçik, müstəqil addımlar (`Step`) ardıcıl `Pipeline` içində birləşdirilir.
+  3. **Protocol və Dependency Injection:** Kod konkret `OpenAIClient` sinfindən yox, abstrakt `LLMProvider` protokolundan asılı olur — unit testdə şəbəkəyə çıxmadan `FakeLLM` ötürürsən.
+terms:
+  - term: Composition over Inheritance
+    definition: "Yeni davranışı dərin sinif irsiyyəti (`class B(A)`) ilə deyil, kiçik müstəqil komponentləri bir obyektin içində birləşdirməklə (`Pipeline([step1, step2])`) qurmaq prinsipi."
+  - term: "@dataclass(frozen=True)"
+    definition: "Python-un `dataclasses` modulunda yaradıldıqdan sonra sahələri dəyişdirilə bilməyən (immutable) data obyekti; dəyişiklik cəhdi `FrozenInstanceError` qaldırır."
+  - term: Stateful component
+    definition: "Daxilində vəziyyət saxlayan obyekt (məsələn, `StandardScaler` training zamanı `fit()` ilə `mean_` və `scale_` öyrənir, sonra `transform()`-da istifadə edir)."
+  - term: typing.Protocol
+    definition: "Struktur alt-tipləmə (structural subtyping / statik duck typing) interfeysi. Sinif `Protocol`-dan miras almasa belə, tələb olunan metod imzasına sahibdirsə uyğun sayılır."
+  - term: Dependency Injection (DI)
+    definition: "Komponentin öz asılılığını (məs. DB və ya LLM client) daxildə yaratması əvəzinə, kənardan (`__init__` və ya funksiya arqumenti ilə) qəbul etməsi."
+  - term: Fragile Base Class Problem
+    definition: "Üst (base) sinifdə edilən kiçik dəyişikliyin ondan miras alan onlarla alt sinfi gözlənilmədən sındırması."
+sections:
+  - id: inheritance-trap-and-composition
+    kind: explanation
+    title: "Niyə dərin Inheritance çökür? Composition, Frozen Dataclass və Protocol"
+    body: |
+      Təsəvvür et ki, LLM çağırışları üçün `BaseLLMClient` yazmısan. Sonra retry lazım olur (`RetryLLMClient(BaseLLMClient)`), ardınca keşləmə (`CachedLLMClient(RetryLLMClient)`), sonra isə həm OpenAI, həm Anthropic, həm də lokal Ollama üçün bu kombinasiyalar tələb olunur.
+      4 provayder × 4 xüsusiyyət (cache, retry, logging, rate-limit) kombinator partlayış yaradır! Üstəlik `BaseLLMClient.__init__`-də bir parametr dəyişəndə bütün alt siniflər sınır.
+
+      **Həll 1 — Composition (Birləşdirmə):**
+      İrsiyyət ("is-a") əvəzinə sahib olma ("has-a") istifadə et. Mətn emalı və ya model axını müstəqil addımların siyahısı (`list[Step]`) kimi qurulur. Hər addım sadəcə bir işi görür və növbəti addıma ötürür.
+
+      **Həll 2 — `@dataclass(frozen=True)` vs Stateful Obyektlər:**
+      AI sistemində iki fərqli obyekt növü var:
+      - **Dəyər/Data obyektləri (Value Objects):** `ModelConfig(lr=1e-4, batch_size=32)` və ya `PredictionRecord(text="...", score=0.91)`. Bunlar pipeline-da əldən-ələ keçir. `@dataclass(frozen=True)` istifadə et ki, heç bir funksiya təsadüfən `config.lr = 0` yazıb sonrakı eksperimenti korlamasın.
+      - **Stateful Komponentlər:** Məsələn, `TfidfVectorizer` və ya `MinMaxScaler`. Bunlar `fit(train_data)` zamanı daxili statistika öyrənir, `transform(data)` zamanı isə həmin statistikadan istifadə edir.
+
+      **Həll 3 — `typing.Protocol` və Dependency Injection:**
+      Python-da bir sinfin hansı interfeysə uyğun olduğunu göstərmək üçün `ABC` (Abstract Base Class) miras almağa ehtiyac yoxdur. `typing.Protocol` **struktur müqavilə** yaradır: *"Hansı sinfin `run(self, record: dict) -> dict` metodu varsa, o bir `PipelineStep`-dir"*.
+  - id: lego-vs-statue
+    kind: analogy
+    title: "Mental model: Yekparə mərmər heykəl vs LEGO blokları"
+    body: |
+      - **Dərin Inheritance (Mərmər heykəl):** Bütün hissələr bir daşdan yonulub. Heykəlin qolunu başqa bucaqda istəyirsənsə, çəkiclə vuranda sinəsi və başı da çatlayır.
+      - **Composition + Protocol (LEGO blokları):** Hər blokun alt və üst çıxıntıları standart ölçüdədir (`Protocol`). Qırmızı bloku çıxarıb yerinə şəffaf test bloku (Mock) taxanda qalan qüllə bundan xəbər belə tutmur.
+      - **Frozen Dataclass (Möhürlənmiş sənəd):** Bloklar arasında ötürülən məlumat notariat möhürlü zərf kimidir — oxumaq olar, üstündə qaralama etmək olmaz; dəyişiklik lazımdırsa yeni zərf (`dataclasses.replace`) yaradırsan.
+  - id: architecture-diagram
+    kind: diagram
+    title: "İrsiyyət ağacı vs Protocol əsaslı Composition Pipeline"
+    body: |
+      ```mermaid
+      flowchart LR
+        subgraph Bad["Kövrək İrsiyyət (Fragile Inheritance)"]
+          B0["BaseProcessor"] --> B1["LowercaseProcessor"]
+          B1 --> B2["StopwordLowercaseProcessor"]
+          B2 --> B3["PIIStopwordLowercaseProcessor"]
+        end
+
+        subgraph Good["Composition + typing.Protocol"]
+          R["Input Record (dict)"] --> P["TextPipeline"]
+          P --> S1[" NormalizeStep "]
+          S1 --> S2[" RedactPIIStep "]
+          S2 --> S3[" TokenCountStep "]
+          S3 --> Out["New Record (dict)"]
+        end
+      ```
+
+      Sağ tərəfdə `RedactPIIStep`-i çıxarmaq və ya testdə `FakeStep` ilə əvəz etmək sadəcə siyahıdakı bir elementi dəyişməkdir — digər siniflərin koduna toxunulmur.
+  - id: worked-text-pipeline
+    kind: worked_example
+    title: "Mini-layihə: Protocol əsaslı TextPipeline dizaynı"
+    body: |
+      Gəl RAG ingestion üçün kiçik, lakin istehsalat səviyyəli `TextPipeline` arxitekturasını addım-addım quraq:
+
+      1. **Konfiqurasiya (`frozen=True`):**
+         `PipelineConfig(max_tokens=128, redact_digits=True)` — yaradıldıqdan sonra heç bir addım bu həddi dəyişə bilməz.
+      2. **Struktur İnterfeys (`Protocol`):**
+         `Step` protokolu yalnız bir tələb qoyur: `__call__(self, record: dict) -> dict`.
+      3. **Müstəqil addımlar:**
+         - `CleanWhitespaceStep`: mətni `.strip()` edir və təkrar boşluqları tək boşluğa endirir.
+         - `TruncateWordsStep`: söz sayını `max_tokens` ilə məhdudlaşdırır və `token_count` açarını əlavə edir.
+      4. **Mühafizəli icraçı (`Pipeline`):**
+         Hər addıma `record`-un **dayaz kopyasını** (`dict(current)`) ötürür və addımın həqiqətən `dict` qaytardığını yoxlayır. Əgər 2-ci addım səhvən `None` qaytararsa, pipeline dərhal aydın `ValueError("Step 1 must return a dict")` qaldırır və ilkin `record` toxunulmaz qalır.
+
+      | Mərhələ | Daxil olan `record` | Çıxan yeni `dict` |
+      |---|---|---|
+      | Başlanğıc | `{"text": "  Salam   AI   dünyası  "}` | — |
+      | Addım 0 (`CleanWhitespaceStep`) | `{"text": "  Salam   AI   dünyası  "}` | `{"text": "Salam AI dünyası"}` |
+      | Addım 1 (`TruncateWordsStep(max_words=2)`) | `{"text": "Salam AI dünyası"}` | `{"text": "Salam AI", "token_count": 2}` |
+  - id: code-protocol-di
+    kind: code
+    title: "Kod — Frozen Dataclass, typing.Protocol və Dependency Injection"
+    body: |
+      ```python
+      from dataclasses import dataclass, replace
+      from typing import Protocol
+
+
+      @dataclass(frozen=True)
+      class PipelineConfig:
+          max_words: int = 100
+          lowercase: bool = True
+
+
+      class TextStep(Protocol):
+          """Structural interface: any callable taking dict and returning dict."""
+          def __call__(self, record: dict) -> dict: ...
+
+
+      class NormalizeTextStep:
+          def __init__(self, config: PipelineConfig) -> None:
+              self.config = config
+
+          def __call__(self, record: dict) -> dict:
+              raw = str(record.get("text", ""))
+              cleaned = " ".join(raw.split())
+              if self.config.lowercase:
+                  cleaned = cleaned.lower()
+              return {**record, "text": cleaned}
+
+
+      class WordLimitStep:
+          def __init__(self, config: PipelineConfig) -> None:
+              self.config = config
+
+          def __call__(self, record: dict) -> dict:
+              words = str(record.get("text", "")).split()
+              limited = words[: self.config.max_words]
+              return {
+                  **record,
+                  "text": " ".join(limited),
+                  "word_count": len(limited),
+              }
+
+
+      class TextPipeline:
+          def __init__(self, steps: list[TextStep]) -> None:
+              # Dependency Injection: steps are injected from outside
+              self._steps = list(steps)
+
+          def run(self, record: dict) -> dict:
+              current = dict(record)
+              for idx, step in enumerate(self._steps):
+                  out = step(dict(current))
+                  if not isinstance(out, dict):
+                      raise ValueError(f"Step {idx} must return a dict, got {type(out).__name__}")
+                  current = dict(out)
+              return current
+
+
+      cfg = PipelineConfig(max_words=3, lowercase=True)
+      # Frozen dataclass cannot be mutated: cfg.max_words = 10 -> FrozenInstanceError!
+      # Instead, create a modified copy when needed:
+      strict_cfg = replace(cfg, max_words=2)
+
+      pipeline = TextPipeline([NormalizeTextStep(strict_cfg), WordLimitStep(strict_cfg)])
+      original = {"id": 42, "text": "  Python   Architecture   For   AI  "}
+      result = pipeline.run(original)
+
+      print(result)    # {'id': 42, 'text': 'python architecture', 'word_count': 2}
+      print(original)  # {'id': 42, 'text': '  Python   Architecture   For   AI  '}
+      ```
+
+      Diqqət et:
+      - `NormalizeTextStep` və `WordLimitStep` heç bir sinifdən (`TextStep` daxil olmaqla) **miras almır**. Onların `__call__(self, record: dict) -> dict` imzası `TextStep` protokolunu avtomatik ödəyir.
+      - `{**record, "text": cleaned}` sintaksisi mövcud açarları (`"id": 42`) saxlayaraq yeni `dict` yaradır.
+      - Unit test yazarkən real `NormalizeTextStep` əvəzinə sadəcə `lambda r: {**r, "mocked": True}` funksiyasını da ötürə bilərsən, çünki Python funksiyaları da `__call__` metoduna malikdir!
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. `@dataclass(frozen=True)` içində mutable sahə (`list` / `dict`) saxlamaq**
+      ```python
+      @dataclass(frozen=True)
+      class Config:
+          stop_words: list[str]   # TƏHLÜKƏ: cfg.stop_words.append("x") yenə də işləyir!
+      ```
+      `frozen=True` yalnız `cfg.stop_words = ...` mənimsətməsini bloklayır, içəridəki `list`-in mutasiyasını yox! Düzəliş: `tuple[str, ...]` və ya `frozenset[str]` istifadə et.
+
+      **2. Dataclass-da mutable default dəyər**
+      Python `dataclass`-ı `tags: list[str] = []` yazmağa icazə vermir (`ValueError: mutable default`). Həmişə `field(default_factory=list)` və ya frozen obyektlərdə `tuple[str, ...] = ()` istifadə et.
+
+      **3. Pipeline addımında `record`-u yerində dəyişib `None` qaytarmaq**
+      ```python
+      def bad_step(record: dict) -> dict:
+          record["clean"] = True
+          # return yaddan çıxıb -> None qaytarır!
+      ```
+      Növbəti addım `None.get(...)` çağıranda `AttributeError` verir və hansı addımın günahkar olduğunu tapmaq çətinləşir. Ona görə pipeline icraçısı hər addımdan sonra `isinstance(out, dict)` yoxlamalıdır.
+
+      **4. Asılılığı `__init__` daxilində hardcode etmək**
+      ```python
+      class RAGService:
+          def __init__(self):
+              self.llm = OpenAIClient(api_key="...")  # Test etmək mümkün deyil!
+      ```
+      Düzəliş: `def __init__(self, llm: LLMProtocol) -> None: self.llm = llm`.
+  - id: architectural-tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs"
+    body: |
+      - **`typing.Protocol` vs `abc.ABC`:** `Protocol` xarici kitabxana siniflərini dəyişdirmədən interfeysə uyğunlaşdırmağa imkan verir və irsiyyət tələb etmir. Lakin `ABC` ortaq köməkçi metodları (shared default implementation) paylaşmaq və runtime-da yaratma zamanı (`TypeError: Can't instantiate abstract class`) səhvi dərhal tutmaq üçün faydalıdır.
+      - **Kopyalama təhlükəsizliyi vs Yaddaş xərci:** Hər pipeline addımında `dict(current)` (dayaz kopya) yaratmaq metadata və mətn qeydləri üçün mikrosaniyə çəkir və mutasiya bug-larının qarşısını alır. Amma `record` içində 500 MB-lıq NumPy tensoru varsa, dərin kopya (`copy.deepcopy`) yaddaşı partladar — dayaz kopya (`dict(record)`) açarlar səviyyəsində təhlükəsizlik üçün optimal balansdır.
+      - **Sadə funksiya vs Class Step:** Əgər addımın konfiqurasiyası və ya daxili vəziyyəti yoxdursa (`def lowercase_step(r: dict) -> dict`), sinif yazmağa ehtiyac yoxdur. `Callable[[dict], dict]` və `__call__` olan sinif eyni protokol altında birlikdə işləyir.
+mastery_criteria:
+  - "Dərin inheritance əvəzinə Composition və Protocol əsaslı pipeline dizayn edə bilirsən"
+  - "`@dataclass(frozen=True)` ilə dəyişməz konfiqurasiya sinfi yarada və `replace()` ilə yeni nüsxə ala bilirsən"
+  - "Hər addımın çıxışını doğrulayan və ilkin input-u mutasiyadan qoruyan pipeline runner funksiyası yaza bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pyoop-frozen-dataclass
+      type: mcq
+      title: "@dataclass(frozen=True) davranışı"
+      prompt: |
+        ```python
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class HyperParams:
+            lr: float = 0.01
+
+        hp = HyperParams()
+        hp.lr = 0.001
+        ```
+        Bu kod işə düşəndə nə baş verir?
+      skills: [py-data-structures, py-errors]
+      category: predict-output
+      options:
+        - id: a
+          text: "`hp.lr` dəyəri səssizcə `0.001` olur"
+          feedback: "Xeyr — `frozen=True` sahələrin yenidən mənimsədilməsini qadağan edir."
+        - id: b
+          text: "`FrozenInstanceError` (DataClass xətası) qaldırılır"
+          feedback: "Doğru! `frozen=True` obyekt yaradıldıqdan sonra atribut mənimsətməsinə icazə vermir."
+        - id: c
+          text: "`hp.lr` dəyişmir, amma xəta da çıxmır"
+          feedback: "Python səssizcə rədd etmir, açıq exception qaldırır."
+      answer: b
+      explanation: "`@dataclass(frozen=True)` obyektin atributlarını dəyişməz edir. Yeni dəyər lazımdırsa `dataclasses.replace(hp, lr=0.001)` ilə yeni obyekt yaradılmalıdır."
+    - id: q-pyoop-protocol-duck
+      type: mcq
+      title: "typing.Protocol nəyi tələb edir?"
+      prompt: "Bir `FakeRetriever` sinfinin `RetrieverProtocol(Protocol)` tipinə uyğun sayılması üçün nə lazımdır?"
+      skills: [py-functions]
+      category: concept
+      options:
+        - id: a
+          text: "`class FakeRetriever(RetrieverProtocol):` kimi açıq miras almaq məcburidir"
+          feedback: "Xeyr, bu `abc.ABC` (nominal typing) qaydasıdır. `Protocol` struktur uyğunluğa baxır."
+        - id: b
+          text: "`RetrieverProtocol`-da təyin olunmuş metod adlarına və parametr/return imzalarına sahib olmaq kifayətdir"
+          feedback: "Doğru! Structural subtyping (statik duck typing) yalnız metod imzalarının uyğunluğunu yoxlayır."
+        - id: c
+          text: "`@implements(RetrieverProtocol)` dekoratoru əlavə etmək lazımdır"
+          feedback: "Python standart kitabxanasında belə dekorator tələb olunmur."
+      answer: b
+      explanation: "`typing.Protocol` struktur alt-tipləmə təmin edir: sinif tələb olunan metod və xassələrə malikdirsə, irsiyyət olmadan həmin protokolu ödəyir."
+    - id: q-pyoop-di-benefit
+      type: multi
+      title: "Dependency Injection üstünlükləri"
+      prompt: "`RAGPipeline` sinfinin `llm_client` obyektini öz daxilində yaratmaq əvəzinə `__init__(self, llm_client: LLMProtocol)` vasitəsilə kənardan qəbul etməsinin (Dependency Injection) hansı üstünlükləri var? Hamısını seç."
+      skills: [py-functions, py-errors]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Unit testlərdə real API açarı və internet olmadan sürətli `FakeLLMClient` ötürmək olur"
+          feedback: "Bəli — deterministik və pulsuz test yazmağın əsas yolu budur."
+        - id: b
+          text: "OpenAI-dən lokal vLLM və ya Anthropic modelinə keçəndə `RAGPipeline` kodunu dəyişməyə ehtiyac qalmır"
+          feedback: "Bəli — eyni protokolu ödəyən istənilən client ötürülə bilər."
+        - id: c
+          text: "Python kodunun sürətini avtomatik 10 dəfə artırır"
+          feedback: "Xeyr — Dependency Injection arxitektura və test edilə bilmə üçündür, CPU sürətləndiricisi deyil."
+        - id: d
+          text: "Fərqli mühitlərdə (dev, staging, prod) fərqli konfiqurasiyalı client-ləri asanlıqla qoşmağa imkan verir"
+          feedback: "Bəli — konfiqurasiya kənarda qurulub hazır obyekt kimi daxil edilir."
+      answers: [a, b, d]
+      explanation: "Dependency Injection komponentləri bir-birindən ayırır (decoupling): testləmə, provayder dəyişimi və mühit konfiqurasiyası kənardan idarə olunur."
+    - id: q-pyoop-frozen-mutable-field
+      type: mcq
+      title: "Frozen dataclass-da tam dəyişməzlik"
+      prompt: "`@dataclass(frozen=True)` daxilində ardıcıl etiketlər siyahısını tam dəyişməz (immutable) saxlamaq üçün hansı tip seçilməlidir?"
+      skills: [py-data-structures]
+      category: python
+      options:
+        - id: a
+          text: "`tags: list[str]`"
+          feedback: "`list` özü dəyişkəndir (`append` işləyəcək)."
+        - id: b
+          text: "`tags: tuple[str, ...] = ()`"
+          feedback: "Doğru! `tuple` həm sıralıdır, həm də yaradıldıqdan sonra element əlavə/silmə əməliyyatına icazə vermir."
+        - id: c
+          text: "`tags: dict[str, int]`"
+          feedback: "`dict` dəyişkən (mutable) struktur olduğundan içindəki açarlar dəyişdirilə bilər."
+      answer: b
+      explanation: "`frozen=True` yalnız atribut referansını dondurur. Tam dəyişməzlik üçün atributun öz tipi də immutable (`tuple`, `str`, `int`, `frozenset`) olmalıdır."
+exercises:
+  - id: ex-pyoop-pipeline-runner
+    type: code
+    title: "Modulyar və təhlükəsiz run_pipeline funksiyasını yaz"
+    prompt: |
+      Ardıcıl mətn/data emalı addımlarını icra edən `run_pipeline(record: dict, steps: list) -> dict` funksiyasını yaz.
+
+      **Müqavilə (Contract):**
+      1. Əgər `record` `dict` tipində deyilsə (`not isinstance(record, dict)`), `ValueError` qaldır.
+      2. Çağıranın ötürdüyü `record` obyekti **heç bir halda dəyişdirilməməlidir** (hətta addımlardan biri arqument kimi aldığı lüğəti yerində dəyişsə və ya yarıda xəta versə belə).
+      3. `steps` siyahısındakı hər bir `step` funksiyasını `0, 1, ...` ardıcıllığı ilə çağır (`out = step(dict(current))`).
+      4. Əgər hər hansı addım `dict` olmayan nəticə qaytararsa (`not isinstance(out, dict)`), içində addımın indeksi (`idx`) olan `ValueError` qaldır (məsələn: `f"Step {idx} must return a dict"`).
+      5. Sonda alınan yeni `dict`-i qaytar (`steps` boşdursa, `record`-un yeni dayaz kopyasını qaytar).
+    skills: [py-functions, py-data-structures, py-errors]
+    category: python
+    difficulty: 2
+    hints:
+      - "Başlanğıcda `if not isinstance(record, dict): raise ValueError(\"record must be a dict\")` yoxla və `current = dict(record)` ilə kopya yarat."
+      - "`for idx, step in enumerate(steps):` dövründə addımı `out = step(dict(current))` kimi çağır ki, addım öz arqumentini yerində dəyişsə belə əvvəlki vəziyyət və ilkin `record` korlanmasın."
+      - "`if not isinstance(out, dict): raise ValueError(f\"Step {idx} must return a dict\")` yoxlamasından sonra `current = dict(out)` et."
+    starter_code: |
+      from typing import Callable
+
+      def run_pipeline(record: dict, steps: list[Callable[[dict], dict]]) -> dict:
+          # TODO: müqaviləyə uyğun implementasiya et
+          return record
+    tests:
+      - name: "Ardıcıl addımların düzgün icrası"
+        code: |
+          steps = [
+              lambda r: {**r, "text": r["text"].strip().lower()},
+              lambda r: {**r, "length": len(r["text"])},
+          ]
+          res = run_pipeline({"text": "  AI Academy  "}, steps)
+          assert res == {"text": "ai academy", "length": 10}, f"Alınan: {res}"
+      - name: "İlkin record mutasiyadan qorunur (hətta addım in-place dəyişsə də)"
+        code: |
+          original = {"text": "hello", "count": 1}
+          def mutating_step(r: dict) -> dict:
+              r["count"] += 10
+              return r
+          out = run_pipeline(original, [mutating_step])
+          assert original == {"text": "hello", "count": 1}, f"original dəyişdirilib: {original}"
+          assert out == {"text": "hello", "count": 11}
+          assert run_pipeline(original, []) is not original, "Boş steps üçün də yeni dict qaytarılmalıdır"
+      - name: "Addım dict qaytarmadıqda addım indeksi ilə ValueError qaldırır"
+        code: |
+          steps = [
+              lambda r: {**r, "ok": True},
+              lambda r: None,
+          ]
+          original = {"a": 1}
+          raised = False
+          try:
+              run_pipeline(original, steps)
+          except ValueError as exc:
+              raised = True
+              assert "1" in str(exc), f"Xəta mesajında addım indeksi (1) olmalıdır: {exc}"
+          assert raised, "dict qaytarmayan addım üçün ValueError qaldırılmalıdır"
+          assert original == {"a": 1}, "Xəta zamanı da original dəyişməməlidir"
+      - name: "Yanlış record tipi üçün ValueError"
+        code: |
+          raised = False
+          try:
+              run_pipeline(["not-a-dict"], [])
+          except ValueError:
+              raised = True
+          assert raised, "dict olmayan record üçün ValueError qaldırılmalıdır"
+    solution: |
+      from typing import Callable
+
+      def run_pipeline(record: dict, steps: list[Callable[[dict], dict]]) -> dict:
+          if not isinstance(record, dict):
+              raise ValueError("record must be a dict")
+          current = dict(record)
+          for idx, step in enumerate(steps):
+              out = step(dict(current))
+              if not isinstance(out, dict):
+                  raise ValueError(f"Step {idx} must return a dict, got {type(out).__name__}")
+              current = dict(out)
+          return current
+    explanation: |
+      `current = dict(record)` və hər addıma `dict(current)` ötürülməsi çağıranın məlumatını tam təcrid edir. `enumerate(steps)` vasitəsilə hansı addımın müqaviləni pozduğu (`not isinstance(out, dict)`) dərhal indeks ilə birlikdə bildirilir.
+  - id: ex-pyoop-composition-vs-inheritance
+    type: mcq
+    title: "Arxitektura seçimi: 4 LLM provayderi və 4 davranış"
+    prompt: |
+      Komandanız 4 fərqli LLM provayderini (OpenAI, Anthropic, Gemini, lokal vLLM) dəstəkləyir.
+      Eyni zamanda çağırışlara müstəqil olaraq **Caching**, **Retry**, **Structured Logging** və **Rate Limiting** əlavə edib-çıxarmaq lazımdır.
+
+      Hansı arxitektura dizaynı kombinator sinif partlayışının qarşısını alır və ən asan test olunur?
+    skills: [py-functions, py-data-structures]
+    category: llm-architecture
+    difficulty: 2
+    hints:
+      - "Hər provayder üçün `CachedRetryLoggedOpenAIClient` kimi alt siniflər yazsan neçə sinif yaranar?"
+      - "Protokol (`LLMProvider`) və middleware/pipeline bükücüləri (wrappers) ilə provayderi davranışlardan necə ayırmaq olar?"
+    options:
+      - id: a
+        text: "Hər provayder və davranış kombinasiyası üçün dərin irsiyyət ağacı (`BaseLLM -> RetryLLM -> CachedRetryLLM -> OpenAICachedRetryLLM`) qurmaq"
+        feedback: "Bu, sinif sayının kombinator partlamasına və Fragile Base Class probleminə gətirib çıxarır."
+      - id: b
+        text: "Vahid `LLMProvider` (`typing.Protocol`) təyin etmək və Caching, Retry, Logging davranışlarını həmin protokolu qəbul edib bükən (composition/middleware) müstəqil komponentlər kimi yazmaq"
+        feedback: "Doğru! Hər provayder (4 ədəd) və hər davranış (4 ədəd) ayrıca yazılır (4 + 4 = 8 kiçik sinif) və istənilən ardıcıllıqla birləşdirilir."
+      - id: c
+        text: "Bütün 4 provayderi və 4 davranışı tək bir 3000 sətirlik `UniversalLLMManager` sinfinin içində `if/elif` şərtləri ilə yazmaq"
+        feedback: "Monolit God-class oxunaqlılığı və təcrid olunmuş unit testləri mümkünsüz edir."
+    answer: b
+    explanation: |
+      Composition və `typing.Protocol` ilə $M$ provayder və $N$ davranışı $M \times 2^N$ alt-sinif əvəzinə cəmi $M + N$ müstəqil, tək-məsuliyyətli siniflə ifadə edirsən.
+references:
+  - title: "PEP 544 — Protocols: Structural subtyping (static duck typing)"
+    url: https://peps.python.org/pep-0544/
+    note: "Python-da typing.Protocol standartının rəsmi spesifikasiyası"
+  - title: "Python Standard Library — dataclasses"
+    url: https://docs.python.org/3/library/dataclasses.html
+    note: "frozen=True və replace() funksiyasının sənədləri"

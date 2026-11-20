@@ -1,0 +1,356 @@
+id: dl-neuron-forward-backprop
+track: deep-learning
+module: neural-network-basics
+title: Neyron, aktivasiya funksiyaları, forward pass və əllə backpropagation
+summary: Tək bir neyronun forward pass hesabını (z = w·x + b), qeyri-xətti aktivasiyalar (ReLU, Sigmoid) olmasa dərin şəbəkənin niyə tək xətti qata çökdüyünü və chain rule ilə əllə backpropagation (gradient) hesabını öyrənəcəksən.
+level: foundation
+estimated_minutes: [55, 75]
+prerequisites: [math-matrices-shapes, math-derivatives-gradient-descent]
+next: dl-pytorch-training-loop
+skills: [dl-forward-pass, dl-backprop]
+objectives:
+  - Tək neyronun forward pass mərhələsini ($z = \mathbf{w}\cdot\mathbf{x} + b \rightarrow a = \phi(z) \rightarrow L$) kiçik ədədlərlə əllə və kodla hesablamaq
+  - Qeyri-xətti aktivasiya funksiyası (ReLU, Sigmoid) olmadan 100 qatlı neyron şəbəkəsinin niyə adi tək qatlı xətti modelə bərabər olduğunu riyazi əsaslandırmaq
+  - Mürəkkəb funksiyanın törəmə qaydasını (chain rule) tətbiq edərək $\frac{\partial L}{\partial w}$ və $\frac{\partial L}{\partial b}$ gradientlərini addım-addım çıxarmaq
+  - ReLU aktivasiyasında $z \le 0$ olduqda gradientin niyə sıfırlandığını (dead ReLU) izah etmək
+why_it_matters: |
+  GPT-4, Claude və ya müasir Computer Vision modelləri milyardlarla parametrdən ibarətdir, amma onların ən kiçik tikinti daşı sadə bir hesablama vahididir: **xətti kombinasiya + qeyri-xətti aktivasiya**, ardınca isə **chain rule ilə geriyə törəmə yayılması (backpropagation)**.
+
+  PyTorch-da `loss.backward()` yazanda pərdə arxasında baş verən proses sehr deyil — hər bir əməliyyatın lokal törəmələrinin sağdan sola bir-birinə vurulmasıdır. Bunu tək neyron üzərində əllə və pure Python-da bir dəfə hesablayan mühəndis sonradan *vanishing gradients*, *dead ReLU*, *exploding loss* kimi dərin öyrənmə bug-larını görən kimi səbəbini dərhal anlayır.
+terms:
+  - term: Pre-activation (z / logit)
+    definition: "Giriş vektoru ilə çəkilərin skalyar hasilinə sürüşmənin (bias) əlavə edilməsi: $z = \\mathbf{w} \\cdot \\mathbf{x} + b = \\sum_{j=1}^d w_j x_j + b$."
+  - term: Activation function
+    definition: "Xətti çıxışa ($z$) tətbiq edilən qeyri-xətti funksiya $a = \\phi(z)$ (məsələn, ReLU, GELU, Sigmoid); şəbəkəyə əyri və mürəkkəb sərhədləri öyrənmək gücü verir."
+  - term: ReLU (Rectified Linear Unit)
+    definition: "$\\text{ReLU}(z) = \\max(0, z)$. Müsbət dəyərləri olduğu kimi buraxır (törəməsi $1$), mənfi dəyərləri isə $0$-a kəsir (törəməsi $0$)."
+  - term: Sigmoid
+    definition: "$\\sigma(z) = \\frac{1}{1 + e^{-z}}$. İstənilən həqiqi ədədi $(0, 1)$ aralığına sıxır; ikili təsnifatın son qatında ehtimal almaq üçün işlədilir."
+  - term: Forward pass
+    definition: Giriş $\mathbf{x}$-dən başlayaraq qat-qat irəli gedib proqnozu ($a = \hat{y}$) və sonda itki funksiyasını ($L$) hesablamaq mərhələsi.
+  - term: Backpropagation
+    definition: Loss-dan ($L$) geriyə doğru chain rule (zəncir qaydası) ilə hər bir çəkinin ($w_j, b$) xətaya təsirini ($\frac{\partial L}{\partial w_j}$) hesablamaq alqoritmi.
+sections:
+  - id: forward-activation-backprop
+    kind: explanation
+    title: İrəli keçid (Forward Pass), Qeyri-xəttilik və Geriyə yayılma (Backprop)
+    body: |
+      ### 1. Tək neyronun İrəli Keçidi (Forward Pass)
+      Neyron iki ardıcıl addım icra edir:
+      1. **Xətti addım:** Girişləri çəkilərlə vurub toplayır və bias əlavə edir:
+         $$z = \mathbf{w} \cdot \mathbf{x} + b = \sum_{j=1}^{d} w_j x_j + b$$
+      2. **Qeyri-xətti aktivasiya:** $z$ ədədini $\phi(\cdot)$ funksiyasından keçirir:
+         $$a = \phi(z)$$
+
+      Ən məşhur iki aktivasiya funksiyası:
+      - **ReLU:** $\text{ReLU}(z) = \max(0, z)$. Hesablanması çox sürətlidir və $z > 0$ olanda törəməsi sabit $1$-dir (gradient sönmür).
+      - **Sigmoid:** $\sigma(z) = \frac{1}{1 + e^{-z}}$. Çıxışı $(0, 1)$ aralığındadır, lakin $|z|$ çox böyük olanda törəməsi $\sigma'(z) = \sigma(z)(1 - \sigma(z)) \approx 0$ olduğu üçün dərin qatlarda *vanishing gradient* (gradientin yox olması) problemi yaradır.
+
+      ### 2. Niyə aktivasiya funksiyası olmadan dərin şəbəkə mənasızdır?
+      Tutaq ki, iki xətti qatı aktivasiyasız ard-arda qoşmuşuq:
+      $$h = W_1 x + b_1, \qquad \hat{y} = W_2 h + b_2$$
+      Birincini ikincidə yerinə qoyaq:
+      $$\hat{y} = W_2 (W_1 x + b_1) + b_2 = \underbrace{(W_2 W_1)}_{W_{\text{new}}} x + \underbrace{(W_2 b_1 + b_2)}_{b_{\text{new}}} = W_{\text{new}} x + b_{\text{new}}$$
+      İki matrisin hasili yenə tək bir matrisdir! Qeyri-xətti aktivasiya olmasa, **100 qatlı neyron şəbəkəsi riyazi olaraq 1 qatlı adi xətti reqressiyadan fərqlənmir**.
+
+      ### 3. Backpropagation = Chain Rule (Zəncir Qaydası)
+      Tək girişli ($x$) neyron üçün $z = w \cdot x + b$, $a = \text{ReLU}(z)$ və kvadratik loss $L = (a - y)^2$ olsun. Bizə $\frac{\partial L}{\partial w}$ və $\frac{\partial L}{\partial b}$ lazımdır. Zəncir qaydası ilə sağdan sola qayıdırıq:
+
+      $$\frac{\partial L}{\partial a} = 2(a - y)$$
+      $$\frac{\partial L}{\partial z} = \frac{\partial L}{\partial a} \cdot \frac{\partial a}{\partial z} = 2(a - y) \cdot \text{ReLU}'(z), \quad \text{harada ki } \text{ReLU}'(z) = \begin{cases} 1, & z > 0 \\ 0, & z \le 0 \end{cases}$$
+      $$\frac{\partial L}{\partial w} = \frac{\partial L}{\partial z} \cdot \frac{\partial z}{\partial w} = \frac{\partial L}{\partial z} \cdot x, \qquad \frac{\partial L}{\partial b} = \frac{\partial L}{\partial z} \cdot \frac{\partial z}{\partial b} = \frac{\partial L}{\partial z} \cdot 1$$
+  - id: factory-assembly-analogy
+    kind: analogy
+    title: "Mental model: İstehsal konveyeri və məsuliyyətin geriyə paylanması"
+    body: |
+      Üç mərhələli bir şokolad fabrikini təsəvvür et:
+      1. **Xətti stansiya ($z = wx + b$):** Xammalı ($x$) çəki nisbəti ($w$) və əlavə şəkərlə ($b$) qarışdırır.
+      2. **Aktivasiya qapısı ($a = \text{ReLU}(z)$):** Əgər qarışığın keyfiyyət balı mənfidirsə ($z \le 0$), qapını bağlayır və heç nə buraxmır ($a=0$); müsbətdirsə, olduğu kimi növbəti mərhələyə ötürür ($a=z$).
+      3. **Keyfiyyət müfəttişi ($L = (a - y)^2$):** Hazır məhsulu ($a$) standartla ($y$) müqayisə edib cərimə balını ($L$) yazır.
+
+      **Forward pass** xammalın konveyerlə sağa gedib hazır məhsula çevrilməsidir.
+      **Backpropagation** isə müfəttişin cərimə vərəqini götürüb konveyerlə **geriyə (sağdan sola)** yeriməsidir:
+      - Əvvəlcə soruşur: *"Məhsul standartdan nə qədər fərqlidir?"* ($\partial L / \partial a$).
+      - Sonra aktivasiya qapısına baxır: əgər qapı bağlı idisə ($z \le 0$), birinci stansiyanın etdiyi kiçik dəyişiklik çıxışa heç çatmayıb ($\partial a / \partial z = 0 \implies$ gradient sıfırdır!). Qapı açıq idisə ($\partial a / \partial z = 1$), məsuliyyət birbaşa birinci stansiyaya ötürülür.
+      - Birinci stansiyada isə kimin daha çox xammal ($x$) işlətdiyinə görə günah $w$ və $b$ arasında bölüşdürülür ($\partial z / \partial w = x$).
+  - id: computation-graph-diagram
+    kind: diagram
+    title: Hesablama qrafı — Forward (irəli) və Backward (geriyə) axın
+    body: |
+      ```mermaid
+      flowchart LR
+        X["x, w, b"] -- "Forward: z = w*x + b" --> Z["z (pre-activation)"]
+        Z -- "Forward: a = ReLU(z)" --> A["a (prediction)"]
+        A -- "Forward: L = (a - y)^2" --> L["L (Loss)"]
+        L -. "Backward: dL/da = 2(a - y)" .-> A
+        A -. "Backward: dL/dz = dL/da * ReLU'(z)" .-> Z
+        Z -. "Backward: dL/dw = dL/dz * x, dL/db = dL/dz" .-> X
+      ```
+
+      Bütöv xətlər **Forward pass** (dəyərlərin hesablanması), qırıq xətlər isə **Backward pass** (gradientlərin sağdan sola vurularaq ötürülməsi) prosesini göstərir. Diqqət et ki, backward zamanı $\frac{\partial L}{\partial w} = \frac{\partial L}{\partial z} \cdot x$ hesablamaq üçün forward zamanı saxlanmış $x$ və $z$ dəyərlərinə ehtiyac var!
+  - id: worked-manual-backprop
+    kind: worked_example
+    title: "Kiçik ədədlərlə tam əllə hesablama: Forward, Backward və 1 addım yeniləmə"
+    body: |
+      Verilənlər: giriş $x = 2.0$, həqiqi hədəf $y = 5.0$, başlanğıc çəki $w = 1.5$, bias $b = 0.5$, learning rate $\eta = 0.05$.
+
+      **Addım 1 — Forward Pass:**
+      1. Xətti cəm:
+         $$z = w \cdot x + b = 1.5 \times 2.0 + 0.5 = 3.5$$
+      2. ReLU aktivasiyası ($3.5 > 0$ olduğu üçün):
+         $$a = \text{ReLU}(3.5) = 3.5$$
+      3. Kvadratik Loss:
+         $$L = (a - y)^2 = (3.5 - 5.0)^2 = (-1.5)^2 = 2.25$$
+
+      **Addım 2 — Backward Pass (Chain Rule):**
+      1. Loss-un $a$-ya görə törəməsi:
+         $$\frac{\partial L}{\partial a} = 2(a - y) = 2(3.5 - 5.0) = -3.0$$
+      2. ReLU-dan keçid ($z = 3.5 > 0 \implies \text{ReLU}'(3.5) = 1.0$):
+         $$\frac{\partial L}{\partial z} = \frac{\partial L}{\partial a} \cdot 1.0 = -3.0$$
+      3. Parametrlərə görə gradientlər:
+         $$\frac{\partial L}{\partial w} = \frac{\partial L}{\partial z} \cdot x = -3.0 \times 2.0 = -6.0$$
+         $$\frac{\partial L}{\partial b} = \frac{\partial L}{\partial z} \cdot 1 = -3.0$$
+
+      **Addım 3 — Gradient Descent yeniləməsi ($\theta_{\text{new}} = \theta - \eta \cdot \text{grad}$):**
+      - $w_{\text{new}} = 1.5 - 0.05 \times (-6.0) = 1.5 + 0.30 = 1.80$
+      - $b_{\text{new}} = 0.5 - 0.05 \times (-3.0) = 0.5 + 0.15 = 0.65$
+
+      **Yoxlama (yeni parametrlərlə Loss azaldımı?):**
+      $z_{\text{new}} = 1.80 \times 2.0 + 0.65 = 4.25 \implies L_{\text{new}} = (4.25 - 5.0)^2 = 0.5625 < 2.25$. Loss **4 dəfə** azaldı!
+  - id: code-neuron-autograd
+    kind: code
+    title: "Kod: Pure Python-da tək neyronun forward və backward hesabı"
+    body: |
+      ```python
+      import math
+
+
+      def relu(z: float) -> float:
+          """Rectified Linear Unit: max(0.0, z)."""
+          return z if z > 0.0 else 0.0
+
+
+      def sigmoid(z: float) -> float:
+          """Numerically safe sigmoid activation."""
+          if z >= 0:
+              return 1.0 / (1.0 + math.exp(-z))
+          exp_z = math.exp(z)
+          return exp_z / (1.0 + exp_z)
+
+
+      def neuron_forward_and_grads(
+          x: float, w: float, b: float, y_true: float
+      ) -> tuple[float, float, float]:
+          """Single ReLU neuron with squared loss L = (a - y_true)^2.
+
+          Returns:
+              (loss, grad_w, grad_b)
+          """
+          # 1. Forward pass
+          z = w * x + b
+          a = relu(z)
+          loss = (a - y_true) ** 2
+
+          # 2. Backward pass (chain rule)
+          dL_da = 2.0 * (a - y_true)
+          da_dz = 1.0 if z > 0.0 else 0.0
+          dL_dz = dL_da * da_dz
+
+          grad_w = dL_dz * x
+          grad_b = dL_dz
+          return loss, grad_w, grad_b
+
+
+      loss, gw, gb = neuron_forward_and_grads(x=2.0, w=1.5, b=0.5, y_true=5.0)
+      print(f"loss={loss}, grad_w={gw}, grad_b={gb}")
+      # loss=2.25, grad_w=-6.0, grad_b=-3.0
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər və debugging
+    body: |
+      **1. Bütün çəkiləri `0.0` (və ya eyni ədəd) ilə başlatmaq (Symmetry breaking problem)**
+      Əgər bir qatdakı bütün neyronların çəkilərini `w = 0.0` ilə başlatsan, forward pass-da hamısı eyni çıxışı verəcək, backward pass-da hamısı **eyni gradienti** alacaq və bütün təlim boyu bir-birinin klonu olaraq qalacaqlar! Çəkilər həmişə kiçik təsadüfi ədədlərlə (He / Xavier initialization) başladılır.
+
+      **2. Ölü ReLU (Dying ReLU) problemi**
+      Böyük learning rate üzündən çəki elə yenilənə bilər ki, bütün training nümunələri üçün $z = wx + b \le 0$ olar. Həmin andan etibarən $\text{ReLU}'(z) = 0$ olduğu üçün $\text{grad}_w = 0$ çıxır və neyron əbədi "ölür" (heç vaxt yenilənmir). Həll: daha kiçik learning rate və ya **LeakyReLU / GELU**.
+
+      **3. Reqressiyanın son qatına ReLU və ya Sigmoid qoymaq**
+      Əgər hədəf $y$ mənfi qiymətlər ala bilirsə (məsələn, temperatur və ya standartlaşdırılmış gəlir) və sən son qata `ReLU` qoysan, model heç vaxt $0$-dan kiçik ədəd çıxara bilməyəcək! Reqressiyada son qat adətən **aktivasiyasız (xətti)** saxlanılır.
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və aktivasiya seçimi
+    body: |
+      - **ReLU vs GELU / SiLU (Swish):** Klassik CNN və MLP-lərdə `ReLU` ən sürətli və sadə seçimdir (`max(0, z)` bir müqayisə əməliyyatıdır). Müasir Transformer və LLM arxitekturalarında (BERT, GPT, LLaMA) isə $0$ ətrafında hamar əyilməsi olan **GELU** və ya **SiLU (Swish)** üstünlük təşkil edir — bir qədər çox hesablama tələb etsə də, ölü neyron problemini azaldır və daha yaxşı konvergensiya verir.
+      - **Forward aktivasiyalarının yaddaş xərci (Activation memory):** Backprop zamanı $\frac{\partial L}{\partial w} = \frac{\partial L}{\partial z} \cdot a_{\text{prev}}$ hesablamaq üçün hər qatın forward çıxışları GPU RAM-ında saxlanmalıdır. Böyük modellərdə GPU yaddaşını dolduran əsas şey çəkilərin özü yox, məhz backprop üçün saxlanan bu aralıq aktivasiyalardır.
+mastery_criteria:
+  - Tək neyron üçün forward pass və chain rule ilə backpropagation addımlarını kağız üzərində və kodda səhvsiz icra edirsən
+  - Qeyri-xətti aktivasiya olmadıqda çoxqatlı şəbəkənin niyə tək xətti qata çökdüyünü matris vurması ilə göstərə bilirsən
+  - "$z \\le 0$ olduqda ReLU gradientinin davranışını və 'dead ReLU' mexanizmini izah edirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-dlnfb-why-nonlinear
+      type: mcq
+      title: Qeyri-xətti aktivasiya niyə məcburidir?
+      prompt: "Əgər 10 qatlı neyron şəbəkəsində qatlar arasında heç bir qeyri-xətti aktivasiya funksiyası (ReLU, GELU və s.) istifadə etməsək, nə baş verər?"
+      skills: [dl-forward-pass]
+      category: concept
+      options:
+        - id: a
+          text: Şəbəkə 10 dəfə daha mürəkkəb qeyri-xətti sərhədləri öyrənər
+          feedback: Xətti funksiyaların kompozisiyası yenə xətti funksiyadır.
+        - id: b
+          text: Ardıcıl xətti çevirmələr ($W_{10}\\cdots W_1 x$) tək bir matris hasilinə ($W_{\\text{eff}} x + b_{\\text{eff}}$) yığılar və şəbəkə adi tək qatlı xətti modeldən fərqlənməz
+          feedback: Doğru! Qeyri-xəttilik olmadan dərinlik heç bir ifadə gücü (expressive power) qatmır.
+        - id: c
+          text: Backpropagation zamanı gradientlər sonsuzluğa bərabər olar
+          feedback: Törəmələr sadəcə matris çəkilərinin hasilinə bərabər olar; əsas problem ifadə gücünün tək xətti qata çökməsidir.
+      answer: b
+      explanation: Riyazi olaraq $W_2(W_1 x + b_1) + b_2 = (W_2 W_1)x + (W_2 b_1 + b_2)$ olduğu üçün aradakı qeyri-xətti aktivasiyalar olmadan bütün qatlar tək bir xətti qata ekvivalent olur.
+    - id: q-dlnfb-dead-relu-grad
+      type: mcq
+      title: ReLU mənfi zonada olanda gradient nəyə bərabərdir?
+      prompt: "Forward pass zamanı giriş $x = 4.0$, çəki $w = -1.0$, bias $b = 1.0$ olub ($z = -3.0$). Aktivasiya $a = \\text{ReLU}(z)$ və loss $L = (a - 5.0)^2$ olarsa, $\\frac{\\partial L}{\\partial w}$ gradienti neçədir?"
+      skills: [dl-forward-pass, dl-backprop]
+      category: math
+      options:
+        - id: a
+          text: "0.0 (çünki $z = -3.0 < 0$ olduğu üçün $\\text{ReLU}'(z) = 0$ olur və zəncir qaydasında bütün hasil sıfırlanır)"
+          feedback: Doğru! $z < 0$ zonasında ReLU qapısı bağlıdır, ona görə lokal törəmə $\partial a / \partial z = 0$ olur.
+        - id: b
+          text: "-40.0"
+          feedback: Bu, ReLU aktivasiyası olmasaydı ($a = z$) doğru olardı; ReLU $z < 0$ olanda törəməni sıfırlayır.
+        - id: c
+          text: "-10.0"
+          feedback: "-10.0 yalnız $\\partial L / \\partial a$ dəyəridir; onu $\\text{ReLU}'(-3.0) = 0$ və $x$-ə vurmaq lazımdır."
+      answer: a
+      explanation: "$z = -1.0 \\times 4.0 + 1.0 = -3.0 < 0$. Onda $a = \\text{ReLU}(-3.0) = 0$ və $\\frac{\\partial a}{\\partial z} = 0$. Zəncir qaydasına görə $\\frac{\\partial L}{\\partial w} = \\frac{\\partial L}{\\partial a} \\cdot 0 \\cdot x = 0.0$."
+    - id: q-dlnfb-chain-rule-role
+      type: mcq
+      title: Backpropagation-da Chain Rule
+      prompt: "$z = w \\cdot x + b$, $a = \\phi(z)$ və $L = (a - y)^2$ olan neyronda $\\frac{\\partial L}{\\partial w}$ üçün düzgün zəncir qaydası (chain rule) ifadəsi hansıdır?"
+      skills: [dl-backprop]
+      category: math
+      options:
+        - id: a
+          text: "$\\frac{\\partial L}{\\partial w} = \\frac{\\partial L}{\\partial a} + \\frac{\\partial a}{\\partial z} + \\frac{\\partial z}{\\partial w}$"
+          feedback: Zəncir qaydasında aralıq törəmələr toplanmır, bir-birinə vurulur!
+        - id: b
+          text: "$\\frac{\\partial L}{\\partial w} = \\frac{\\partial L}{\\partial a} \\cdot \\frac{\\partial a}{\\partial z} \\cdot \\frac{\\partial z}{\\partial w} = 2(a - y) \\cdot \\phi'(z) \\cdot x$"
+          feedback: Doğru! Hər mərhələnin lokal törəməsi bir-birinə vurularaq $w$-yə qədər geriyə yayılır.
+        - id: c
+          text: "$\\frac{\\partial L}{\\partial w} = 2(a - y) \\cdot w$"
+          feedback: "$z = w \\cdot x + b$ ifadəsinin $w$-yə görə törəməsi $w$ deyil, giriş $x$-dir!"
+      answer: b
+      explanation: Mürəkkəb funksiyanın törəmə qaydasına görə $\frac{\partial L}{\partial w} = \frac{\partial L}{\partial a}\frac{\partial a}{\partial z}\frac{\partial z}{\partial w}$, burada $\frac{\partial z}{\partial w} = x$-dir.
+    - id: q-dlnfb-numeric-forward
+      type: numeric
+      title: Forward pass çıxışını hesabla
+      prompt: |
+        İki girişli bir neyronda $\mathbf{x} = [2.0, -1.0]$, çəkilər $\mathbf{w} = [3.0, 4.0]$ və bias $b = -0.5$ verilib.
+        Neyronun aktivasiyası $a = \text{ReLU}(\mathbf{w} \cdot \mathbf{x} + b)$ neçəyə bərabərdir?
+      skills: [dl-forward-pass]
+      category: math
+      answer: 1.5
+      tolerance: 0.001
+      explanation: "$z = (3.0 \\times 2.0) + (4.0 \\times (-1.0)) - 0.5 = 6.0 - 4.0 - 0.5 = 1.5$. $1.5 > 0$ olduğu üçün $\\text{ReLU}(1.5) = 1.5$."
+exercises:
+  - id: ex-dlnfb-neuron-forward-backprop
+    type: code
+    title: ReLU və tək neyronun forward/backward funksiyasını yaz
+    prompt: |
+      Pure Python-da iki funksiya implementasiya et:
+
+      1. `relu(z: float) -> float`:
+         - $z > 0$ olarsa $z$, əks halda `0.0` qaytarır.
+
+      2. `neuron_forward_and_grads(x: float, w: float, b: float, y_true: float) -> tuple[float, float, float]`:
+         - İrəli keçid: $z = w \cdot x + b$, $a = \text{relu}(z)$, $L = (a - y_{\text{true}})^2$.
+         - Geriyə keçid (chain rule):
+           - $\frac{\partial L}{\partial a} = 2(a - y_{\text{true}})$
+           - $\frac{\partial a}{\partial z} = 1.0$ əgər $z > 0$ olarsa, əks halda $0.0$
+           - $\text{grad}_w = \frac{\partial L}{\partial z} \cdot x$ və $\text{grad}_b = \frac{\partial L}{\partial z}$
+         - `(loss, grad_w, grad_b)` tuple-nı qaytarır.
+    skills: [dl-forward-pass, dl-backprop]
+    category: python
+    difficulty: 2
+    hints:
+      - "`z = w * x + b` və `a = relu(z)` hesabla, sonra `loss = (a - y_true) ** 2`."
+      - "Əgər `z <= 0` olarsa, `dL_dz = 0.0` olmalıdır, buna görə həm `grad_w`, həm də `grad_b` `0.0` olacaq."
+    starter_code: |
+      def relu(z: float) -> float:
+          # TODO: max(0.0, z)
+          pass
+
+
+      def neuron_forward_and_grads(
+          x: float, w: float, b: float, y_true: float
+      ) -> tuple[float, float, float]:
+          # TODO: (loss, grad_w, grad_b) hesabla və qaytar
+          pass
+    tests:
+      - name: Aktiv ReLU zonasında (z > 0) loss və gradientlər
+        code: |
+          loss, gw, gb = neuron_forward_and_grads(x=2.0, w=1.5, b=0.5, y_true=5.0)
+          assert abs(loss - 2.25) < 1e-9, f"loss 2.25 olmalı idi, alınan {loss}"
+          assert abs(gw - (-6.0)) < 1e-9, f"grad_w -6.0 olmalı idi, alınan {gw}"
+          assert abs(gb - (-3.0)) < 1e-9, f"grad_b -3.0 olmalı idi, alınan {gb}"
+      - name: Ölü ReLU zonasında (z <= 0) gradientlər sıfırlanır
+        code: |
+          assert relu(-4.5) == 0.0 and relu(3.2) == 3.2
+          loss, gw, gb = neuron_forward_and_grads(x=2.0, w=-2.0, b=1.0, y_true=5.0)
+          # z = -3.0 -> a = 0.0 -> loss = (0 - 5)^2 = 25.0, amma ReLU'(-3) = 0 olduğu üçün grad=0
+          assert abs(loss - 25.0) < 1e-9, f"loss 25.0 olmalı idi, alınan {loss}"
+          assert gw == 0.0 and gb == 0.0, f"z <= 0 üçün gradientlər 0 olmalıdır: {(gw, gb)}"
+      - name: Proqnoz hədəfə tam bərabər olduqda loss=0 və grad=0
+        code: |
+          loss, gw, gb = neuron_forward_and_grads(x=3.0, w=2.0, b=-1.0, y_true=5.0)
+          assert abs(loss) < 1e-9 and abs(gw) < 1e-9 and abs(gb) < 1e-9
+    solution: |
+      def relu(z: float) -> float:
+          return float(z) if z > 0.0 else 0.0
+
+
+      def neuron_forward_and_grads(
+          x: float, w: float, b: float, y_true: float
+      ) -> tuple[float, float, float]:
+          z = w * x + b
+          a = relu(z)
+          loss = (a - y_true) ** 2
+          dL_da = 2.0 * (a - y_true)
+          da_dz = 1.0 if z > 0.0 else 0.0
+          dL_dz = dL_da * da_dz
+          grad_w = dL_dz * x
+          grad_b = dL_dz
+          return loss, grad_w, grad_b
+    explanation: |
+      Funksiya PyTorch-un `autograd` mühərrikinin tək neyron üçün etdiyi işi açıq şəkildə icra edir: əvvəlcə irəli keçiddə $z, a, L$ hesablanır, sonra lokal törəmələr sağdan sola bir-birinə vurulur.
+  - id: ex-dlnfb-numeric-grad-w
+    type: numeric
+    title: Chain rule ilə grad_w-ni əllə hesabla
+    prompt: |
+      Tək neyron üçün aşağıdakı dəyərlər verilib:
+      - Giriş: $x = 3.0$
+      - Çəki: $w = 2.0$, Bias: $b = 1.0$
+      - Həqiqi hədəf: $y = 4.0$
+      - Aktivasiya: $a = \text{ReLU}(z)$, Loss: $L = (a - y)^2$
+
+      $\frac{\partial L}{\partial w}$ (`grad_w`) dəyərini hesabla.
+    skills: [dl-forward-pass, dl-backprop]
+    category: math
+    difficulty: 2
+    answer: 18.0
+    tolerance: 0.01
+    hints:
+      - "1) Forward: $z = 2.0 \\times 3.0 + 1.0 = 7.0 \\implies a = \\text{ReLU}(7.0) = 7.0$."
+      - "2) $\\frac{\\partial L}{\\partial a} = 2(a - y) = 2(7.0 - 4.0) = 6.0$. $z > 0$ olduğu üçün $\\frac{\\partial L}{\\partial z} = 6.0$."
+      - "3) $\\frac{\\partial L}{\\partial w} = \\frac{\\partial L}{\\partial z} \\cdot x = 6.0 \\times 3.0$."
+    explanation: "$z = 2 \\times 3 + 1 = 7 > 0 \\implies a = 7$. $\\frac{\\partial L}{\\partial z} = 2(7 - 4) \\times 1 = 6$. Oradan $\\frac{\\partial L}{\\partial w} = 6 \\times x = 6 \\times 3 = 18.0$."
+references:
+  - title: Andrej Karpathy — The spelled-out intro to neural networks and backpropagation (micrograd)
+    url: https://github.com/karpathy/micrograd
+    note: Pure Python-da sıfırdan autograd və backpropagation mühərriki
+  - title: CS231n — Backpropagation, Intuitions
+    url: https://cs231n.github.io/optimization-2/
+    note: Stanford CS231n kursunun hesablama qrafı və chain rule qeydləri

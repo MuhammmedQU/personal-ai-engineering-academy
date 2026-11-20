@@ -1,0 +1,305 @@
+id: math-matrices-shapes
+track: math
+module: linear-algebra
+title: Matrislər, shapes və matrix multiplication — neyron qatının riyaziyyatı
+summary: Matris ölçülərini (rows, cols), matris vurmasının daxili ölçü uyğunluğu qaydasını ((m, n) @ (n, p) -> (m, p)) və neyron şəbəkəsindəki linear layer-in (Y = X @ W + b) nə üçün sadəcə batch matris vurması olduğunu öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [math-vectors-dot-product]
+next: math-derivatives-gradient-descent
+skills: [matrices-shapes, vectors-dot-product]
+objectives:
+  - Matrisin ölçüsünü (shape) `(sətir_sayı, sütun_sayı)` kimi oxumaq və yoxlamaq
+  - "`(m, n) @ (n, p) -> (m, p)` matris vurması qaydasını tətbiq etmək və çıxışın hər elementini sətir-sütun dot product-ı kimi hesablamaq"
+  - "Neyron şəbəkənin xətti qatını (`Y = X @ W + b`) batch ölçüləri ilə (`(batch, in_features) @ (in_features, out_features) -> (batch, out_features)`) izah etmək"
+  - PyTorch/NumPy-da ən çox rast gəlinən `shape mismatch` xətalarını diaqnoz etmək və düzəltmək
+why_it_matters: |
+  Deep Learning və LLM kodunda qarşılaşacağın xətaların yarıdan çoxu `RuntimeError: mat1 and mat2 shapes cannot be multiplied (32x128 and 64x10)` tipli **shape mismatch** xətalarıdır.
+
+  Matris vurması tək-tək nümunələri `for` dövrü ilə hesablamaq əvəzinə, `32` və ya `512` nümunəlik bütöv bir **batch**-i GPU-da paralel olaraq bir əməliyyatla (`X @ W`) hesablamağa imkan verir. Matrislərin ölçülərini kağız üzərində izləməyi bacaran mühəndis istənilən Transformer və ya MLP arxitekturasını bir baxışda oxuya bilir.
+terms:
+  - term: Matrix (matris)
+    definition: $m$ sətir və $n$ sütundan ibarət 2-ölçülü ədədlər cədvəli ($\mathbb{R}^{m \times n}$).
+  - term: Shape (ölçü)
+    definition: "Matrisin hər ox üzrə uzunluqları cütü: `(rows, cols)` = `(m, n)`. Birinci ədəd həmişə sətirlərin, ikinci ədəd sütunların sayıdır."
+  - term: Matrix multiplication (`@` / `matmul`)
+    definition: "$A$ matrisinin sətirləri ilə $B$ matrisinin sütunlarının cüt-cüt skalyar hasili (dot product); daxili ölçülər bərabər olmalıdır."
+  - term: Transpose ($A^T$)
+    definition: Matrisin sətirləri ilə sütunlarının yerini dəyişmək; $(m, n)$ ölçülü matrisin transpozisiyası $(n, m)$ ölçülü olur ($A^T_{j,i} = A_{i,j}$).
+  - term: Linear layer (Dense / Fully-connected)
+    definition: "Neyron şəbəkənin təməl bloku: giriş matrisini çəki matrisinə vurub sürüşmə (bias) əlavə edir ($Y = XW + b$)."
+sections:
+  - id: shapes-and-matmul-rule
+    kind: explanation
+    title: Shape qaydası və Neyron Qatı kimi Matris Vurması
+    body: |
+      Matris $m$ sətir və $n$ sütundan ibarət ikiölçülü cədvəldir. Onun **shape**-i `(m, n)` kimi yazılır.
+      ML-də cədvəl datasını $X$ matrisi kimi saxlayanda:
+      - Hər **sətir** bir nümunədir (məsələn, 1 müştəri və ya 1 token).
+      - Hər **sütun** bir xüsusiyyətdir (feature).
+
+      **Matris vurması (`C = A @ B`) qaydası:**
+      Ölçüsü $(m, n)$ olan $A$ matrisini ölçüsü $(n, p)$ olan $B$ matrisinə vurmaq üçün **daxili ölçülər eyni olmalıdır** ($A$-nın sütun sayı $= B$-nin sətir sayı $= n$). Nəticədə xarici ölçülərə malik $(m, p)$ matrisi alınır:
+
+      $$\underbrace{A}_{(m,\; n)} \;@\;\underbrace{B}_{(n,\; p)} \;=\; \underbrace{C}_{(m,\; p)}$$
+
+      $C$ matrisinin $i$-ci sətir, $j$-ci sütundakı elementi $A$-nın $i$-ci sətri ilə $B$-nin $j$-ci sütununun **dot product**-ıdır:
+
+      $$C_{i,j} = \sum_{k=1}^{n} A_{i,k} \, B_{k,j}$$
+
+      Simvollar:
+      - $m$ — $A$ matrisinin (və çıxış $C$-nin) sətir sayı
+      - $n$ — daxili ortaq ölçü ($A$-nın sütun sayı $= B$-nin sətir sayı)
+      - $p$ — $B$ matrisinin (və çıxış $C$-nin) sütun sayı
+      - $C_{i,j}$ — nəticə matrisinin $i$-ci sətir, $j$-ci sütun kəsişməsindəki ədəd
+
+      **Neyron şəbəkənin Linear Layer-i:**
+      Bir qat eyni anda `batch` sayda nümunə qəbul edir:
+
+      $$\underbrace{Y}_{(\text{batch},\; d_{\text{out}})} = \underbrace{X}_{(\text{batch},\; d_{\text{in}})} \;@\; \underbrace{W}_{(d_{\text{in}},\; d_{\text{out}})} + \underbrace{\mathbf{b}}_{(d_{\text{out}})}$$
+
+      Simvollar:
+      - $X$ — giriş batch-i: `batch` sayda nümunə, hər birində $d_{\text{in}}$ (`in_features`) ədəd var
+      - $W$ — öyrənilən çəkilər (weights) matrisi: $(d_{\text{in}}, d_{\text{out}})$
+      - $\mathbf{b}$ — hər çıxış neyronuna əlavə olunan bias vektoru (hər sətirə yayılır — broadcasting)
+      - $Y$ — çıxış matrisi: hər nümunə üçün $d_{\text{out}}$ (`out_features`) yeni əlamət
+  - id: domino-chain-analogy
+    kind: analogy
+    title: "Mental model: domino daşlarının qoşulması"
+    body: |
+      Matris ölçülərini domino daşları kimi düşün:
+      - `[2 | 3]` daşını yalnız `[3 | 4]` daşına qoşa bilərsən, çünki ortadakı rəqəmlər (`3` və `3`) üst-üstə düşür.
+      - Ortadakı iki `3` bir-birinə kilidlənib yox olur, kənarda isə yeni ölçü — **`[2 | 4]`** qalır!
+      - Əgər əlində `[2 | 3]` və `[2 | 3]` daşları varsa, orta rəqəmlər (`3` və `2`) uyğun gəlmir → **Shape Mismatch**! İkinci daşı çevirməlisən (Transpose: `[3 | 2]`), onda `[2 | 3] @ [3 | 2] -> [2 | 2]` alınar.
+  - id: linear-layer-diagram
+    kind: diagram
+    title: Batch Linear Layer-də ölçülərin axını
+    body: |
+      ```mermaid
+      flowchart LR
+        X["Giriş X\nshape: (32, 4)\n32 nümunə, 4 feature"] --> MM["Matmul: X @ W\ndaxili ölçü: 4 == 4"]
+        W["Çəkilər W\nshape: (4, 2)\n4 giriş -> 2 neyron"] --> MM
+        MM --> Y["Çıxış Y\nshape: (32, 2)\n32 nümunə, 2 çıxış"]
+      ```
+
+      **Əsas qayda:** Matris vurmasında **daxili ölçülər** (`4 == 4`) eyni olmalıdır və nəticədə yox olur; **kənar ölçülər** (`32` və `2`) isə çıxış matrisinin shape-ini `(32, 2)` təyin edir. Bu mexanizm 32 nümunənin hamısını GPU-da eyni anda bir əməliyyatla emal etməyə imkan verir.
+  - id: worked-2x3-matmul
+    kind: worked_example
+    title: Kiçik rəqəmlərlə (2, 3) @ (3, 2) matris vurması
+    body: |
+      Verilib $A$ (shape `(2, 3)` — 2 nümunə, 3 feature) və $B$ (shape `(3, 2)` — 3 giriş, 2 çıxış neyronu):
+
+      $$A = \begin{bmatrix} 1 & 2 & 3 \\ 4 & 0 & 1 \end{bmatrix}, \quad B = \begin{bmatrix} 2 & 0 \\ 1 & 3 \\ 0 & 1 \end{bmatrix}$$
+
+      Daxili ölçülər: $3 == 3$ (uyğundur!). Çıxış $C = A @ B$ ölçüsü `(2, 2)` olacaq:
+
+      | Element ($C_{i,j}$) | $A$-nın $i$-ci sətri $\cdot$ $B$-nin $j$-ci sütunu | Hesablama | Dəyər |
+      |---|---|---|---|
+      | $C_{0,0}$ | $[1, 2, 3] \cdot [2, 1, 0]$ | $1(2) + 2(1) + 3(0)$ | **$4$** |
+      | $C_{0,1}$ | $[1, 2, 3] \cdot [0, 3, 1]$ | $1(0) + 2(3) + 3(1)$ | **$9$** |
+      | $C_{1,0}$ | $[4, 0, 1] \cdot [2, 1, 0]$ | $4(2) + 0(1) + 1(0)$ | **$8$** |
+      | $C_{1,1}$ | $[4, 0, 1] \cdot [0, 3, 1]$ | $4(0) + 0(3) + 1(1)$ | **$1$** |
+
+      Yekun nəticə:
+      $$C = \begin{bmatrix} 4 & 9 \\ 8 & 1 \end{bmatrix}$$
+  - id: code-walkthrough
+    kind: code
+    title: Kod — ölçü yoxlaması ilə 2D matris vurması
+    body: |
+      ```python
+      def get_shape(M: list[list[float]]) -> tuple[int, int]:
+          """Validate a non-empty rectangular 2D matrix and return (rows, cols)."""
+          if not M or not M[0]:
+              raise ValueError("matrix must be non-empty")
+          cols = len(M[0])
+          for row in M:
+              if len(row) != cols:
+                  raise ValueError("all rows must have the same number of columns")
+          return len(M), cols
+
+
+      def matmul_2d(A: list[list[float]], B: list[list[float]]) -> list[list[float]]:
+          """Multiply matrix A (m, n) by matrix B (n, p) -> C (m, p)."""
+          m, n_a = get_shape(A)
+          n_b, p = get_shape(B)
+          if n_a != n_b:
+              raise ValueError(
+                  f"shape mismatch: cannot multiply ({m}, {n_a}) and ({n_b}, {p})"
+              )
+          result: list[list[float]] = []
+          for i in range(m):
+              row_out: list[float] = []
+              for j in range(p):
+                  cell = sum(A[i][k] * B[k][j] for k in range(n_a))
+                  row_out.append(float(cell))
+              result.append(row_out)
+          return result
+      ```
+
+      Diqqət et:
+      - `n_a != n_b` yoxlaması PyTorch/NumPy-dakı məşhur shape mismatch xətasını aydın mesajla qaytarır.
+      - Üç iç-içə dövr (`i` sətirlər, `j` sütunlar, `k` ortaq daxili ölçü) matris vurmasının tərifini birbaşa göstərir (`O(m * n * p)`).
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Matris vurmasının yerini dəyişmək ($A @ B \neq B @ A$)**
+      Adi ədədlərdə $3 \cdot 5 = 5 \cdot 3$, amma matrislərdə vurma **kommutativ deyil**! $(2, 3) @ (3, 4)$ mümkündür və $(2, 4)$ verir, amma $(3, 4) @ (2, 3)$ daxili ölçülər ($4 \neq 2$) uyğun gəlmədiyi üçün `ValueError` verir.
+
+      **2. İki eyni ölçülü matrisi birbaşa vurmağa çalışmaq**
+      $A$ və $B$ hər ikisi `(32, 128)` ölçülüdürsə (məsələn, 32 sorğu embedding-i və 32 sənəd embedding-i), onların cüt-cüt oxşarlıq matrisini tapmaq üçün `A @ B` yazsan `(32, 128) @ (32, 128)` xəta verəcək! İkincini transpozisiya etməlisən: `A @ B.T` → `(32, 128) @ (128, 32) -> (32, 32)`.
+
+      **3. 2D matris yaradarkən `[[0] * p] * m` yazmaq**
+      Python-da `[[0] * 3] * 2` yazanda eyni sətir siyahısına 2 referans yaranır; `C[0][0] = 5` yazanda `C[1][0]` də `5` olur! Həmişə list comprehension istifadə et: `[[0.0 for _ in range(p)] for _ in range(m)]`.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Batching: Latency vs Throughput:** Tək sorğunu `(1, 768) @ (768, 768)` kimi vurmaq az gecikmə (low latency) verir, amma GPU nüvələrinin 95%-i boş qalır. 64 sorğunu birləşdirib `(64, 768) @ (768, 768)` kimi bir batch-də vurmaq GPU-nun paralel matris bloklarını (Tensor Cores) tam doldurur və saniyədə emal olunan sorğu sayını (throughput) dəfələrlə artırır.
+      - **Yaddaş həddi (OOM):** Batch ölçüsünü çox böyütdükdə aktivasiya matrisləri (`(batch, seq_len, hidden_dim)`) GPU VRAM-a sığmır və `CUDA out of memory` verir. AI mühəndisi GPU yaddaşı ilə throughput arasında optimal `batch_size` seçir.
+mastery_criteria:
+  - İstənilən iki matrisin vurula bilib-bilməyəcəyini və nəticənin shape-ini dərhal deyə bilirsən
+  - 2D matrislərin vurulmasını ölçü yoxlaması ilə birlikdə Python-da yaza bilirsən
+  - Neyron qatındakı shape mismatch xətasını oxuyub hansı matrisin transpozisiya və ya yenidən ölçüləndirilməli olduğunu tapırsan
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mathmat-output-shape
+      type: text
+      title: Çıxış matrisinin ölçüsünü (shape) tap
+      prompt: "Ölçüsü `(16, 64)` olan $X$ giriş matrisini ölçüsü `(64, 10)` olan $W$ çəki matrisinə vurduqda (`Y = X @ W`), alınan $Y$ matrisinin ölçüsü nə olar? `(sətir, sütun)` formatında yaz."
+      skills: [matrices-shapes]
+      category: math
+      accepted: ["(16, 10)", "16, 10", "16x10"]
+      hints:
+        - "`(m, n) @ (n, p) -> (m, p)` qaydasında daxili `64`-lər ixtisar gedir, kənar ölçülər qalır."
+      explanation: "`(16, 64) @ (64, 10)` əməliyyatında daxili ölçülər (`64 == 64`) uyğundur və nəticə xarici ölçüləri götürür: `(16, 10)`."
+    - id: q-mathmat-diagnose-error
+      type: mcq
+      title: Shape mismatch xətasının diaqnozu
+      prompt: |
+        32 sorğu vektorundan ibarət `Q` matrisi `(32, 128)` və 50 sənəd vektorundan ibarət `D` matrisi `(50, 128)` verilib.
+        Hər sorğu ilə hər sənədin dot product-ını tapıb `(32, 50)` ölçülü oxşarlıq matrisi almaq üçün hansı əməliyyat yazılmalıdır?
+      skills: [matrices-shapes, vectors-dot-product]
+      category: debug
+      options:
+        - id: a
+          text: "`Q @ D` — birbaşa vurmaq"
+          feedback: "`(32, 128) @ (50, 128)` daxili ölçülər `128 != 50` olduğu üçün xəta verir."
+        - id: b
+          text: "`Q @ D.T` — D matrisini transpozisiya edib `(128, 50)` ölçüsünə gətirmək"
+          feedback: Doğru. `D.T` ölçüsü `(128, 50)` olur və `(32, 128) @ (128, 50) -> (32, 50)` verir.
+        - id: c
+          text: "`Q.T @ D` — Q matrisini transpozisiya etmək"
+          feedback: "`(128, 32) @ (50, 128)` yenə `32 != 50` xətası verir."
+      answer: b
+      explanation: "İki embedding cədvəlinin bütün cütlər üzrə dot product matrisi $Q D^T$ ilə hesablanır: `(32, 128) @ (128, 50) -> (32, 50)`."
+    - id: q-mathmat-cell-calc
+      type: numeric
+      title: Matris hasilinin bir elementini hesabla
+      prompt: |
+        $$A = \begin{bmatrix} 2 & 3 \\ 1 & 4 \end{bmatrix}, \quad B = \begin{bmatrix} 5 & 1 \\ 2 & 6 \end{bmatrix}$$
+        $C = A @ B$ matrisinin birinci sətir, ikinci sütun elementini ($C_{0,1}$, yəni sağ-üst küncdəki ədədi) hesabla.
+      skills: [matrices-shapes, vectors-dot-product]
+      category: math
+      answer: 20
+      tolerance: 0.01
+      hints:
+        - "$C_{0,1}$ üçün $A$-nın 0-cı sətri $[2, 3]$ ilə $B$-nin 1-ci sütunu $[1, 6]$-nın dot product-ını tap."
+      explanation: "$C_{0,1}$ elementi $A$-nın 0-cı sətri $[2, 3]$ ilə $B$-nin 1-ci sütunu $[1, 6]$ arasındakı dot product-dır: $2 \\cdot 1 + 3 \\cdot 6 = 2 + 18 = 20$."
+    - id: q-mathmat-linear-params
+      type: numeric
+      title: Linear qatda çəkilərin (weights) sayı
+      prompt: "Giriş ölçüsü `in_features = 8` və çıxış ölçüsü `out_features = 5` olan bir xətti qatın $W$ çəki matrisində (bias-ı saymadan) cəmi neçə ədəd (parametr) var?"
+      skills: [matrices-shapes]
+      category: llm-architecture
+      answer: 40
+      tolerance: 0.01
+      hints:
+        - "$W$ matrisinin ölçüsü `(in_features, out_features)` = `(8, 5)`-dir."
+      explanation: "$(8, 5)$ ölçülü matrisdə $8 \\times 5 = 40$ çəki parametri yerləşir."
+exercises:
+  - id: ex-mathmat-matmul-2d
+    type: code
+    title: Ölçü yoxlaması ilə matmul_2d funksiyasını yaz
+    prompt: |
+      İki 2-ölçülü matrisi (`list[list[float]]`) bir-birinə vuran `matmul_2d(A, B)` funksiyasını yaz:
+
+      1. Əgər `A` və ya `B` boşdursa (`[]` və ya `[[]]`), yaxud sətirlərinin uzunluğu bərabər deyilsə → `ValueError` qaldır.
+      2. Əgər `A`-nın sütun sayı `B`-nin sətir sayına bərabər deyilsə (`n_a != n_b`) → `ValueError` qaldır.
+      3. Ölçüsü `(m, p)` olan yeni nəticə matrisini qaytar.
+    skills: [matrices-shapes, vectors-dot-product]
+    category: math
+    difficulty: 2
+    hints:
+      - "`m, n_a = len(A), len(A[0])` və `n_b, p = len(B), len(B[0])` götürməzdən əvvəl `if not A or not B or not A[0] or not B[0]: raise ValueError(...)` yoxla."
+      - "`n_a != n_b` olduqda dərhal `raise ValueError(\"shape mismatch\")` et."
+      - "`C[i][j] = sum(A[i][k] * B[k][j] for k in range(n_a))` düsturu ilə yeni 2D list qur."
+    starter_code: |
+      def matmul_2d(A: list[list[float]], B: list[list[float]]) -> list[list[float]]:
+          # TODO: ölçü uyğunluğunu yoxla və A @ B hasilini qaytar
+          return []
+    tests:
+      - name: "(2, 3) @ (3, 2) -> (2, 2) dərsdəki nümunə"
+        code: |
+          A = [[1.0, 2.0, 3.0], [4.0, 0.0, 1.0]]
+          B = [[2.0, 0.0], [1.0, 3.0], [0.0, 1.0]]
+          assert matmul_2d(A, B) == [[4.0, 9.0], [8.0, 1.0]]
+      - name: "(1, 3) @ (3, 1) -> (1, 1) skalyar hasil kimi"
+        code: |
+          assert matmul_2d([[2.0, 3.0, 4.0]], [[1.0], [0.0], [5.0]]) == [[22.0]]
+      - name: Uyğun olmayan ölçülər və ya boş matris ValueError verir
+        code: |
+          for bad_a, bad_b in [
+              ([[1.0, 2.0]], [[1.0, 2.0]]),
+              ([], [[1.0]]),
+              ([[]], [[1.0]]),
+              ([[1.0, 2.0], [3.0]], [[1.0], [2.0]]),
+          ]:
+              try:
+                  matmul_2d(bad_a, bad_b)
+                  assert False, f"({bad_a}, {bad_b}) üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def matmul_2d(A: list[list[float]], B: list[list[float]]) -> list[list[float]]:
+          if not A or not B or not A[0] or not B[0]:
+              raise ValueError("matrices must be non-empty")
+          m, n_a = len(A), len(A[0])
+          n_b, p = len(B), len(B[0])
+          if any(len(r) != n_a for r in A) or any(len(r) != p for r in B):
+              raise ValueError("ragged matrix rows are not allowed")
+          if n_a != n_b:
+              raise ValueError(f"shape mismatch: ({m}, {n_a}) vs ({n_b}, {p})")
+          return [
+              [float(sum(A[i][k] * B[k][j] for k in range(n_a))) for j in range(p)]
+              for i in range(m)
+          ]
+    explanation: |
+      Funksiya əvvəlcə hər iki matrisin düzbucaqlı və boş olmadığını, sonra daxili ölçülərin bərabərliyini (`n_a == n_b`) yoxlayır, sonda isə `(m, p)` ölçülü hasil matrisini hesablayır.
+  - id: ex-mathmat-chain-shape
+    type: text
+    title: İki ardıcıl neyron qatından sonra çıxışın shape-i
+    prompt: |
+      2-qatlı MLP şəbəkəsinə `X` batch-i daxil olur:
+      - `X` shape: `(64, 784)`
+      - 1-ci qat çəki matrisi `W1` shape: `(784, 128)`
+      - 2-ci qat çəki matrisi `W2` shape: `(128, 10)`
+
+      `Y = (X @ W1) @ W2` hesablandıqda yekun `Y` matrisinin shape-i nə olar? `(sətir, sütun)` formatında yaz.
+    skills: [matrices-shapes]
+    category: llm-architecture
+    difficulty: 1
+    accepted: ["(64, 10)", "64, 10", "64x10"]
+    hints:
+      - "Birinci addım: `(64, 784) @ (784, 128)` -> `(64, 128)`."
+      - "İkinci addım: `(64, 128) @ (128, 10)` -> ?"
+    explanation: |
+      İlk qat `(64, 784) @ (784, 128) -> (64, 128)` gizli təsvirini (hidden representation) yaradır. İkinci qat isə `(64, 128) @ (128, 10) -> (64, 10)` (64 nümunənin hər biri üçün 10 sinif skoru) qaytarır.
+references:
+  - title: 3Blue1Brown — Matrix multiplication as composition
+    url: https://www.3blue1brown.com/lessons/matrix-multiplication
+    note: Matris vurmasının həndəsi mənası
+  - title: PyTorch Documentation — torch.nn.Linear
+    url: https://pytorch.org/docs/stable/generated/torch.nn.Linear.html
+    note: PyTorch-da xətti qatın giriş/çıxış shape spesifikasiyası

@@ -1,0 +1,302 @@
+id: math-probability-bayes
+track: math
+module: probability-statistics
+title: Şərti ehtimal, Bayes qaydası və Base Rate effekti
+summary: Yeni sübut (siqnal, model proqnozu, anomaliya həyəcanı) gəldikdə ilkin ehtimalın Bayes qaydası ilə necə yeniləndiyini və nadir hadisələrdə Base Rate-i unutmağın mühəndisləri necə aldatdığını öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: []
+next: math-pca-statistics-hypothesis
+skills: [probability-bayes, statistics-basics]
+objectives:
+  - Şərti ehtimalı ($P(A \mid B)$) $P(B \mid A)$-dan fərqləndirmək
+  - "Bayes düsturunu ($P(A \\mid B) = \\frac{P(B \\mid A) P(A)}{P(B)}$) tam ehtimal məxrəci ilə birlikdə tətbiq etmək"
+  - Konkret ədədi cədvəllə (1,000 əməliyyat üzərində saxtakarlıq/anomaliya detektoru) Base Rate Neglect tələsini izah etmək
+  - Prior, Sensitivity (Recall) və False Positive Rate-dən Posterior ehtimalı hesablayan Python funksiyası yazmaq
+why_it_matters: |
+  Təsəvvür et ki, şirkət üçün **"95% dəqiqlikli"** fırıldaqçılıq (fraud) və ya prompt-injection detektoru qurmusan. İlk həyəcan siqnalı (alert) gələndə onun həqiqətən hücum olma ehtimalı neçədir? Çox adam *"95%"* deyir — amma əgər real trafikdə hücumların payı (**Base Rate**) $1\%$ və ya $2\%$-dirsə, Bayes qaydası göstərir ki, həyəcan siqnallarının **böyük əksəriyyəti yalançı həyəcandır (false positive)**!
+
+  Bu fenomeni başa düşməyən AI mühəndisi production-da istifadəçilərin normal sorğularını bloklayır və ya təhlükəsizlik komandasını minlərlə yalançı bildirişlə boğur.
+terms:
+  - term: Prior probability ($P(A)$ / Base rate)
+    definition: Yeni sübut və ya model siqnalı görünməzdən **əvvəl** hadisənin ümumi başvermə tezliyi (məsələn, bütün əməliyyatların $2\%$-i saxtadır).
+  - term: Conditional probability ($P(A \mid B)$)
+    definition: $B$ hadisəsinin artıq baş verdiyi məlum olduqda $A$ hadisəsinin başvermə ehtimalı ("$B$ şərti daxilində $A$").
+  - term: Sensitivity / Recall ($P(B \mid A)$)
+    definition: Həqiqətən müsbət olan halların ($A$) neçə faizində detektorun müsbət siqnal ($B$) verməsi (True Positive Rate).
+  - term: False Positive Rate ($P(B \mid \neg A)$)
+    definition: Həqiqətən **təmiz** olan halların ($\neg A$) neçə faizində detektorun səhvən həyəcan siqnalı ($B$) verməsi.
+  - term: Posterior probability ($P(A \mid B)$)
+    definition: Siqnal ($B$) müşahidə olunduqdan **sonra** hadisənin ($A$) yenilənmiş həqiqi ehtimalı (precision / PPV).
+  - term: Base rate neglect
+    definition: Yalnız modelin dəqiqlik faizinə baxıb hadisənin nə qədər nadir olduğunu ($P(A)$) nəzərə almamaq səhvi.
+sections:
+  - id: conditional-and-bayes
+    kind: explanation
+    title: Şərti Ehtimal və Bayes Qaydası
+    body: |
+      Ən vacib fərqləndirmə: **$P(A \mid B)$ ilə $P(B \mid A)$ eyni şey deyil!**
+      - $A$ = Əməliyyat həqiqətən fırıldaqdır (`Fraud`).
+      - $B$ = Model həyəcan siqnalı verdi (`Alert`).
+      - $P(\text{Alert} \mid \text{Fraud}) = 0.95$: *"Əməliyyat fırıldaqdırsa, model 95% ehtimalla siqnal verir"* (Modelin tutma qabiliyyəti — **Sensitivity / Recall**).
+      - $P(\text{Fraud} \mid \text{Alert}) = ?$: *"Model siqnal veribsə, bu əməliyyatın həqiqətən fırıldaq olma ehtimalı nədir?"* (Production-da bizi maraqlandıran əsl sual — **Posterior**).
+
+      **Bayes Qaydası** bu iki istiqaməti bir-birinə bağlayır:
+
+      $$P(A \mid B) = \frac{P(B \mid A) \, P(A)}{P(B)}$$
+
+      Burada məxrəcdəki $P(B)$ (modelin ümumiyyətlə siqnal vermə ehtimalı) iki yoldan yaranır: **həqiqi fırıldağa verilən doğru siqnal** üstəgəl **təmiz əməliyyata verilən yalançı siqnal** (Tam Ehtimal Düsturu):
+
+      $$P(B) = P(B \mid A) \, P(A) + P(B \mid \neg A) \, P(\neg A)$$
+
+      Simvollar:
+      - $P(A)$ (`prior`) — hadisənin baza tezliyi ($0 \le P(A) \le 1$)
+      - $P(\neg A) = 1 - P(A)$ — hadisənin baş verməmə (təmiz olma) ehtimalı
+      - $P(B \mid A)$ (`sensitivity`) — həqiqi müsbət halda siqnal vermə ehtimalı (True Positive Rate)
+      - $P(B \mid \neg A)$ (`false_positive_rate`) — təmiz halda səhvən siqnal vermə ehtimalı (FPR)
+      - $P(A \mid B)$ (`posterior`) — siqnal gəldikdə hadisənin həqiqi olma ehtimalı
+
+      *Kiçik ədədi yoxlama:* Əgər $P(A) = 0.02$, $P(B \mid A) = 0.95$ və $P(B \mid \neg A) = 0.05$ olarsa:
+      - $P(B) = (0.95 \cdot 0.02) + (0.05 \cdot 0.98) = 0.019 + 0.049 = 0.068$
+      - $P(A \mid B) = \frac{0.019}{0.068} = \frac{19}{68} \approx \mathbf{0.2794}$ ($27.9\%$).
+  - id: smoke-alarm-analogy
+    kind: analogy
+    title: "Mental model: mətbəxdəki tüstü detektoru"
+    body: |
+      Evindəki tüstü detektoru çox həssasdır:
+      - Həqiqi yanğın olanda $99\%$ ehtimalla çalır ($P(\text{Siqnal} \mid \text{Yanğın}) = 0.99$).
+      - Yanğın olmayanda isə sadəcə tost yananda və ya duş buxarından $2\%$ hallarda səhvən çalır ($P(\text{Siqnal} \mid \text{Normal}) = 0.02$).
+
+      İndi detektor çaldı! Evdə həqiqi yanğın olma ehtimalı $99\%$-dirmi? **Əsla yox!**
+      Çünki evdə yanğın çıxması çox nadir hadisədir (aşağı **Base Rate**), tost bişirmək isə hər gün baş verir. İl ərzində detektorun çaldığı 10 dəfənin 9-u yanmış tostdur, yanğın deyil.
+  - id: bayes-tree-diagram
+    kind: diagram
+    title: "1,000 əməliyyatın budaqlanması (Təbii Tezlik Ağacı)"
+    body: |
+      ```mermaid
+      flowchart TD
+        All["1,000 Əməliyyat"] --> Fraud["20 Həqiqi Fraud (2% Base Rate)"]
+        All --> Clean["980 Təmiz Əməliyyat (98%)"]
+        Fraud --> TP["19 Doğru Alert\n(95% Sensitivity)"]
+        Fraud --> FN["1 Qaçırılan Fraud (5%)"]
+        Clean --> FP["49 Yalançı Alert\n(5% False Positive Rate)"]
+        Clean --> TN["931 Səssiz Təmiz (95%)"]
+        TP --> TotalAlert["Cəmi Alert: 19 + 49 = 68\nPosterior = 19 / 68 ≈ 27.9%"]
+        FP --> TotalAlert
+      ```
+  - id: worked-1000-transactions
+    kind: worked_example
+    title: "1,000 əməliyyat cədvəli: Niyə 95%-lik detektor yalnız 27.9% dəqiq çıxır?"
+    body: |
+      Kəsr və faizlərlə çaşmamağın ən yaxşı yolu **1,000 konkret əməliyyat** üzərində saymaqdır:
+      - **Base rate ($P(\text{Fraud})$):** $2\%$ → $1,000$ əməliyyatdan **$20$-si Fraud**, **$980$-i Təmizdir**.
+      - **Sensitivity ($P(\text{Alert} \mid \text{Fraud})$):** $95\%$ → $20$ Fraud-dan $0.95 \times 20 = \mathbf{19}$ ədədinə Alert gəlir.
+      - **False Positive Rate ($P(\text{Alert} \mid \text{Təmiz})$):** $5\%$ → $980$ təmiz əməliyyatdan $0.05 \times 980 = \mathbf{49}$ ədədinə səhvən Alert gəlir!
+
+      | Qrup | Ümumi say | Alert gələnlər ($B$) | Alert gəlməyənlər ($\neg B$) |
+      |---|---|---|---|
+      | **Həqiqi Fraud ($A$)** | $20$ | **$19$** (True Positive) | $1$ (False Negative) |
+      | **Təmiz ($\neg A$)** | $980$ | **$49$** (False Positive) | $931$ (True Negative) |
+      | **Cəmi** | **$1,000$** | **$68$** (Bütün Alert-lər) | $932$ |
+
+      İndi ekranda **Alert** görəndə soruşuruq: bu $68$ alert-dən neçəsi həqiqi Fraud-dur?
+
+      $$P(\text{Fraud} \mid \text{Alert}) = \frac{19}{19 + 49} = \frac{19}{68} \approx 0.2794 \quad (27.9\%)$$
+
+      Təmiz əməliyyatların sayı ($980$) o qədər böyükdür ki, onların cəmi $5\%$-i ($49$ yalançı alert) həqiqi fırıldaqların $95\%$-ni ($19$ doğru alert) sayca üstələyir!
+  - id: code-walkthrough
+    kind: code
+    title: Kod — Bayes Posterior hesablayıcısı
+    body: |
+      ```python
+      def bayes_posterior(
+          prior: float, sensitivity: float, false_positive_rate: float
+      ) -> float:
+          """Compute P(A|B) given P(A), P(B|A)=sensitivity, and P(B|~A)=false_positive_rate."""
+          for name, val in [
+              ("prior", prior),
+              ("sensitivity", sensitivity),
+              ("false_positive_rate", false_positive_rate),
+          ]:
+              if not (0.0 <= val <= 1.0):
+                  raise ValueError(f"{name} must be in [0, 1], got {val}")
+
+          p_b_given_a = sensitivity * prior
+          p_b_given_not_a = false_positive_rate * (1.0 - prior)
+          p_b = p_b_given_a + p_b_given_not_a
+
+          if p_b == 0.0:
+              raise ValueError("total probability of evidence P(B) is 0")
+
+          return float(p_b_given_a / p_b)
+
+
+      post = bayes_posterior(prior=0.02, sensitivity=0.95, false_positive_rate=0.05)
+      print(round(post, 4))   # 0.2794
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. $P(A \mid B)$ ilə $P(B \mid A)$-nı bərabər tutmaq (Prosecutor's Fallacy)**
+      *"Fırıldaqların 95%-də siqnal çalır"* ($P(\text{Alert} \mid \text{Fraud}) = 0.95$) cümləsini *"Siqnal çalıbsa, 95% fırıldaqdır"* ($P(\text{Fraud} \mid \text{Alert}) = 0.95$) kimi oxumaq ən böyük statistik səhvdir.
+
+      **2. Məxrəcdə $(1 - \text{prior})$ vuruğunu unutmaq**
+      $P(B) = P(B \mid A)P(A) + P(B \mid \neg A)$ yazmaq səhvdir! İkinci hədd mütləq $P(\neg A) = 1 - P(A)$ ilə vurulmalıdır.
+
+      **3. Balanslaşdırılmış test datasında (50%/50%) ölçülən Precision-ı production-a aid etmək**
+      Laboratoriyada test dəstini `50% Fraud / 50% Təmiz` düzəltmisənsə (`prior = 0.5`), orada posterior $\frac{0.95 \cdot 0.5}{0.95 \cdot 0.5 + 0.05 \cdot 0.5} = 95\%$ çıxacaq. Amma həmin modeli `prior = 0.001` ($0.1\%$) olan real production trafikinə qoşan kimi dəqiqlik $95\%$-dən **$1.8\%$-ə** çökəcək!
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Yalançı həyəcanları azaltmaq vs Qaçırılan hücumlar (Threshold seçimi):** Nadir hadisələrdə posterior-u yüksək saxlamaq üçün **False Positive Rate** həddən artıq kiçik olmalıdır (məsələn, $0.05$ yox, $0.0001$). Amma qərar həddini (threshold) sərtləşdirib FPR-i sıfra yaxınlaşdıranda model bəzi həqiqi hücumları da qaçırmağa başlayır (Sensitivity düşür).
+      - **İki-mərhələli (Two-stage) yoxlama:** Birinci mərhələdə ucuz və yüksək həssaslıqlı (`sensitivity = 0.99`) model bütün şübhəliləri seçir (burada base rate $2\%$-dən $28\%$-ə qalxır!). İkinci mərhələdə isə yalnız həmin kiçik qrupa daha güclü LLM/insan yoxlaması tətbiq olunur — ikinci mərhələ üçün artıq prior $0.28$ olduğu üçün yekun dəqiqlik $95\%+$ olur!
+mastery_criteria:
+  - Prior, sensitivity və false positive rate verildikdə Bayes qaydası ilə posterior ehtimalı əl ilə və kodla hesablaya bilirsən
+  - 1,000 nümunəlik təbii tezlik cədvəli quraraq Base Rate effektini qeyri-texniki həmkarına izah edə bilirsən
+  - Laboratoriyada 50/50 balanslı datada test olunmuş modelin nadir hadisəli production trafikində niyə çoxlu false positive verdiyini əsaslandıra bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mathbay-direction
+      type: mcq
+      title: Şərti ehtimalın istiqaməti
+      prompt: "Spam filtri üçün **\"Həqiqi spam məktubların 98%-i bloklanır\"** ifadəsi hansı şərti ehtimalı ifadə edir?"
+      skills: [probability-bayes]
+      category: concept
+      options:
+        - id: a
+          text: "$P(\\text{Spam} \\mid \\text{Bloklanıb}) = 0.98$"
+          feedback: Bu, bloklanan məktubun spam olma ehtimalıdır (Posterior / Precision).
+        - id: b
+          text: "$P(\\text{Bloklanıb} \\mid \\text{Spam}) = 0.98$"
+          feedback: Doğru. Şərt məktubun həqiqətən Spam olmasıdır (`| Spam`), nəticə isə onun bloklanmasıdır (Sensitivity / Recall).
+        - id: c
+          text: "$P(\\text{Spam}) = 0.98$"
+          feedback: Bu, bütün məktubların 98%-nin spam olması (Prior) demək olardı.
+      answer: b
+      explanation: "\"Spam olanların 98%-i\" dedikdə məlum olan şərt `Spam`-dır, ona görə şərt xəttindən sağda dayanır: $P(\\text{Bloklanıb} \\mid \\text{Spam}) = 0.98$."
+    - id: q-mathbay-numeric-posterior
+      type: numeric
+      title: Bayes qaydası ilə Posterior hesabla
+      prompt: |
+        Server loglarında kritik nasazlıq başvermə tezliyi (prior) $P(A) = 0.10$-dur ($10\%$).
+        Anomaliya detektorunun həssaslığı $P(B \mid A) = 0.80$, təmiz loglarda yalançı həyəcan dərəcəsi isə $P(B \mid \neg A) = 0.20$-dir.
+        Detektor həyəcan siqnalı ($B$) verdikdə, həqiqətən nasazlıq ($A$) olma ehtimalı $P(A \mid B)$ neçədir? (Onluq kəsrlə yaz, məsələn `0.25`)
+      skills: [probability-bayes, statistics-basics]
+      category: math
+      answer: 0.3077
+      tolerance: 0.01
+      hints:
+        - "Surət: $P(B \\mid A)P(A) = 0.80 \\cdot 0.10 = 0.08$."
+        - "Yalançı siqnal payı: $P(B \\mid \\neg A)P(\\neg A) = 0.20 \\cdot 0.90 = 0.18$."
+        - "$P(A \\mid B) = 0.08 / (0.08 + 0.18) = 8 / 26 \\approx 0.3077$."
+      explanation: "$P(B) = 0.80(0.10) + 0.20(0.90) = 0.08 + 0.18 = 0.26$. Posterior $P(A \\mid B) = 0.08 / 0.26 = 4 / 13 \\approx 0.3077$."
+    - id: q-mathbay-base-rate-effect
+      type: mcq
+      title: Base rate azaldıqda nə baş verir?
+      prompt: Modelin `sensitivity` ($P(B \mid A) = 0.95$) və `false_positive_rate` ($P(B \mid \neg A) = 0.05$) göstəriciləri sabit qalır, amma hadisənin rastgəlmə tezliyi (**Base Rate** $P(A)$) $10\%$-dən $0.1\%$-ə düşür. Siqnal gəldikdə onun doğru olma ehtimalı ($P(A \mid B)$) necə dəyişər?
+      skills: [probability-bayes]
+      category: concept
+      options:
+        - id: a
+          text: Dəyişməz, çünki modelin öz parametrləri (95% və 5%) dəyişməyib
+          feedback: Posterior təkcə modeldən yox, birbaşa Base Rate-dən ($P(A)$) asılıdır.
+        - id: b
+          text: Kəskin şəkildə azalar, çünki $99.9\%$ təmiz trafikdən gələn $5\%$-lik yalançı siqnallar həqiqi siqnalları sayca üstələyər
+          feedback: Doğru. Base rate 0.001 olduqda 1000 haldan ~50 yalançı siqnal və cəmi ~1 doğru siqnal çıxır ($P(A|B) \approx 1.9\%$).
+        - id: c
+          text: Artar və $99.9\%$-ə yaxınlaşar
+          feedback: Əksinə, nadir hadisələrdə yalançı müsbətlərin payı artır.
+      answer: b
+      explanation: Hadisə nə qədər nadirdirsə ($P(A) \to 0$), sabit FPR fonunda yalançı həyəcanların ümumi həyəcanlar içindəki payı bir o qədər böyük olur.
+exercises:
+  - id: ex-mathbay-posterior-fn
+    type: code
+    title: bayes_posterior funksiyasını yaz
+    prompt: |
+      Klassifikatorun həyəcan siqnalını qiymətləndirən `bayes_posterior(prior: float, sensitivity: float, false_positive_rate: float) -> float` funksiyasını tamamla:
+
+      1. Əgər `prior`, `sensitivity` və ya `false_positive_rate` dəyərlərindən hər hansı biri `[0.0, 1.0]` aralığından kənardırsa → `ValueError` qaldır.
+      2. Tam ehtimal $P(B) = \text{sensitivity} \cdot \text{prior} + \text{false\_positive\_rate} \cdot (1 - \text{prior})$ hesabla.
+      3. Əgər $P(B) == 0.0$ olarsa → `ValueError` qaldır (sıfıra bölmə olmasın).
+      4. Posterior ehtimalı $\frac{\text{sensitivity} \cdot \text{prior}}{P(B)}$ `float` kimi qaytar.
+    skills: [probability-bayes, statistics-basics]
+    category: math
+    difficulty: 1
+    hints:
+      - Hər üç parametrin `0.0 <= val <= 1.0` şərtini ödədiyini yoxla.
+      - "`tp = sensitivity * prior` və `fp = false_positive_rate * (1.0 - prior)` hesabla."
+      - "`if tp + fp == 0.0: raise ValueError(...)`, əks halda `return tp / (tp + fp)`."
+    starter_code: |
+      def bayes_posterior(
+          prior: float, sensitivity: float, false_positive_rate: float
+      ) -> float:
+          # TODO: parametr yoxlaması və Bayes düsturu
+          return 0.0
+    tests:
+      - name: "Dərsdəki 2% base rate nümunəsi (19 / 68 ≈ 0.2794)"
+        code: |
+          import math
+          res = bayes_posterior(0.02, 0.95, 0.05)
+          assert math.isclose(res, 19.0 / 68.0, abs_tol=1e-6), f"alınan: {res}"
+      - name: "Balanslı 50% prior və sıfır false positive halları"
+        code: |
+          import math
+          assert math.isclose(bayes_posterior(0.5, 0.95, 0.05), 0.95, abs_tol=1e-6)
+          assert math.isclose(bayes_posterior(0.01, 0.80, 0.0), 1.0, abs_tol=1e-6)
+      - name: "[0, 1] aralığından kənar parametrlər və ya P(B)==0 ValueError verir"
+        code: |
+          for args in [
+              (-0.1, 0.9, 0.1),
+              (1.2, 0.9, 0.1),
+              (0.5, 1.1, 0.1),
+              (0.5, 0.9, -0.05),
+              (0.0, 0.9, 0.0),
+              (0.5, 0.0, 0.0),
+          ]:
+              try:
+                  bayes_posterior(*args)
+                  assert False, f"{args} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def bayes_posterior(
+          prior: float, sensitivity: float, false_positive_rate: float
+      ) -> float:
+          for val in (prior, sensitivity, false_positive_rate):
+              if not (0.0 <= val <= 1.0):
+                  raise ValueError("probabilities must be in [0, 1]")
+          tp = sensitivity * prior
+          fp = false_positive_rate * (1.0 - prior)
+          total = tp + fp
+          if total == 0.0:
+              raise ValueError("P(B) is zero; posterior is undefined")
+          return float(tp / total)
+    explanation: |
+      `tp` həqiqi müsbət siqnalların payını, `fp` isə təmiz nümunələrdən gələn yalançı siqnalların payını ifadə edir. `tp / (tp + fp)` birbaşa Bayes posterior ehtimalını verir.
+  - id: ex-mathbay-false-alarms-count
+    type: numeric
+    title: 1,000 sorğuda neçə yalançı həyəcan (False Positive) çıxar?
+    prompt: |
+      1,000 istifadəçi sorğusundan yalnız $5\%$-i (`prior = 0.05`) zərərli prompt injection hücumudur (deməli $95\%$-i, yəni $950$ sorğu təmizdir).
+      Qoruyucu filtr təmiz sorğuların $4\%$-də (`false_positive_rate = 0.04`) səhvən həyəcan siqnalı verir.
+      Bu 1,000 sorğu ərzində filtr cəmi neçə **yalançı həyəcan (False Positive)** verəcək?
+    skills: [probability-bayes, statistics-basics]
+    category: ml-metric
+    difficulty: 1
+    answer: 38
+    tolerance: 0.1
+    hints:
+      - "Təmiz sorğuların sayı: $1000 \\times (1 - 0.05) = 950$."
+      - "Yalançı həyəcan sayı: $950 \\times 0.04$."
+    explanation: |
+      $1,000$ sorğudan $950$-si təmizdir. Onların $4\%$-i səhvən bloklanır: $950 \times 0.04 = 38$ yalançı həyəcan.
+references:
+  - title: 3Blue1Brown — Bayes theorem, the geometry of changing beliefs
+    url: https://www.3blue1brown.com/lessons/bayes-theorem
+    note: Bayes qaydasının həndəsi və təbii tezliklərlə izahı
+  - title: Wikipedia — Base rate fallacy
+    url: https://en.wikipedia.org/wiki/Base_rate_fallacy
+    note: Tibbi testlərdə və anomaliya aşkarlamada Base Rate Neglect nümunələri

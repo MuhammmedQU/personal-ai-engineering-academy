@@ -1,0 +1,380 @@
+id: py-generators-streaming-pipelines
+track: software-engineering
+module: oop-typing-packaging
+title: "Generatorlar və Streaming Data Pipelines — yield, lazy evaluation və micro-batching"
+summary: "50 GB-lıq JSONL korpusunu RAM-ı partlatmadan (O(1) yaddaşla) sətir-sətir emal etməyi, yield əsaslı generator zəncirlərini, micro-batching axınlarını və generatorun tükənməsi (exhaustion) tələsini öyrənəcəksən."
+level: core
+estimated_minutes: [45, 70]
+prerequisites: [py-oop-architecture-protocols]
+next: sw-git-debugging-structured-logging
+skills: [py-control-flow, py-data-structures, py-functions]
+objectives:
+  - "Eager (`list`, $O(N)$ RAM) və Lazy (`yield` generator, $O(1)$ və ya $O(B)$ RAM) emal arasındakı yaddaş və gecikmə (latency) fərqini hesablamaq"
+  - "Təmizləmə, filtrləmə və micro-batching mərhələlərini birləşdirən streaming generator pipeline qurmaq"
+  - "Generator exhaustion (tükənmə) bug-ını tanımaq və ikiqat iterasiya tələb olunduqda düzgün arxitektura seçmək"
+  - "`yield` funksiyalarında arqument doğrulamasının nə vaxt icra olunduğunu izah etmək"
+why_it_matters: |
+  LLM pre-training, fine-tuning və RAG (Retrieval-Augmented Generation) sistemlərində data kiçik CSV fayllarında olmur — milyonlarla sənəddən ibarət 20–100 GB-lıq `.jsonl` axınları şəklində gəlir.
+  Əgər `records = [json.loads(line) for line in f]` yazsan, 16 GB RAM-ı olan server `MemoryError` (və ya Linux OOM Killer) ilə çökəcək.
+
+  **Generatorlar (`yield`)** datanı konveyer kəməri kimi sətir-sətir və ya kiçik **micro-batch** (`batch_size = 64`) halında axıdır:
+  - Yaddaşda eyni anda yalnız **1 sətir** və ya **1 batch** ($O(B)$) saxlanılır.
+  - Embedding API-yə və ya GPU-ya ilk batch dərhal göndərilir — bütün faylın oxunmasını gözləmək lazım gəlmir.
+terms:
+  - term: Eager evaluation
+    definition: "Nəticə istifadə olunmazdan əvvəl bütün elementlərin dərhal hesablanıb yaddaşda (`list` kimi) saxlanması ($O(N)$ RAM)."
+  - term: Lazy evaluation
+    definition: "Elementlərin yalnız tələb olunduğu anda (`next()` və ya `for` dövrünün hər addımında) növbə ilə hesablanması."
+  - term: Generator function
+    definition: "Daxilində `yield` açar sözü olan funksiya. Çağırıldıqda kodu dərhal icra etmir, `generator` iterator obyekti qaytarır."
+  - term: Generator exhaustion
+    definition: "Generatorun bütün elementləri bir dəfə oxunduqdan sonra boş qalması; eyni generator üzərində ikinci `for` dövrü heç nə qaytarmır (`[]`)."
+  - term: Micro-batching
+    definition: "Tək-tək gələn axın elementlərini sabit ölçülü (`B`) kiçik siyahılara yığıb GPU və ya Vector DB-yə paket şəklində göndərmək."
+  - term: Sliding window
+    definition: "Uzun mətn və ya zaman sırası üzərində üst-üstə düşən (overlapping) pəncərələrlə (`stride < window_size`) hərəkət edən axın."
+sections:
+  - id: eager-vs-lazy-memory
+    kind: explanation
+    title: "Eager List ($O(N)$ RAM) vs Lazy Generator ($O(B)$ RAM)"
+    body: |
+      Adi funksiya `return` gördükdə işini bitirir və локал dəyişənlərini silir. **Generator funksiyası** isə `yield value` gördükdə dəyəri çağırana ötürür və öz icra vəziyyətini (lokal dəyişənləri, hansı sətirdə qaldığını) **dondurur (pause)**. Növbəti `next()` çağırışında qaldığı sətirdən davam edir.
+
+      Gəl $N = 10\,000\,000$ sənəddən ibarət korpusun emalını müqayisə edək:
+
+      | Xüsusiyyət | Eager (`[clean(x) for x in raw]`) | Lazy (`(clean(x) for x in raw)`) |
+      |---|---|---|
+      | Yaddaş mürəkkəbliyi | $O(N)$ — 10 milyon sənəd RAM-da | $O(1)$ (və ya batch ilə $O(B)$) |
+      | İlk nəticəyə qədər vaxt (Time-to-first-batch) | Bütün 10M sənəd bitəndən sonra | İlk $B$ sənəd oxunan kimi (millisaniyələr) |
+      | Erkən dayandırma (`break`) | Artıq hamısı boş yerə hesablanıb | Qalan sənədlər heç oxunmur |
+      | Təkrar oxuma (Re-iteration) | İstənilən sayda (`list` yaddaşdadır) | **Yalnız 1 dəfə** (sonra tükənir!) |
+
+      **Micro-batching niyə lazımdır?**
+      Tək-tək (`batch_size=1`) GPU və ya OpenAI Embedding API çağırmaq şəbəkə gecikməsinə görə çox yavaşdır. Hamısını birdən (`10M`) göndərmək isə yaddaşı aşır. Streaming micro-batch generatoru axından gələn təmiz qeydləri `batch_size = 64` və ya `128` ölçülü buferə yığır, bufer dolan kimi `yield batch` edir və buferi sıfırlayır.
+  - id: conveyor-belt-analogy
+    kind: analogy
+    title: "Mental model: Anbar vs Konveyer kəməri"
+    body: |
+      - **Eager `list` (Nəhəng Anbar):** Zavod 1 milyon şüşəni əvvəlcə yuyub nəhəng anbara yığır, yalnız anbar tam dolandan sonra qablaşdırma sexinə buraxır. Əgər 1 milyon şüşə üçün anbarda yer yoxdursa, zavod dayanır.
+      - **Lazy Generator Pipeline (Konveyer kəməri):** Yuma stansiyası 1 şüşəni yuyub kəmərə qoyur (`yield`), yoxlama stansiyası çatlaq şüşəni kəmərdən kənarlaşdırır, qablaşdırma stansiyası isə hər 6 şüşədən bir qutu bağlayıb (`yield batch`) yük maşınına ötürür. Zavodun içində eyni anda cəmi 6 şüşə yer tutur!
+  - id: streaming-pipeline-diagram
+    kind: diagram
+    title: "Streaming Micro-Batching axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["JSONL Stream (50 GB)\nO(1) line reader"] -->|"yield raw"| B["Filter & Normalize\nSkip None / empty"]
+        B -->|"yield clean_text"| C["Micro-Batcher\nbatch_size = 3"]
+        C -->|"yield ['doc1','doc2','doc3']"| D["Embedding Model / Vector DB\nO(B) RAM"]
+      ```
+
+      Hər ox (`-->`) yaddaşda bütöv siyahı yox, tək bir `next()` çağırışı ilə ötürülən elementdir.
+  - id: worked-micro-batch
+    kind: worked_example
+    title: "Addım-addım izləmə: Çirkli axından təmiz micro-batch-lərə"
+    body: |
+      Fərz edək ki, `raw_stream = ["  AI   dərsləri ", None, "   ", "Python   yield", "RAG  pipeline ", "Son   sənəd"]` və `batch_size = 2`.
+
+      Streaming pipeline hər addımda nə edir?
+
+      | Addım | Gələn `item` | Filtrləmə və Normallaşdırma (`" ".join(s.split())`) | Cari `batch` buferi | `yield` olunan dəyər |
+      |---|---|---|---|---|
+      | 1 | `"  AI   dərsləri "` | `"AI dərsləri"` (keçərli) | `["AI dərsləri"]` | — (hələ `len < 2`) |
+      | 2 | `None` | Rədd edilir (`None`) | `["AI dərsləri"]` | — |
+      | 3 | `"   "` | `""` → Rədd edilir (boş) | `["AI dərsləri"]` | — |
+      | 4 | `"Python   yield"` | `"Python yield"` (keçərli) | `["AI dərsləri", "Python yield"]` | **Yield #1:** `["AI dərsləri", "Python yield"]`, bufer `[]` olur |
+      | 5 | `"RAG  pipeline "` | `"RAG pipeline"` (keçərli) | `["RAG pipeline"]` | — |
+      | 6 | `"Son   sənəd"` | `"Son sənəd"` (keçərli) | `["RAG pipeline", "Son sənəd"]` | **Yield #2:** `["RAG pipeline", "Son sənəd"]`, bufer `[]` olur |
+
+      *Bəs axında 5-ci keçərli sənəd (`"Qalıq"`) olsaydı?*
+      Dövr bitəndə `batch = ["Qalıq"]` boş olmadığı üçün (`if batch: yield batch`) sonuncu natamam (partial) batch də itirilmədən `yield` olunur!
+  - id: code-streaming-and-window
+    kind: code
+    title: "Kod — Micro-batching və Sliding Window generatorları"
+    body: |
+      ```python
+      from collections import deque
+      from typing import Iterable, Iterator
+
+
+      def stream_clean_batches(
+          records: Iterable[str | None],
+          batch_size: int,
+      ) -> Iterator[list[str]]:
+          """Lazily clean text records and yield micro-batches of size `batch_size`."""
+          if batch_size <= 0:
+              raise ValueError("batch_size must be a positive integer")
+
+          batch: list[str] = []
+          for item in records:
+              if not isinstance(item, str):
+                  continue
+              cleaned = " ".join(item.split())
+              if not cleaned:
+                  continue
+              batch.append(cleaned)
+              if len(batch) == batch_size:
+                  yield batch
+                  batch = []
+          if batch:
+              yield batch
+
+
+      def sliding_window_chunks(
+          tokens: Iterable[str],
+          window_size: int,
+          stride: int,
+      ) -> Iterator[list[str]]:
+          """Yield overlapping token windows for RAG chunking."""
+          if window_size <= 0 or stride <= 0:
+              raise ValueError("window_size and stride must be positive")
+          buf: list[str] = list(tokens)
+          for start in range(0, len(buf), stride):
+              chunk = buf[start : start + window_size]
+              if not chunk:
+                  break
+              yield chunk
+              if start + window_size >= len(buf):
+                  break
+
+
+      raw = ["  Salam   dünya ", None, "  ", "Generator   axını", "Üçüncü   sənəd"]
+      gen = stream_clean_batches(raw, batch_size=2)
+      print(next(gen))  # ['Salam dünya', 'Generator axını']
+      print(next(gen))  # ['Üçüncü sənəd']  <- son natamam batch itmir!
+      ```
+
+      Vacib detallar:
+      - `batch = []` ilə hər `yield`-dən sonra **yeni list** yaradılır. Əgər `batch.clear()` etsəydin, çağıranın əlindəki əvvəlki `batch` list-i də yerində boşalardı (aliasing bug!).
+      - `" ".join(item.split())` həm baş/son boşluqları, həm də ardıcıl tab, newline (`\n`) və çoxlu boşluqları tək boşluğa çevirir.
+  - id: generator-mistakes
+    kind: mistakes
+    title: "Ən təhlükəli səhvlər: Exhaustion və batch.clear()"
+    body: |
+      **1. Generator Exhaustion (Tükənmiş generator üzərində ikinci dövr)**
+      ```python
+      scores = (x * 2 for x in [10, 20, 30])
+      total = sum(scores)          # 120 — generator tam istehlak olundu!
+      count = len(list(scores))    # 0   — ikinci keçiddə generator BOŞDUR!
+      ```
+      ML pipeline-da dataset statistikasını hesablamaq üçün generatoru bir dəfə gəzib, sonra eyni generator obyektini modelə `train(dataset_gen)` kimi ötürsən, model **0 nümunə** görəcək və səssizcə öyrənməyəcək!
+      *Düzəliş:* Hər epoch/keçid üçün yeni generator qaytaran fabrik funksiya (`def make_stream(): ...`) və ya `__iter__` metodu hər dəfə faylı yenidən açan `Iterable` sinif yaz.
+
+      **2. `yield batch`-dən sonra `batch.clear()` çağırmaq**
+      ```python
+      yield batch
+      batch.clear()   # BUG! Çağıranın saxladığı list də eyni obyektdir, o da boşalır!
+      ```
+      `all_batches = list(stream_batches(...))` yazanda içindəki bütün list-lər boş və ya sonuncu batch-in eynisi çıxacaq. Həmişə `batch = []` ilə yeni siyahı obyekti bağla.
+
+      **3. Gecikmiş arqument doğrulaması (Deferred Validation)**
+      İçində `yield` olan funksiya çağırılan anda (`g = my_gen(-5)`) onun gövdəsi **heç işə düşmür** — `ValueError` yalnız ilk `next(g)` və ya `for` başlayanda qaldırılır.
+  - id: streaming-tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs"
+    body: |
+      - **Lazy Generator vs Eager List:** Əgər data kiçikdirsə (məs. 5 000 sətir, ~2 MB) və üzərində 20 epoch ardıcıl təlim keçiriləcəksə, onu bir dəfə `list`-ə yükləmək disk/CPU I/O xərcinə qənaət edir. Generatorlar data RAM-a sığmayanda və ya axın (streaming API, böyük korpus) şəklində gələndə əvəzsizdir.
+      - **Micro-batch ölçüsü ($B$) seçimi:**
+        - Kiçik $B$ ($B = 1..4$): Aşağı yaddaş sərfi və aşağı ilk-cavab gecikməsi (low latency), amma GPU/API throughput-u aşağıdır.
+        - Böyük $B$ ($B = 512..2048$): Yüksək paralel sürət (throughput), amma RAM/VRAM sərfi artır və OOM riski yaranır.
+      - **Debug çətinliyi:** `list`-i debugger-də açıb bütün elementlərinə və `len()`-ə dərhal baxa bilirsən; generatorun isə uzunluğu əvvəlcədən məlum deyil (`len(gen)` -> `TypeError`) və elementinə baxmaq (`next(gen)`) həmin elementi axından həmişəlik çıxarır.
+mastery_criteria:
+  - "Böyük axını $O(B)$ yaddaşla təmizləyib micro-batch-lərə bölən generator funksiyası yaza bilirsən"
+  - "Generator exhaustion səbəbindən ikinci keçiddə boş nəticə qayıtmasını kod üzərində dərhal müəyyən edə bilirsən"
+  - "`batch = []` ilə `batch.clear()` arasındakı aliasing fərqini izah edə bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pygen-memory-complexity
+      type: mcq
+      title: "Streaming micro-batching yaddaş mürəkkəbliyi"
+      prompt: "$N = 50\\,000\\,000$ sətirlik JSONL faylını sətir-sətir oxuyub `batch_size = B` ($B = 100$) ölçülü siyahılar şəklində `yield` edən generatorun əlavə RAM sərfi nə qədərdir?"
+      skills: [py-data-structures, py-control-flow]
+      category: data
+      options:
+        - id: a
+          text: "$O(N)$ — bütün 50 milyon sətir yaddaşa yüklənir"
+          feedback: "Xeyr, `yield` ilə hər dəfə yalnız cari batch yaddaşda saxlanılır."
+        - id: b
+          text: "$O(B)$ — eyni anda yaddaşda yalnız 1 batch (ən çoxu 100 sətir) saxlanılır"
+          feedback: "Doğru! Faylın ümumi ölçüsündən ($N$) asılı olmayaraq RAM sərfi $B$ ilə məhdudlaşır."
+        - id: c
+          text: "$O(N \\cdot B)$"
+          feedback: "Batch-lər toplanıb saxlanılmır, hər `yield`-dən sonra növbəti batch üçün yeni bufer açılır."
+      answer: b
+      explanation: "Lazy micro-batching zamanı yaddaşda yalnız aktiv bufer ($B$ element) olur, buna görə $N$-dən asılı olmayan $O(B)$ yaddaş sərf edilir."
+    - id: q-pygen-batch-clear-bug
+      type: mcq
+      title: "yield batch-dən sonra batch.clear() tələsi"
+      prompt: |
+        ```python
+        def bad_batches(items):
+            batch = []
+            for x in items:
+                batch.append(x)
+                if len(batch) == 2:
+                    yield batch
+                    batch.clear()
+
+        result = list(bad_batches([1, 2, 3, 4]))
+        ```
+        `result` nə olacaq?
+      skills: [py-functions, py-data-structures]
+      category: debug
+      options:
+        - id: a
+          text: "`[[1, 2], [3, 4]]`"
+          feedback: "`batch.clear()` eyni list obyektini yerində boşaldır!"
+        - id: b
+          text: "`[[], []]`"
+          feedback: "Doğru! Hər iki `yield` eyni `batch` list obyektinə referans qaytarır və sonda `batch.clear()` həmin obyekti boşaldır."
+        - id: c
+          text: "`[[3, 4], [3, 4]]`"
+          feedback: "Sonuncu `yield`-dən dərhal sonra da `batch.clear()` çağırıldığı üçün list tam boş qalır."
+      answer: b
+      explanation: "`batch.clear()` mövcud list obyektini yerində silir. `result` içindəki hər iki element həmin tək list obyektinə işarə etdiyi üçün nəticə `[[], []]` olur. Düzəliş: `batch = []`."
+    - id: q-pygen-reusable-iterable
+      type: mcq
+      title: "Çox-epochlu təlim üçün axın dizaynı"
+      prompt: "Model 5 epoch ərzində böyük fayldan axınla (streaming) qidalanmalıdır. Generator exhaustion-dan qaçmaq üçün ən düzgün Python idiomu hansıdır?"
+      skills: [py-control-flow, py-functions]
+      category: python
+      options:
+        - id: a
+          text: "Generatoru bir dəfə `g = read_stream(path)` kimi yaradıb 5 epoch-un hamısında eyni `g` dəyişənini `for batch in g:` ilə gəzmək"
+          feedback: "2-ci epoch-dan etibarən `g` tükənmiş olacaq və dövr 0 addım icra edəcək."
+        - id: b
+          text: "Hər epoch-un başında yeni generator yaradan funksiya çağırmaq (`for batch in read_stream(path):`) və ya `__iter__` metodu yeni generator qaytaran sinif yazmaq"
+          feedback: "Doğru! Hər epoch təzə iterator alır və fayl əvvəldən axınla oxunur."
+        - id: c
+          text: "`reset(g)` standart Python funksiyasını çağırmaq"
+          feedback: "Python-da generatoru geri qaytarmaq üçün `reset()` funksiyası yoxdur."
+      answer: b
+      explanation: "Generatorlar biristifadəlilik iteratorlardır. Çoxdəfəlik keçid üçün ya hər dəfə generator funksiyasını yenidən çağırmalı, ya da `__iter__` daxilində `yield` edən sinif yazmalısan."
+    - id: q-pygen-yield-vs-return
+      type: multi
+      title: "Generator funksiyasının xüsusiyyətləri"
+      prompt: "Daxilində `yield` olan Python funksiyası haqqında hansı fikirlər doğrudur? Hamısını seç."
+      skills: [py-control-flow, py-functions]
+      category: concept
+      options:
+        - id: a
+          text: "Funksiya çağırıldıqda gövdəsi dərhal icra olunmur, generator (iterator) obyekti qaytarır"
+          feedback: "Bəli — icra yalnız `next()` və ya `for` ilə başlayır."
+        - id: b
+          text: "Hər `yield` ifadəsində funksiyanın lokal dəyişənləri yaddaşda saxlanılır və icra növbəti `next()`-ə qədər dayandırılır"
+          feedback: "Bəli — generator öz daxili çərçivəsini (stack frame) saxlayır."
+        - id: c
+          text: "`len(gen)` ilə generatorun neçə element qaytaracağını əvvəlcədən $O(1)$ vaxtda öyrənmək olur"
+          feedback: "Xeyr — generatorlar `len()` dəstəkləmir (`TypeError: object of type 'generator' has no len()`)."
+        - id: d
+          text: "Funksiya bitdikdə Python daxildə `StopIteration` siqnalı qaldıraraq `for` dövrünü dayandırır"
+          feedback: "Bəli — Python-un iterator protokolu `StopIteration` üzərində işləyir."
+      answers: [a, b, d]
+      explanation: "Generatorlar tənbəl iteratorlardır: çağırıldıqda generator obyekti qaytarır, `yield`-də vəziyyəti dondurur və bitəndə `StopIteration` ilə dövrü sonlandırır."
+exercises:
+  - id: ex-pygen-stream-valid-batches
+    type: code
+    title: "Streaming təmizləmə və micro-batching generatoru yaz"
+    prompt: |
+      Böyük mətn axınını tənbəl (lazy) şəkildə təmizləyib micro-batch-lərə bölən `stream_clean_batches(records, batch_size)` generator funksiyasını yaz.
+
+      **Müqavilə (Contract):**
+      1. Əgər `batch_size <= 0` olarsa, `ValueError` qaldır.
+      2. `records` istənilən iterable (list, generator və s.) ola bilər. Elementləri bir-bir nəzərdən keçir (bütün axını əvvəlcədən `list`-ə çevirmə!).
+      3. Yalnız `str` tipində olan elementləri qəbul et (`None` və ya digər tipləri ötür).
+      4. Mətni `" ".join(item.split())` qaydası ilə normallaşdır (baş/son boşluqlar silinir, ardıcıl boşluqlar tək boşluq olur).
+      5. Normallaşdırmadan sonra boş qalan (`""`) sətirləri ötür.
+      6. Keçərli sətirləri `batch_size` uzunluqlu `list[str]` paketləri şəklində `yield` et.
+      7. Axın bitdikdə qalıq elementlər varsa (sonuncu natamam batch), onu da `yield` et. Keçərli element heç yoxdursa, heç nə `yield` etmə.
+    skills: [py-control-flow, py-data-structures, py-functions]
+    category: python
+    difficulty: 2
+    hints:
+      - "Əvvəlcə `if batch_size <= 0: raise ValueError(\"batch_size must be > 0\")` yoxla."
+      - "Dövr daxilində `if not isinstance(item, str): continue`, sonra `cleaned = \" \".join(item.split())` və `if not cleaned: continue` yaz."
+      - "`batch.append(cleaned)` etdikdən sonra `if len(batch) == batch_size: yield batch; batch = []` (diqqət: `batch.clear()` YOX, `batch = []`). Dövr bitəndən sonra `if batch: yield batch`."
+    starter_code: |
+      from typing import Iterable, Iterator
+
+      def stream_clean_batches(records: Iterable[str | None], batch_size: int) -> Iterator[list[str]]:
+          # TODO: lazy generator kimi implementasiya et
+          yield []
+    tests:
+      - name: "Çirkli sətirləri təmizləyir, boş/None qeydləri ötürür və son natamam batch-i qaytarır"
+        code: |
+          raw = ["  AI   mühəndisliyi ", None, "   \n\t  ", "Python   generator", "RAG   axını  "]
+          batches = list(stream_clean_batches(raw, batch_size=2))
+          assert batches == [
+              ["AI mühəndisliyi", "Python generator"],
+              ["RAG axını"],
+          ], f"Alınan: {batches}"
+      - name: "Həqiqi lazy generator qaytarır və aliasing (batch.clear) bug-ı yoxdur"
+        code: |
+          source = (f"  doc   {i} " for i in range(4))
+          gen = stream_clean_batches(source, batch_size=2)
+          first = next(gen)
+          assert first == ["doc 0", "doc 1"], f"İlk batch səhvdir: {first}"
+          second = next(gen)
+          assert second == ["doc 2", "doc 3"], f"İkinci batch səhvdir: {second}"
+          assert first == ["doc 0", "doc 1"], "İlk batch sonradan dəyişdirilib (batch.clear bug)!"
+      - name: "Yanlış batch_size (<= 0) üçün ValueError qaldırır"
+        code: |
+          for bad_size in (0, -3):
+              raised = False
+              try:
+                  list(stream_clean_batches(["a"], bad_size))
+              except ValueError:
+                  raised = True
+              assert raised, f"batch_size={bad_size} üçün ValueError qaldırılmalıdır"
+      - name: "Hamısı boş və ya None olduqda boş nəticə qaytarır"
+        code: |
+          assert list(stream_clean_batches([None, "  ", "\n"], batch_size=2)) == []
+    solution: |
+      from typing import Iterable, Iterator
+
+      def stream_clean_batches(records: Iterable[str | None], batch_size: int) -> Iterator[list[str]]:
+          if batch_size <= 0:
+              raise ValueError("batch_size must be positive")
+          batch: list[str] = []
+          for item in records:
+              if not isinstance(item, str):
+                  continue
+              cleaned = " ".join(item.split())
+              if not cleaned:
+                  continue
+              batch.append(cleaned)
+              if len(batch) == batch_size:
+                  yield batch
+                  batch = []
+          if batch:
+              yield batch
+    explanation: |
+      Generator `records` axınını yalnız bir dəfə gəzir, hər `yield`-də yeni `batch = []` siyahısı ayıraraq aliasing-in qarşısını alır və sonda qalıq buferi `if batch: yield batch` ilə təhvil verir.
+  - id: ex-pygen-exhaustion-predict
+    type: text
+    title: "Predict the output: Generator exhaustion"
+    prompt: |
+      ```python
+      g = (x * 2 for x in [1, 2, 3])
+      first_total = sum(g)
+      second_pass = list(g)
+      print(first_total, second_pass)
+      ```
+      Nə çap olunacaq? Python-un `print` etdiyi dəqiq formatda yaz.
+    skills: [py-control-flow, py-data-structures]
+    category: predict-output
+    difficulty: 1
+    accepted: ["12 []"]
+    hints:
+      - "`g` elementləri `[2, 4, 6]`-dır. `sum(g)` onların cəmini (`12`) hesablayarkən generatoru sonuna qədər oxuyur."
+      - "Artıq sonuna çatmış generator üzərində `list(g)` çağırılanda nə qayıdır?"
+    explanation: |
+      `sum(g)` generatorun bütün elementlərini (`2 + 4 + 6 = 12`) istehlak edir. Generator tükəndiyi üçün növbəti `list(g)` çağırışı boş siyahı `[]` qaytarır və `12 []` çap olunur.
+references:
+  - title: "Python Documentation — Generators and yield expressions"
+    url: https://docs.python.org/3/reference/expressions.html#yield-expressions
+    note: "Python dilində yield və generatorların rəsmi spesifikasiyası"
+  - title: "Python Standard Library — itertools"
+    url: https://docs.python.org/3/library/itertools.html
+    note: "Yaddaş-effektiv iterator və axın alətləri (islice, batched, chain)"

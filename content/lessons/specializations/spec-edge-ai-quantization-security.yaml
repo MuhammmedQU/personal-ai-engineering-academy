@@ -1,0 +1,329 @@
+id: spec-edge-ai-quantization-security
+track: specializations
+module: edge-ai-security
+title: "Edge AI: Simmetrik INT8 Kvantizasiya, Cihaz Büdcəsi və Adversarial Təhlükəsizlik"
+summary: "Böyük FP32 neyron şəbəkələrini dron, Jetson və ya Raspberry Pi kimi məhdud yaddaşlı cihazlara yerləşdirmək üçün simmetrik INT8 kvantizasiya riyaziyyatını, dekvantizasiya xətasını və fiziki/rəqəmsal adversarial hücumlara qarşı müdafiəni öyrənəcəksən."
+level: advanced
+estimated_minutes: [50, 75]
+prerequisites: [dl-pytorch-training-loop, spec-robotics-perception-control]
+next: null
+skills: [spec-robotics, dl-architectures, llm-security]
+objectives:
+  - "FP32 (4 bayt) ilə INT8 (1 bayt) çəkiləri arasında yaddaş və ötürmə qabiliyyəti (memory bandwidth) fərqini hesablamaq"
+  - "Simmetrik INT8 kvantizasiya ($s, q_i$) və dekvantizasiya ($\\hat{x}_i$) düsturlarını əl ilə və kodla tətbiq etmək"
+  - "Post-Training Quantization (PTQ) ilə Quantization-Aware Training (QAT) arasındakı fərqi və outlier çəkilərin yaratdığı təhrifi izah etmək"
+  - "FGSM adversarial hücumunun ($x_{\\text{adv}} = x + \\epsilon \\cdot \\text{sign}(\\nabla_x L)$) və fiziki yamaq (patch) hücumlarının avtonom sistemlər üçün təhlükəsini dəyərləndirmək"
+why_it_matters: |
+  Bulud GPU-sunda (məs. 80 GB VRAM) mükəmməl işləyən model dron uçuş kompüterində, sənaye kamerasında və ya mobil telefonda üç sərt fiziki divara çırpılır:
+  - **Yaddaş (RAM):** 1 milyard parametrli FP32 model təkcə çəkilər üçün $4\text{ GB}$ RAM yeyir — kiçik edge cihazında yerləşmir.
+  - **Yaddaş ötürmə zolağı və batareya:** İnference zamanı enerjinin böyük hissəsi hesablama yox, çəkiləri DRAM-dan prosessora daşımaq üçün sərf olunur; INT8 daşınan bayt sayını $4\times$ azaldır.
+  - **Fiziki təhlükəsizlik:** Yol nişanına yapışdırılmış kiçik çap olunmuş stiker (adversarial patch) müdafiəsiz CV modelini "STOP" nişanını "Sürət 80" kimi görməyə məcbur edə bilər.
+terms:
+  - term: Quantization (Kvantizasiya)
+    definition: "Model çəkilərini və ya aktivasiyalarını yüksək dəqiqlikli kəsilməz formatdan (FP32 — 32 bit) daha az bitli tam ədəd formatına (INT8 — 8 bit, INT4 — 4 bit) sıxaraq yaddaş və gecikməni azaltmaq."
+  - term: Scale Factor ($s$)
+    definition: "Real (FP32) dəyərlər aralığını tam ədəd aralığına ($[-127, 127]$) xəritələyən bölən: simmetrik kvantizasiyada $s = \\max_i |x_i| / 127$."
+  - term: Dequantization Error
+    definition: "Yuvarlaqlaşdırma nəticəsində orijinal çəki $x_i$ ilə bərpa olunmuş $\\hat{x}_i = s \\cdot q_i$ arasındakı fərq ($x_i - \\hat{x}_i$); adətən RMSE ilə ölçülür."
+  - term: PTQ vs QAT
+    definition: "PTQ (Post-Training Quantization) öyrədilmiş modeli əlavə təlim olmadan kalibrasiya datası ilə kvantizasiya edir; QAT (Quantization-Aware Training) təlim zamanı saxta yuvarlaqlaşdırma simulyasiyası ilə modeli xətaya uyğunlaşdırır."
+  - term: Adversarial Example (FGSM)
+    definition: "İnsan gözünə demək olar görünməyən, lakin itki funksiyasının girişə görə gradienti ($\\nabla_x L$) istiqamətində əlavə edilmiş kiçik $\\epsilon$ səs-küyü ilə modeli səhv proqnoza sövq edən giriş."
+  - term: Sensor Fusion Defense
+    definition: "Avtonom robotda yalnız bir kameraya etibar etməyib LiDAR, radar, IMU və fiziki məhdudiyyət yoxlamalarını birləşdirərək tək sensorlu adversarial hücumları neytrallaşdırmaq."
+sections:
+  - id: int8-quantization-math
+    kind: explanation
+    title: "FP32 → INT8 Kvantizasiya Riyaziyyatı və Yaddaş Büdcəsi"
+    body: |
+      ### 1. Yaddaş qənaətinin hesabı
+      $P$ parametrli modelin çəki yaddaşı:
+      $$\text{Memory}_{\text{bytes}} = P \times \frac{\text{bits}}{8}$$
+
+      - **FP32 (32 bit = 4 bayt):** $P = 500 \times 10^6 \implies 2000\text{ MB}$ ($2\text{ GB}$)
+      - **FP16 / BF16 (16 bit = 2 bayt):** $1000\text{ MB}$ ($1\text{ GB}$)
+      - **INT8 (8 bit = 1 bayt):** $500\text{ MB}$ ($4\times$ kiçik!)
+      - **INT4 (4 bit = 0.5 bayt):** $250\text{ MB}$ ($8\times$ kiçik!)
+
+      ### 2. Simmetrik INT8 kvantizasiya düsturları
+      Simmetrik kvantizasiyada $0.0$ dəyəri tam olaraq tam ədəd $0$-a düşür (sıfır sürüşməsi $z = 0$). Verilmiş çəki vektoru $\mathbf{x} = [x_1, \dots, x_n]$ üçün:
+
+      1. **Miqyas faktoru (Scale):**
+         $$s = \frac{\max_i |x_i|}{127}$$
+         *(Əgər bütün elementlər sıfırdırsa, sıfıra bölməməkdən ötrü $s = 1.0$ qəbul edilir.)*
+
+      2. **Kvantizasiya (Quantize):**
+         $$q_i = \text{clip}\!\left(\text{round}\!\left(\frac{x_i}{s}\right), -127, 127\right)$$
+
+      3. **Dekvantizasiya (Dequantize):**
+         $$\hat{x}_i = s \cdot q_i$$
+
+      Simvolların mənası:
+      - $x_i$ — orijinal 32-bitlik üzən nöqtəli (FP32) çəki,
+      - $s$ — addım ölçüsü (1 tam ədəd vahidinin neçə FP32 vahidinə bərabər olduğu),
+      - $q_i \in \{-127, \dots, 127\}$ — 1 baytlıq işarəli tam ədəd,
+      - $\hat{x}_i$ — hesablama zamanı bərpa olunan təqribi çəki.
+
+      ### 3. Adversarial Hücumlar (FGSM — Fast Gradient Sign Method)
+      Təlim zamanı itkini azaltmaq üçün çəkiləri $-\eta \nabla_w L$ istiqamətində dəyişirdik. Hücumçu isə çəkiləri deyil, **giriş şəklini ($x$)** itkini **artıran** istiqamətdə dəyişir:
+      $$x_{\text{adv}} = x + \epsilon \cdot \text{sign}(\nabla_x L(x, y))$$
+      Burada $\epsilon$ (məs. $2/255$) hər pikselə əlavə olunan çox kiçik həddir. İnsan fərqi görmür, amma yüksək ölçülü fəzada minlərlə pikselin kiçik $\epsilon$ töhfələri toplanıb modelin logit-ini əks sinfə çevirir.
+  - id: ruler-analogy
+    kind: analogy
+    title: "Mental model: Millimetrlik xətkeş vs Santimetrlik xətkeş"
+    body: |
+      FP32 çəkilərini **mikrometr** (0.0001 mm dəqiqlikli ölçmə aləti), INT8 çəkilərini isə **255 bölgülü adi xətkeş** kimi düşün:
+
+      - Əksər obyektlər (məsələn, masa və stul) üçün santimetrlik xətkeş tam kifayətdir — ölçünü 4 dəfə az rəqəmlə yadda saxlayırsan və demək olar heç nə itirmirsən.
+      - Amma eyni xətkeşdə həm 10 metr uzunluğunda divarı, həm də 2 millimetr qalınlığında vərəqi ölçməyə çalışsan (**outlier problem**), xətkeşin 1 bölgüsü ~8 sm olur və 2 mm-lik vərəq yuvarlaqlaşdırılıb **0** olur! Məhz buna görə per-channel kvantizasiya və outlier klippini tətbiq edirik.
+  - id: edge-pipeline-diagram
+    kind: diagram
+    title: "Edge AI Deploy və Müdafiə Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["FP32 Trained Model"] --> B["Calibration Set (PTQ) / QAT"]
+        B --> C["ONNX / TensorRT INT8 Export"]
+        C --> D["Accuracy & RMSE Gate (Drop <= 1%)"]
+        D --> E["Edge Device Inference (Jetson / RPi / Drone)"]
+        F["Camera + LiDAR + IMU"] --> G["Sanity & Multi-Sensor Fusion"]
+        G --> E
+      ```
+  - id: worked-int8-example
+    kind: worked_example
+    title: "Kiçik rəqəmlərlə INT8 Kvantizasiya və Outlier Effekti"
+    body: |
+      **Nümunə 1 (Normal paylanma):** $\mathbf{x} = [-1.27, 0.0, 0.635, 1.0]$
+
+      1. $\max_i |x_i| = 1.27 \implies s = \frac{1.27}{127} = 0.01$
+      2. Hər elementi $s = 0.01$-ə bölüb yuvarlaqlaşdırırıq:
+         - $-1.27 / 0.01 = -127 \implies q_1 = -127, \quad \hat{x}_1 = -1.27$
+         - $0.0 / 0.01 = 0 \implies q_2 = 0, \quad \hat{x}_2 = 0.0$
+         - $0.635 / 0.01 = 63.5 \approx 64 \implies q_3 = 64, \quad \hat{x}_3 = 0.64$
+         - $1.0 / 0.01 = 100 \implies q_4 = 100, \quad \hat{x}_4 = 1.0$
+      3. Maksimal xəta cəmi $|0.635 - 0.64| = 0.005$-dir!
+
+      **Nümunə 2 (Outlier təsiri):** Tutaq ki, siyahıya tək bir nəhəng çəki düşdü: $\mathbf{x} = [0.1, 0.2, 127.0]$
+      - $s = 127.0 / 127 = 1.0$
+      - $q_1 = \text{round}(0.1 / 1.0) = 0 \implies \hat{x}_1 = 0.0$ (100% məlumat itkisi!)
+      - $q_2 = \text{round}(0.2 / 1.0) = 0 \implies \hat{x}_2 = 0.0$ (100% məlumat itkisi!)
+      - $q_3 = 127 \implies \hat{x}_3 = 127.0$.
+
+      Nəticə: Tək bir outlier bütün qalan çəkiləri sıfıra çökdürdü (underflow).
+  - id: code-walkthrough
+    kind: code
+    title: "Kod: Simmetrik INT8 Kvantizator və Dekvantizasiya RMSE"
+    body: |
+      ```python
+      import math
+
+      def symmetric_int8_quantize(
+          weights: list[float],
+      ) -> tuple[list[int], float, list[float]]:
+          if not weights:
+              return [], 1.0, []
+          max_abs = max(abs(w) for w in weights)
+          if max_abs == 0.0:
+              return [0 for _ in weights], 1.0, [0.0 for _ in weights]
+
+          scale = max_abs / 127.0
+          quantized = [
+              max(-127, min(127, int(round(w / scale)))) for w in weights
+          ]
+          dequantized = [q * scale for q in quantized]
+          return quantized, scale, dequantized
+
+
+      def quantization_rmse(orig: list[float], deq: list[float]) -> float:
+          mse = sum((a - b) ** 2 for a, b in zip(orig, deq)) / len(orig)
+          return math.sqrt(mse)
+      ```
+
+      Vacib sətirlər:
+      - `max_abs == 0.0` yoxlaması sıfıra bölmə (`ZeroDivisionError`) xətasının qarşısını alır.
+      - `max(-127, min(127, ...))` yuvarlaqlaşdırma nəticəsinin heç vaxt 8-bitlik sərhəddən çıxmamasına zəmanət verir.
+      - Dekvantizasiya edilmiş $\hat{x}_i$ dəyərləri ilə orijinal $x_i$ arasında `RMSE` hesablayaraq hansı qatların kvantizasiyaya həssas olduğunu (məsələn, ilk konvolyusiya və ya son təsnifat başlığı) müəyyən etmək olur.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Tipik səhvlər və debugging"
+    body: |
+      **1. Kvantizasiyadan sonra yalnız RMSE-yə baxıb hədəf tapşırıq metrikini yoxlamamaq**
+      Aşağı çəki RMSE-si hələ modelin mAP və ya F1 göstəricisinin düşmədiyinə zəmanət vermir. Həmişə real held-out validation dəstində FP32 vs INT8 metrikini müqayisə et.
+
+      **2. Təsadüfi (random) və ya təmsilçi olmayan data ilə PTQ kalibrasiyası**
+      Aktivasiya kvantizasiyası üçün istifadə olunan kalibrasiya dəsti real production paylanmasını (məs. gecə + gündüz kadrları) əks etdirməlidir; əks halda gecə görüntülərində aktivasiyalar sıxılıb (clipping) kəskin dəqiqlik itkisi verir.
+
+      **3. Bütün qatları kor-koranə INT8/INT4 etmək**
+      Adətən ilk giriş qatı və son çıxış başlığı (classification/regression head) kvantizasiyaya ən həssasdır; onları FP16 saxlayıb yalnız orta blokları INT8 etmək (mixed-precision) cüzi yaddaş əvəzinə böyük dəqiqlik qoruyur.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs: PTQ vs QAT, Per-Tensor vs Per-Channel"
+    body: |
+      - **Per-Tensor vs Per-Channel quantization:** Bütün matrisə tək $s$ vermək (per-tensor) sadədir, lakin 1 outlier bütün matrisi korlayır. Hər çıxış kanalı (və ya 64-128 elementlik qrup) üçün ayrıca $s_c$ saxlamaq (per-channel / group-wise quantization) yaddaşa $<1\%$ əlavə yük gətirir, amma outlier problemini böyük ölçüdə həll edir.
+      - **PTQ vs QAT:** PTQ dəqiqələr çəkir və GPU təlimi tələb etmir — həmişə ilk sınaq olmalıdır. Yalnız PTQ keyfiyyət itkisi qəbuledilməz olduqda (məs. $>1-2\%$ mAP itkisi və ya INT4 hədəfi) QAT-a keç.
+      - **Adversarial müdafiə vs Sürət:** Adversarial training modelin dayanıqlığını artırır, lakin bəzən təmiz (clean) datada dəqiqliyi 1–3% azaldır. Robototexnikada ən praktiki birinci müdafiə **çox-sensorlu kəsişdirmə** (kamera + LiDAR/ultrasəs məsafə yoxlaması) və fiziki qeyri-mümkün sıçrayışların filtrasiyasıdır.
+mastery_criteria:
+  - "Verilmiş FP32 vektor üçün simmetrik INT8 scale, kvantizasiya olunmuş tam ədədlər və dekvantizasiya dəyərlərini əl ilə və kodla hesablaya bilirsən"
+  - "Outlier çəkinin per-tensor kvantizasiyada yaratdığı underflow problemini rəqəmlə sübut edib per-channel həllini izah edirsən"
+  - "Edge cihaz üçün FP32/FP16/INT8 yaddaş büdcəsini hesablayır və PTQ vs QAT seçimini əsaslandırırsan"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-specedge-memory-ratio
+      type: mcq
+      title: "FP32-dən INT8-ə keçiddə yaddaş qənaəti"
+      prompt: "Modelin çəkilərini FP32 (32 bit) formatından INT8 (8 bit) formatına kvantizasiya etdikdə çəki yaddaşı nəzəri olaraq neçə dəfə azalır?"
+      skills: [spec-robotics, dl-architectures]
+      category: concept
+      options:
+        - id: a
+          text: "2 dəfə"
+          feedback: "2 dəfə azalma FP32 → FP16 keçidində baş verir."
+        - id: b
+          text: "4 dəfə"
+          feedback: "Doğrudur! 32 bit / 8 bit = 4 (4 baytdan 1 bayta)."
+        - id: c
+          text: "8 dəfə"
+          feedback: "8 dəfə azalma INT4 (4 bit) kvantizasiyasına uyğundur."
+      answer: b
+      explanation: "FP32 hər parametr üçün 4 bayt, INT8 isə 1 bayt tutur — çəki yaddaşı və memory bandwidth yükü 4 dəfə azalır."
+    - id: q-specedge-outlier-effect
+      type: mcq
+      title: "Outlier çəkinin per-tensor kvantizasiyaya təsiri"
+      prompt: "Bir qatdakı çəkilərin 99.9%-i $[-0.2, 0.2]$ aralığındadır, lakin tək bir çəki $127.0$ dəyərindədir. Simmetrik per-tensor INT8 kvantizasiyası tətbiq etsək nə baş verər?"
+      skills: [dl-architectures]
+      category: math
+      options:
+        - id: a
+          text: "Scale $s = 1.0$ olar və $[-0.2, 0.2]$ aralığındakı bütün kiçik çəkilər 0-a yuvarlaqlaşaraq ciddi dəqiqlik itkisinə (underflow) səbəb olar"
+          feedback: "Doğrudur! Tək bir outlier bütün tam ədəd dinamik diapazonunu zəbt edir."
+        - id: b
+          text: "Outlier avtomatik silinir və digər çəkilərə təsir etmir"
+          feedback: "Standart min-max / max-abs simmetrik kvantizasiyada outlier silinmir, əksinə `scale` dəyərini birbaşa diktə edir."
+        - id: c
+          text: "Kvantizasiya xətası sıfıra bərabər olur"
+          feedback: "Əksinə, yuvarlaqlaşdırma addımı çox böyüdüyü üçün xəta kəskin artır."
+      answer: a
+      explanation: "Per-tensor max-abs kvantizasiyada tək bir böyük çəki $s$-i böyüdür və kiçik çəkilər 0-a düşür. Həlli per-channel / group-wise kvantizasiya və ya outlier clipping-dir."
+    - id: q-specedge-fgsm-direction
+      type: mcq
+      title: "Adversarial hücumda (FGSM) gradientin rolu"
+      prompt: "FGSM hücumunda $x_{\\text{adv}} = x + \\epsilon \\cdot \\text{sign}(\\nabla_x L)$ düsturunda niyə mənfi işarəsi deyil, **müsbət (+)** işarəsi istifadə olunur?"
+      skills: [llm-security, dl-architectures]
+      category: concept
+      options:
+        - id: a
+          text: "Çünki hücumçunun məqsədi itki funksiyasını ($L$) azaltmaq yox, maksimum artıraraq modeli səhv sinfə yönəltməkdir (gradient ascent)"
+          feedback: "Doğrudur! Təlimdə itkini azaltmaq üçün gradientin əksinə gedirik, hücumda isə itkini artırmaq üçün gradient istiqamətində gedirik."
+        - id: b
+          text: "Çünki şəkil pikselləri həmişə müsbət ədədlərdir"
+          feedback: "Piksellər müsbət olsa da, səs-küy $\\text{sign}(\\nabla_x L) \\in \\{-1, +1\\}$ həm müsbət, həm mənfi ola bilər."
+        - id: c
+          text: "Çünki $\\epsilon$ həmişə mənfi götürülür"
+          feedback: "$\\epsilon > 0$ kiçik müsbət həddir."
+      answer: a
+      explanation: "Gradient descent itkini minimuma endirir ($-\\nabla$), adversarial hücum isə giriş üzrə gradient ascent ($+\\nabla_x L$) edərək itkini və səhv proqnoz ehtimalını artırır."
+    - id: q-specedge-ptq-vs-qat
+      type: mcq
+      title: "PTQ vs QAT seçimi"
+      prompt: "Öyrədilmiş bir modeli Jetson cihazında INT8-ə salmaq istəyirsən. Mühəndislik ardıcıllığı necə olmalıdır?"
+      skills: [spec-robotics, dl-architectures]
+      category: production
+      options:
+        - id: a
+          text: "Əvvəlcə sürətli PTQ tətbiq edib validation metrikini ölçmək; yalnız dəqiqlik itkisi qəbul edilən həddən böyükdürsə per-channel/mixed-precision və ya QAT-a keçmək"
+          feedback: "Doğrudur! PTQ bir çox modeldə <0.5% itki ilə dərhal işləyir və bahalı yenidən təlimə ehtiyac qoymur."
+        - id: b
+          text: "Həmişə sıfırdan 100 epoch QAT ilə modeli yenidən öyrətmək"
+          feedback: "PTQ-ni sınamadan tam yenidən təlimə başlamaq vaxt və hesablama israfıdır."
+        - id: c
+          text: "Modeli kvantizasiya edib heç bir validation testi aparmadan drona yükləmək"
+          feedback: "Kvantizasiya xüsusilə nadir obyektlərdə səssiz reqressiya yarada bilər; held-out test məcburidir."
+      answer: a
+      explanation: "Düzgün mühəndislik qaydası: əvvəlcə ən sadə və sürətli PTQ baseline-nı ölç, yalnız real dəqiqlik düşüşü sübut olunarsa QAT-a sərmayə qoy."
+exercises:
+  - id: ex-specedge-int8-quantize
+    type: code
+    title: "symmetric_int8_quantize funksiyasını yaz"
+    prompt: |
+      Simmetrik INT8 kvantizasiya və dekvantizasiya icra edən `symmetric_int8_quantize(weights: list[float]) -> tuple[list[int], float, list[float]]` funksiyasını pure Python-da yaz:
+
+      **Müqavilə:**
+      1. `weights` boşdursa `([], 1.0, [])` qaytar.
+      2. Bütün elementlər `0.0`-dırsa `([0, ...], 1.0, [0.0, ...])` qaytar (sıfıra bölmə olmamalıdır).
+      3. Əks halda:
+         - `scale = max(abs(w) for w in weights) / 127.0`
+         - `q_i = max(-127, min(127, int(round(w / scale))))`
+         - `deq_i = q_i * scale`
+      4. Input `weights` siyahısı dəyişdirilməməlidir (mutate edilməməlidir).
+    skills: [spec-robotics, dl-architectures]
+    category: python
+    difficulty: 2
+    hints:
+      - "`max_abs = max(abs(w) for w in weights)` tap; əgər `max_abs == 0.0` olarsa sıfır siyahısı və `scale = 1.0` qaytar."
+      - "Hər element üçün `q = max(-127, min(127, int(round(w / scale))))` və `deq = q * scale` hesabla."
+      - "Dönüş dəyəri `(quantized, scale, dequantized)` tuple-ı olmalıdır."
+    starter_code: |
+      def symmetric_int8_quantize(
+          weights: list[float],
+      ) -> tuple[list[int], float, list[float]]:
+          # TODO: (quantized_ints, scale, dequantized_floats) qaytar
+          return [], 1.0, []
+    tests:
+      - name: "Dərsdəki əsas nümunə [-1.27, 0.0, 0.635, 1.0]"
+        code: |
+          raw = [-1.27, 0.0, 0.635, 1.0]
+          q, s, deq = symmetric_int8_quantize(raw)
+          assert abs(s - 0.01) < 1e-9, f"scale səhvdir: {s}"
+          assert q == [-127, 0, 64, 100], f"q səhvdir: {q}"
+          assert abs(deq[0] - (-1.27)) < 1e-9 and abs(deq[2] - 0.64) < 1e-9
+          assert raw == [-1.27, 0.0, 0.635, 1.0], "input mutasiya olunmamalıdır"
+      - name: "Outlier underflow effekti [0.1, 0.2, 127.0]"
+        code: |
+          q, s, deq = symmetric_int8_quantize([0.1, 0.2, 127.0])
+          assert abs(s - 1.0) < 1e-9
+          assert q == [0, 0, 127]
+          assert deq == [0.0, 0.0, 127.0]
+      - name: "Boş və tam sıfır vektorları təhlükəsiz emal olunur"
+        code: |
+          assert symmetric_int8_quantize([]) == ([], 1.0, [])
+          assert symmetric_int8_quantize([0.0, 0.0]) == ([0, 0], 1.0, [0.0, 0.0])
+    solution: |
+      def symmetric_int8_quantize(
+          weights: list[float],
+      ) -> tuple[list[int], float, list[float]]:
+          if not weights:
+              return [], 1.0, []
+          max_abs = max(abs(w) for w in weights)
+          if max_abs == 0.0:
+              return [0 for _ in weights], 1.0, [0.0 for _ in weights]
+          scale = max_abs / 127.0
+          quantized = [max(-127, min(127, int(round(w / scale)))) for w in weights]
+          dequantized = [q * scale for q in quantized]
+          return quantized, scale, dequantized
+    explanation: |
+      Funksiya dinamik diapazonun maksimum mütləq dəyərinə görə `scale` hesablayır, çəkiləri `[-127, 127]` tam ədəd aralığına sıxır və dekvantizasiya nəticəsini qaytarır.
+  - id: ex-specedge-memory-numeric
+    type: numeric
+    title: "Edge cihazda INT8 model çəki yaddaşı (MB)"
+    prompt: |
+      **500 milyon** ($500 \times 10^6$) parametrli bir vision-language modeli FP32 formatında $2000\text{ MB}$ ($2\text{ GB}$) yer tutur.
+
+      Bu modelin çəkilərini **INT8** (hər parametr üçün 1 bayt) formatına kvantizasiya etdikdə təkcə çəkilər neçə **Meqabayt (MB, $10^6$ bayt)** yer tutar?
+    skills: [spec-robotics, dl-architectures]
+    category: math
+    difficulty: 1
+    answer: 500
+    tolerance: 0.5
+    unit: "MB"
+    hints:
+      - "INT8 hər parametr üçün 8 bit = 1 bayt tələb edir."
+      - "500 milyon parametr × 1 bayt = 500,000,000 bayt = ? MB."
+    explanation: "$500 \\times 10^6 \\text{ parametr} \\times 1 \\text{ bayt} = 500 \\times 10^6 \\text{ bayt} = 500 \\text{ MB}$ (FP32-dən 4 dəfə kiçik)."
+references:
+  - title: "PyTorch Documentation — Quantization"
+    url: https://pytorch.org/docs/stable/quantization.html
+    note: "PTQ, QAT və dinamik/statik INT8 kvantizasiyanın rəsmi PyTorch sənədləri"
+  - title: "ONNX Runtime — Quantize ONNX Models"
+    url: https://onnxruntime.ai/docs/performance/model-optimizations/quantization.html
+    note: "Edge cihazlarda CPU/NPU üçün INT8 ONNX kvantizasiya bələdçisi"

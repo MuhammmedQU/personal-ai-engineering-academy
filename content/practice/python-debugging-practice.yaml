@@ -1,0 +1,244 @@
+topic: python-debugging-lab
+title: "Python Engineering, Data Structures & Debugging Lab"
+exercises:
+  - id: prac-py-summarize-records
+    title: "Model Telemetriya Qeydlərinin Aqreqasiyası (summarize_records)"
+    type: code
+    category: python
+    difficulty: 2
+    skills:
+      - py-functions
+      - py-errors
+      - py-data-structures
+    prompt: |
+      API loglarından gələn sorğu qeydlərini model adına görə qruplaşdıran `summarize_records(records: list[dict]) -> dict[str, dict]` funksiyasını yazın.
+
+      **Müqavilə (Contract):**
+      1. Yalnız `row.get("ok") is True` olan sətirləri nəzərə alın (`ok=False` və ya `ok` açarı olmayan sətirləri ötürün).
+      2. Əgər `ok=True` olan sətirdə `"latency_ms"` dəyəri `None`-dırsa və ya `<= 0` olarsa, dərhal `ValueError("latency_ms must be positive")` qaldırın.
+      3. Hər bir `model` üçün nəticə lüğətində `{"count": int, "avg_latency_ms": float}` qaytarın (`avg_latency_ms` dəyərini `round(..., 2)` ilə yuvarlaqlaşdırın).
+    starter_code: |
+      def summarize_records(records: list[dict]) -> dict[str, dict]:
+          # TODO: yalnız ok=True olan sətirləri model üzrə qruplaşdırın və validasiya edin
+          return {}
+    tests:
+      - name: "Normal qruplaşdırma və ok=False sətirlərinin ötürülməsi"
+        code: |
+          sample = [
+              {"model": "rag-v1", "latency_ms": 100, "ok": True},
+              {"model": "rag-v1", "latency_ms": 150, "ok": True},
+              {"model": "rag-v1", "latency_ms": 999, "ok": False},
+              {"model": "cls-v2", "latency_ms": 40, "ok": True},
+          ]
+          assert summarize_records(sample) == {
+              "rag-v1": {"count": 2, "avg_latency_ms": 125.0},
+              "cls-v2": {"count": 1, "avg_latency_ms": 40.0},
+          }
+      - name: "Mənfi və ya sıfır latency olduqda ValueError qaldırır"
+        code: |
+          raised = False
+          try:
+              summarize_records([{"model": "rag-v1", "latency_ms": -5, "ok": True}])
+          except ValueError:
+              raised = True
+          assert raised is True
+      - name: "Boş siyahı və ya yalnız uğursuz sorğular üçün boş dict qaytarır"
+        code: |
+          assert summarize_records([]) == {}
+          assert summarize_records([{"model": "m1", "latency_ms": -10, "ok": False}]) == {}
+    solution: |
+      def summarize_records(records: list[dict]) -> dict[str, dict]:
+          grouped: dict[str, list[float]] = {}
+          for row in records:
+              if row.get("ok") is not True:
+                  continue
+              latency = row.get("latency_ms")
+              if latency is None or latency <= 0:
+                  raise ValueError("latency_ms must be positive")
+              model = str(row["model"])
+              grouped.setdefault(model, []).append(float(latency))
+          summary: dict[str, dict] = {}
+          for model, vals in grouped.items():
+              summary[model] = {
+                  "count": len(vals),
+                  "avg_latency_ms": round(sum(vals) / len(vals), 2),
+              }
+          return summary
+    hints:
+      - "Əvvəlcə `if row.get('ok') is not True: continue` ilə uğursuz sətirləri ötürün."
+      - "Daha sonra `latency = row.get('latency_ms')` yoxlayın: `if latency is None or latency <= 0: raise ValueError(...)`."
+      - "Hər modelin latency siyahısını `dict[str, list[float]]` içində toplayıb sonda `count` və `round(sum(vals) / len(vals), 2)` hesablayın."
+    explanation: "Yalnız `ok is True` sətirləri emal edilir, fail-fast prinsipi ilə `latency <= 0` olduqda dərhal `ValueError` qaldırılır və `dict` vasitəsilə O(n) zamanda qruplaşdırılır."
+
+  - id: prac-py-explain-batch-dedup
+    title: "Kodu Oxu və İzah Et: Streaming Deduplication & Batching"
+    type: explain
+    category: explain-code
+    difficulty: 2
+    skills:
+      - py-control-flow
+      - py-data-structures
+    prompt: |
+      Aşağıdakı funksiyanı diqqətlə oxuyun:
+
+      ```python
+      def iter_unique_batches(items: list[dict], key: str, batch_size: int) -> list[list[dict]]:
+          if batch_size <= 0:
+              raise ValueError("batch_size must be >= 1")
+          seen: set[str] = set()
+          batches: list[list[dict]] = []
+          current: list[dict] = []
+          for item in items:
+              val = item.get(key)
+              if val is None or val in seen:
+                  continue
+              seen.add(val)
+              current.append(item)
+              if len(current) == batch_size:
+                  batches.append(current)
+                  current = []
+          if current:
+              batches.append(current)
+          return batches
+      ```
+
+      **Tapşırıq:**
+      1. Bu funksiya nə iş görür və hansı sətirləri nəticədən çıxarır?
+      2. `seen` üçün `list` əvəzinə `set` seçilməsinin Big-O zaman mürəkkəbliyinə təsiri nədir?
+      3. Sonda `if current: batches.append(current)` blokunun rolu nədir və o silinsə hansı edge-case sınacaq?
+    rubric:
+      - "Funksiyanın `key` sahəsinə görə təkrarlanan (duplicate) və `key` dəyəri `None` olan elementləri süzüb qalanlarını `batch_size` ölçülü paketlərə böldüyünü qeyd edir."
+      - "`seen` çoxluğu (`set`) sayəsində `val in seen` yoxlamasının O(1) orta zamanda işlədiyini və ümumi zaman mürəkkəbliyinin O(n²)-dən O(n)-ə düşdüyünü izah edir."
+      - "Sonuncu `if current:` blokunun `batch_size`-a tam bölünməyən qalıq elementləri (məsələn, 5 unikal element və `batch_size=2` olduqda son 1 elementi) itirməmək üçün lazım olduğunu göstərir."
+    model_answer: |
+      1. Funksiya verilmiş `items` siyahısından `key` açarı olmayan (`None`) və ya həmin açar dəyəri daha əvvəl görünmüş (duplicate) elementləri çıxarır, ilk dəfə görünən unikal elementləri isə ardıcıllıqla `batch_size` uzunluqlu alt-siyahılara (batch) bölür.
+      2. `seen` strukturunun `set` olması `val in seen` və `seen.add(val)` əməliyyatlarını orta hesabla O(1) edir, beləliklə `n` element üçün ümumi zaman mürəkkəbliyi O(n) və əlavə yaddaş O(u) (unikal element sayı) olur. Əgər `list` istifadə olunsaydı, hər axtarış O(n) olacağı üçün ümumi müddət O(n²) olardı.
+      3. Dövr bitdikdə unikal elementlərin sayı `batch_size`-a tam bölünmürsə, sonuncu natamam paket `current` siyahısında qalır. `if current:` yoxlaması bu qalıq elementlərin itməsinin qarşısını alır.
+    hints:
+      - "`val in seen` əməliyyatının `set` və `list` üçün neçə addım çəkdiyini müqayisə edin."
+      - "Unikal elementlərin sayı 5, `batch_size` isə 2 olduqda dövrün içindəki `len(current) == batch_size` şərtinin neçə dəfə ödənəcəyini izləyin."
+    explanation: "Data pipeline-larda həm O(1) deduplication (`set`), həm də qalıq paketin (`tail batch`) itirilməməsi ən vacib praktiki naxışlardan biridir."
+
+  - id: prac-py-predict-shallow-buckets
+    title: "Çıxışı Proqnozlaşdır: List Vurulması və Referans Tələsi"
+    type: text
+    category: predict-output
+    difficulty: 2
+    skills:
+      - py-data-structures
+      - py-control-flow
+      - debugging
+    prompt: |
+      Aşağıdakı Python kodunun çap edəcəyi dəqiq çıxışı yazın:
+
+      ```python
+      buckets = [[]] * 3
+      buckets[0].append("tok")
+      independent = [[] for _ in range(3)]
+      independent[0].append("tok")
+      print(f"{len(buckets[1])}-{len(independent[1])}")
+      ```
+    accepted:
+      - "1-0"
+    case_sensitive: false
+    normalize_whitespace: true
+    hints:
+      - "`[[]] * 3` ifadəsi 3 fərqli daxili siyahı yaratmır; eyni tək daxili siyahıya 3 referans yaradır."
+      - "`[[] for _ in range(3)]` isə hər iterasiyada yeni müstəqil siyahı obyekti yaradır."
+    explanation: "`buckets = [[]] * 3` bütün indekslərdə eyni siyahı obyektinə işarə etdiyi üçün `buckets[0].append('tok')` həm də `buckets[1]`-in uzunluğunu 1 edir. List comprehension ilə yaradılan `independent[1]` isə boş qalır (`0`). Nəticə `1-0` olur."
+
+  - id: prac-py-debug-minmax-leakage
+    title: "Pipeline Bug-ını Düzəlt: Min-Max Normalizasiyada Data Leakage və Sıfıra Bölmə"
+    type: code
+    category: debug
+    difficulty: 2
+    skills:
+      - debugging
+      - ml-data-leakage
+      - py-functions
+    prompt: |
+      Aşağıdakı `min_max_scale_split(train_vals, test_vals)` funksiyasında **3 ciddi xəta** var:
+      1. `min_v` və `max_v` hesablanarkən `train_vals + test_vals` birləşdirilib — bu birbaşa **data leakage**-dir! Statistikalar yalnız `train_vals` üzərindən hesablanmalıdır.
+      2. `train_vals` boş olduqda `ValueError("train_vals cannot be empty")` qaldırılmalıdır.
+      3. `train_vals` daxilindəki bütün ədədlər eyni olduqda (`max_v == min_v`) sıfıra bölmə (`ZeroDivisionError`) baş verir; bu halda həm train, həm də test üçün `0.0`-lardan ibarət siyahılar qaytarılmalıdır.
+
+      Funksiyanı elə düzəldin ki, hər bir elementi `round((x - min_v) / (max_v - min_v), 4)` düsturu ilə (yalnız train `min_v` və `max_v` əsasında) miqyaslasın və giriş siyahılarını dəyişdirməsin.
+    starter_code: |
+      def min_max_scale_split(
+          train_vals: list[float], test_vals: list[float]
+      ) -> tuple[list[float], list[float]]:
+          # BUGGY CODE: leakage və ZeroDivisionError var
+          combined = train_vals + test_vals
+          min_v = min(combined)
+          max_v = max(combined)
+          span = max_v - min_v
+          scaled_train = [round((x - min_v) / span, 4) for x in train_vals]
+          scaled_test = [round((x - min_v) / span, 4) for x in test_vals]
+          return scaled_train, scaled_test
+    tests:
+      - name: "Test dəstindəki ekstremal dəyər train miqyaslanmasına sızmır (No Leakage)"
+        code: |
+          tr, te = min_max_scale_split([10.0, 20.0, 30.0], [50.0])
+          assert tr == [0.0, 0.5, 1.0]
+          assert te == [2.0]
+      - name: "Sabit train dəyərlərində (max == min) ZeroDivisionError vermir, 0.0 qaytarır"
+        code: |
+          tr, te = min_max_scale_split([5.0, 5.0], [5.0, 10.0])
+          assert tr == [0.0, 0.0]
+          assert te == [0.0, 0.0]
+      - name: "Boş train_vals verildikdə ValueError qaldırır"
+        code: |
+          raised = False
+          try:
+              min_max_scale_split([], [1.0, 2.0])
+          except ValueError:
+              raised = True
+          assert raised is True
+    solution: |
+      def min_max_scale_split(
+          train_vals: list[float], test_vals: list[float]
+      ) -> tuple[list[float], list[float]]:
+          if not train_vals:
+              raise ValueError("train_vals cannot be empty")
+          min_v = min(train_vals)
+          max_v = max(train_vals)
+          span = max_v - min_v
+          if span == 0:
+              return [0.0 for _ in train_vals], [0.0 for _ in test_vals]
+          scaled_train = [round((x - min_v) / span, 4) for x in train_vals]
+          scaled_test = [round((x - min_v) / span, 4) for x in test_vals]
+          return scaled_train, scaled_test
+    hints:
+      - "`combined = train_vals + test_vals` sətirini silin; `min_v` və `max_v` yalnız `train_vals`-dan tapılmalıdır."
+      - "Ən əvvəldə `if not train_vals: raise ValueError('train_vals cannot be empty')` yoxlamasını əlavə edin."
+      - "`span == 0` olduqda bölmə aparmadan `[0.0 for _ in train_vals], [0.0 for _ in test_vals]` qaytarın."
+    explanation: "Test dəstinin statistikası heç vaxt normalizasiya parametrlərinə (`min_v`, `max_v`) təsir etməməlidir; əks halda gələcək məlumat train mərhələsinə sızır."
+
+  - id: prac-py-order-debug-workflow
+    title: "Sistemli Debugging Addımlarını Düzgün Ardıcıllığa Düz"
+    type: order
+    category: concept
+    difficulty: 1
+    skills:
+      - debugging
+      - py-testing
+    prompt: |
+      İstehsalatda və ya ML pipeline-da gözlənilməz xəta baş verdikdə təsadüfi kod dəyişikliyi etmək əvəzinə tətbiq olunan **sistemli debugging** addımlarını ilk addımdan son addıma doğru sıralayın.
+    items:
+      - id: step1
+        text: "Traceback-i və logları oxuyub xətanı sabit təkrarlayan minimal reproduksiya (minimal reproduction) yaratmaq."
+      - id: step2
+        text: "Xətanın kök səbəbi haqqında yoxlanıla bilən konkret fərziyyə (hypothesis) irəli sürmək və aralıq dəyərləri yoxlamaq."
+      - id: step3
+        text: "Kök səbəbi aradan qaldıran minimal düzəlişi (fix) tətbiq etmək."
+      - id: step4
+        text: "Həmin xətanın gələcəkdə yenidən qayıtmaması üçün avtomatik regression testi (`pytest`) əlavə etmək."
+    answer:
+      - step1
+      - step2
+      - step3
+      - step4
+    hints:
+      - "Xətanı sabit təkrarlamadan (reproduce etmədən) onun düzəldiyini bilmək mümkün deyil."
+      - "Düzəlişdən sonrakı son mühəndislik addımı həmişə regression test yazmaqdır."
+    explanation: "Sistemli debugging `Reproduce → Hypothesize & Inspect → Fix → Regression Test` dövrü ilə işləyir."

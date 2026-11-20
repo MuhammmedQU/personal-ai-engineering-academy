@@ -1,0 +1,433 @@
+id: py-errors-validation
+track: software-engineering
+module: python-engineering
+title: Exceptions və fail-fast validation — səssiz xətaların qarşısını almaq
+summary: ML pipeline-larında səhv datanın modelə səssizcə sızmasının qarşısını almaq üçün fail-fast validation, dəqiq exception tipləri (ValueError, TypeError) və təhlükəsiz try/except qaydalarını öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [py-functions-contracts]
+next: py-data-structures-complexity
+skills: [py-errors, py-functions, debugging]
+objectives:
+  - Fail-fast prinsipi ilə funksiyanın girişində input validation yazmaq
+  - TypeError və ValueError arasındakı fərqi düzgün seçmək və aydın mesajla raise etmək
+  - "Bare `except: pass` anti-pattern-inin ML sistemlərində niyə təhlükəli olduğunu izah etmək"
+  - Yalnız gözlənilən xətanı tutan və kontekst əlavə edən try/except bloku qurmaq
+why_it_matters: |
+  Proqramlaşdırmada ən qorxulu xəta proqramı dayandıran xəta deyil — **heç bir xəbərdarlıq vermədən yanlış nəticə çıxaran** xətadır.
+  AI sistemlərində bu daha kəskindir: əgər feature hesablama funksiyası `None` və ya mənfi yaş dəyərini səssizcə `0`-a çevirirsə, neural network həmin `0`-ı həqiqi məlumat kimi qəbul edir və yanlış proqnoz qaytarır.
+
+  **Fail-fast** yanaşması problemi mənbəyində — data sistemə daxil olan kimi — aydın `TypeError` və ya `ValueError` ilə dayandırır. Beləliklə, 3 saatlıq model training-in sonunda yox, ilk saniyədə hansı sətirdə nəyin səhv olduğunu bilirsən.
+terms:
+  - term: Fail-fast
+    definition: Yanlış input və ya pozulmuş ilkin şərt (precondition) aşkarlanan kimi dərhal exception qaldırmaq; səhv datanı irəli ötürməmək.
+  - term: Exception
+    definition: Normal icra axınını dayandıran runtime hadisəsi (`ValueError`, `TypeError`, `KeyError` və s.).
+  - term: TypeError
+    definition: Əməliyyat və ya funksiya yanlış **tipdə** obyekt aldıqda qaldırılan exception (məsələn, `float` əvəzinə `str`).
+  - term: ValueError
+    definition: Obyektin tipi düzgün, amma **dəyəri** icazəli aralıqdan kənar olduqda qaldırılan exception (məsələn, ehtimal üçün `-0.5`).
+  - term: Bare except
+    definition: "`except:` və ya `except Exception: pass` yazaraq bütün xətaları udmaq — həm proqram bug-larını (`NameError`, `TypeError`), həm də data xətalarını gizlədir."
+  - term: Guard clause
+    definition: Funksiyanın əvvəlində yanlış halları yoxlayıb dərhal `raise` və ya `return` edən qısa şərt bloku.
+sections:
+  - id: fail-fast-concept
+    kind: explanation
+    title: Fail-fast və düzgün Exception seçimi
+    body: |
+      Keçən dərsdə funksiyanın **müqaviləsini** (contract) təyin etdik. Bəs çağıran kod müqaviləni pozarsa nə baş verməlidir?
+      Python type hint-ləri runtime-da yoxlamır. Xarici mənbədən (JSON API, CSV fayl, istifadəçi sorğusu, LLM output-u) gələn datanı funksiyanın girişində **guard clause**-larla özün yoxlamalısan.
+
+      Hansı exception-ı qaldırmalı?
+
+      | Vəziyyət | Düzgün Exception | Nümunə |
+      |---|---|---|
+      | Yanlış tip gəlib | `TypeError` | `temperature` üçün `"0.7"` (`str`) göndərilib, `float` gözlənilirdi |
+      | Tip düzdür, dəyər qaydanı pozur | `ValueError` | `temperature = -1.5` (`[0.0, 2.0]` aralığından kənardır) |
+      | Dict-də məcburi açar çatışmır | `KeyError` və ya `ValueError` | JSON record-da `"label"` sahəsi yoxdur |
+
+      Yaxşı exception mesajı **üç suala** cavab verir:
+      1. Hansı parametr səhvdir?
+      2. Nə gözlənilirdi?
+      3. Faktiki olaraq nə gəldi?
+
+      Məsələn: `raise ValueError(f"temperature must be in [0, 2], got {temp!r}")`.
+  - id: airport-security
+    kind: analogy
+    title: "Mental model: hava limanı təhlükəsizlik keçidi"
+    body: |
+      Fail-fast validation hava limanının girişindəki pasport və baqaj yoxlaması kimidir:
+
+      - Sərnişinin pasportu yoxdursa (**`TypeError` / `ValueError`**), onu **qapıda** saxlayırlar və səbəbini açıq deyirlər.
+      - Əgər qapıçı *"eybi yox, keç, təyyarədə baxarıq"* desə (**səssizcə `0` və ya `None` ötürmək**), təyyarə havada olanda problem daha baha başa gəlir.
+      - Əgər qapıçı hər həyəcan siqnalında sadəcə cihazın səsini söndürsə (**`except: pass`**), heç kim nəyin səhv getdiyini bilməyəcək.
+
+      Sistem sərhədində (API endpoint, data loader, fayl oxuyucu) ciddi yoxlama aparmaq içəridəki hesablama funksiyalarını təmiz və etibarlı saxlayır.
+  - id: validation-flow
+    kind: diagram
+    title: Fail-fast vs səssiz korlanma (silent corruption)
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Xarici data: {'age': -5, 'text': '  '}"] --> B{"Guard Clauses (Validation)"}
+        B -- "Fail-Fast: ValueError" --> C["Dərhal aydın log + sorğu rədd edilir"]
+        B -. "Validation YOXDUR" .-> D["Feature Engineering (-5 -> NaN / 0)"]
+        D -.-> E["Model Inference (yanlış proqnoz)"]
+        E -.-> F["Production-da səssiz keyfiyyət düşməsi"]
+      ```
+
+      Üst budaqda xətanı düzəltmək 2 dəqiqə çəkir. Alt budaqda isə həftələrlə modelin niyə pis işlədiyini axtarırsan.
+  - id: worked-record-check
+    kind: worked_example
+    title: Addım-addım ML record yoxlaması
+    body: |
+      Tutaq ki, sentiment klassifikasiyası üçün hər sənəd `{"text": str, "label": 0 | 1}` formatında olmalıdır. Gələn 4 nümunəni yoxlayaq:
+
+      | Nümunə | Yoxlama addımı | Nəticə |
+      |---|---|---|
+      | `["salam", 1]` | `isinstance(record, dict)` | `TypeError: record must be a dict` |
+      | `{"text": "Əla məhsuldur"}` | `"label" in record` | `ValueError: missing required field 'label'` |
+      | `{"text": "   ", "label": 1}` | `record["text"].strip()` boşdurmu? | `ValueError: text must not be empty` |
+      | `{"text": " Yaxşıdır ", "label": 1}` | Bütün şərtlər ödənir | Təmiz yeni dict: `{"text": "Yaxşıdır", "label": 1}` |
+
+      **Vacib Python detalı:** Python-da `bool` tipi `int`-in alt-sinfidir (`isinstance(True, int) == True`). Ona görə `"label": True` kimi səhv dəyərin `1` kimi keçməməsi üçün `isinstance(label, bool)` halını ayrıca rədd etmək lazımdır.
+  - id: code-walkthrough
+    kind: code
+    title: Kod — guard clauses və dəqiq try/except
+    body: |
+      ```python
+      def validate_sample(record: dict) -> dict:
+          """Validate and normalize a binary classification record."""
+          if not isinstance(record, dict):
+              raise TypeError(f"record must be a dict, got {type(record).__name__}")
+
+          if "text" not in record or "label" not in record:
+              raise ValueError("missing required field: 'text' and 'label' are required")
+
+          text = record["text"]
+          label = record["label"]
+
+          if not isinstance(text, str):
+              raise TypeError(f"text must be str, got {type(text).__name__}")
+          cleaned_text = text.strip()
+          if not cleaned_text:
+              raise ValueError("text must not be empty")
+
+          if isinstance(label, bool) or not isinstance(label, int):
+              raise TypeError(f"label must be int, got {type(label).__name__}")
+          if label not in (0, 1):
+              raise ValueError(f"label must be 0 or 1, got {label}")
+
+          return {"text": cleaned_text, "label": label}
+
+
+      def load_valid_batch(raw_records: list[dict]) -> tuple[list[dict], list[str]]:
+          """Collect valid records and human-readable error messages for invalid ones."""
+          valid: list[dict] = []
+          errors: list[str] = []
+          for idx, item in enumerate(raw_records):
+              try:
+                  valid.append(validate_sample(item))
+              except (TypeError, ValueError) as exc:
+                  errors.append(f"row {idx}: {exc}")
+          return valid, errors
+      ```
+
+      Diqqət et:
+      - `validate_sample` **pure** funksiyadır: input `record`-u dəyişmir, təmizlənmiş yeni `dict` qaytarır.
+      - `load_valid_batch` içində `except (TypeError, ValueError) as exc:` **yalnız** gözlənilən validation xətalarını tutur və sətir nömrəsi (`row {idx}`) ilə qeyd edir. Əgər kodda `NameError` və ya `MemoryError` baş versə, o gizlədilməyəcək!
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. `except: pass` (xətanı udmaq)**
+      ```python
+      try:
+          score = float(row["score"])
+      except:          # BUG: KeyError, TypeError, hətta adını səhv yazdığın dəyişən (NameError) də udulur!
+          score = 0.0
+      ```
+      Düzəliş: Yalnız gözlədiyin xətanı tut (`except ValueError:`) və ya əvvəlcə açıq yoxla.
+
+      **2. `try` blokuna həddən artıq kod salmaq**
+      ```python
+      try:
+          data = fetch_api()
+          parsed = parse_json(data)
+          result = model.predict(parsed)
+      except ValueError:
+          print("JSON xətası!")   # Bəlkə ValueError model.predict-dən gəldi?
+      ```
+      Düzəliş: `try` bloku yalnız xəta verə biləcək **tək addımı** əhatə etməlidir.
+
+      **3. `bool`-un `int` olduğunu unutmaq**
+      Python-da `isinstance(True, int)` nəticəsi `True`-dur (`True == 1`, `False == 0`). JSON-dan `{"label": true}` gələndə onu `int` sanmamaq üçün `not isinstance(x, bool) and isinstance(x, int)` yoxla.
+
+      **4. Ümumi `raise Exception("error")` yazmaq**
+      Çağıran kod `Exception`-ı tutmağa məcbur qalır ki, bu da bütün xətaları tutmaq deməkdir. Spesifik `ValueError` və ya `TypeError` qaldır.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Dayandırmaq (Fail-fast) vs Qeydə alıb davam etmək (Dead-letter queue):** Kiçik eksperimentdə və ya tək API sorğusunda ilk xətada dayandırmaq (`raise`) ən doğrusudur. Amma 10 milyon sətirlik gecə batch pipeline-ında 3 xətalı sətirə görə bütün işi ləğv etmək əvəzinə, xətalı sətirləri ayrıca `errors` siyahısına (dead-letter) yazıb, xəta faizi həddi (məsələn, `> 1%`) keçəndə pipeline-ı dayandırmaq daha praktikdir.
+      - **Hər funksiyada validation vs Sərhəddə validation:** Eyni `dict`-i daxildəki 10 kiçik funksiyanın hər birində yenidən yoxlamaq həm kodu şişirdir, həm də sürəti azaldır. Datanı **sistem sərhədində** (girişdə) bir dəfə yoxla və təmiz struktura çevir.
+      - **Standart Python vs Pydantic:** Böyük layihələrdə əl ilə `isinstance` yazmaq əvəzinə `Pydantic` istifadə olunur. Amma Pydantic-in altında nə baş verdiyini və xüsusi qayda (custom validator) yazmağı başa düşmək üçün standart `TypeError`/`ValueError` mexanizmini dərindən bilməlisən.
+mastery_criteria:
+  - TypeError və ValueError-u yerinə görə seçib aydın mesajla qaldıra bilirsən
+  - Bare except istifadə etmədən yalnız gözlənilən xətaları tutub sətir konteksti ilə raporlaya bilirsən
+  - ML record-larını input-u dəyişmədən yoxlayıb normallaşdıran validation funksiyası yaza bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pyerr-type-vs-value
+      type: mcq
+      title: TypeError yoxsa ValueError?
+      prompt: "`top_k(items: list[str], k: int)` funksiyasına `k = -3` ötürülüb. Hansı exception qaldırılmalıdır?"
+      skills: [py-errors]
+      category: concept
+      options:
+        - id: a
+          text: TypeError — çünki -3 düzgün parametr deyil
+          feedback: "`-3` tam ədəddir (`int`), yəni tipi düzgündür."
+        - id: b
+          text: ValueError — çünki tipi `int`-dir, amma dəyəri mənfi ola bilməz
+          feedback: Doğru. Tip uyğundur (`int`), lakin dəyər icazəli aralıqdan (`k >= 0`) kənardır.
+        - id: c
+          text: KeyError
+          feedback: KeyError yalnız dict açarı tapılmadıqda istifadə olunur.
+      answer: b
+      explanation: "Tip düzgün (`int`), dəyər isə məntiqsiz (`-3`) olduqda standart Python konvensiyası `ValueError`-dur."
+    - id: q-pyerr-bare-except-bug
+      type: mcq
+      title: Bare except nəyi gizlədir?
+      prompt: |
+        ```python
+        def parse_prob(raw: str) -> float:
+            try:
+                return float(raww)
+            except:
+                return 0.5
+        ```
+        `parse_prob("0.8")` çağırıldıqda nə baş verir və niyə?
+      skills: [py-errors, debugging]
+      category: debug
+      options:
+        - id: a
+          text: "`0.8` qaytarır"
+          feedback: "Diqqətlə bax: `float(raww)` sətrində dəyişən adı səhv yazılıb (`raww`)."
+        - id: b
+          text: "`NameError` qaldırır"
+          feedback: "`NameError` baş verir, amma bare `except:` onu tutur və gizlədir!"
+        - id: c
+          text: "`NameError`-u səssizcə udur və həmişə `0.5` qaytarır"
+          feedback: Doğru. `raww` yazı səhvi `NameError` yaradır, bare `except:` isə onu udub həmişə `0.5` qaytarır.
+      answer: c
+      explanation: "Bare `except:` hətta proqramçının hərf səhvini (`NameError`) də gizlədir və funksiya bütün input-lar üçün səssizcə `0.5` qaytarır."
+    - id: q-pyerr-bool-is-int
+      type: text
+      title: "Predict the output: bool və int"
+      prompt: |
+        ```python
+        x = True
+        print(isinstance(x, int), not isinstance(x, bool) and isinstance(x, int))
+        ```
+        Nə çap olunacaq?
+      skills: [py-errors, py-functions]
+      category: predict-output
+      accepted: ["True False"]
+      hints:
+        - Python-da `bool` sinfi `int`-dən törəyib (`issubclass(bool, int)`).
+      explanation: "`isinstance(True, int)` `True` qaytarır. Ona görə yalnız həqiqi tam ədədləri qəbul etmək üçün `not isinstance(x, bool) and isinstance(x, int)` yazılır."
+    - id: q-pyerr-good-practices
+      type: multi
+      title: Təhlükəsiz exception handling qaydaları
+      prompt: Aşağıdakılardan hansılar **düzgün** mühəndislik praktikasıdır? Hamısını seç.
+      skills: [py-errors]
+      category: concept
+      options:
+        - id: a
+          text: "`try` blokunda yalnız xəta gözlənilən konkret əməliyyatı saxlamaq"
+          feedback: Bəli — beləliklə hansı sətrin xəta verdiyi dəqiq bilinir.
+        - id: b
+          text: "`except Exception: pass` ilə gözlənilməz xətaları susdurmaq"
+          feedback: Xeyr — bu, səssiz data korlanmasına səbəb olur.
+        - id: c
+          text: Exception mesajında həm gözlənilən şərti, həm də gələn səhv dəyəri göstərmək
+          feedback: Bəli — debugging vaxtını dəfələrlə azaldır.
+        - id: d
+          text: "`except (ValueError, TypeError) as exc:` ilə yalnız konkret exception tiplərini tutmaq"
+          feedback: Bəli — yalnız idarə edə bildiyin xətanı tutursan.
+      answers: [a, c, d]
+      explanation: Dəqiq exception tipi, kiçik `try` bloku və informativ xəta mesajı etibarlı data pipeline-larının əsasıdır.
+exercises:
+  - id: ex-pyerr-validate-sample
+    type: code
+    title: validate_sample funksiyasını yaz
+    prompt: |
+      ML təliminə göndərilməzdən əvvəl hər bir sənədi yoxlayan `validate_sample(record: dict) -> dict` funksiyasını tamamla:
+
+      1. Əgər `record` `dict` deyilsə → `TypeError` qaldır.
+      2. Əgər `"text"` və ya `"label"` açarı çatışmırsa → `ValueError` qaldır.
+      3. Əgər `record["text"]` `str` deyilsə → `TypeError` qaldır; `.strip()` edildikdən sonra boşdursa → `ValueError` qaldır.
+      4. Əgər `record["label"]` `int` deyilsə (diqqət: `bool` qəbul edilməməlidir!) → `TypeError` qaldır; dəyəri `0` və ya `1` deyilsə → `ValueError` qaldır.
+      5. Input `record`-u dəyişdirmədən `{"text": cleaned_text, "label": label}` formatında **yeni** `dict` qaytar.
+    skills: [py-errors, py-functions]
+    category: python
+    difficulty: 2
+    hints:
+      - "`if not isinstance(record, dict): raise TypeError(...)` ilə başla."
+      - "`bool` tipini rədd etmək üçün `if isinstance(label, bool) or not isinstance(label, int): raise TypeError(...)` yoxla."
+      - "`cleaned = text.strip()` boş string versə (`if not cleaned:`), `ValueError` qaldır."
+    starter_code: |
+      def validate_sample(record: dict) -> dict:
+          # TODO: fail-fast validation qaydalarını tətbiq et
+          return record
+    tests:
+      - name: Düzgün record təmizlənir və yeni dict qaytarılır
+        code: |
+          raw = {"text": "  AI mühəndisliyi  ", "label": 1}
+          out = validate_sample(raw)
+          assert out == {"text": "AI mühəndisliyi", "label": 1}, f"alınan: {out}"
+          assert raw["text"] == "  AI mühəndisliyi  ", "input dict dəyişdirilməməlidir"
+      - name: Dict olmayan input TypeError verir
+        code: |
+          for bad in [["text", 1], "not a dict", None]:
+              try:
+                  validate_sample(bad)
+                  assert False, f"{bad!r} üçün TypeError gözlənilirdi"
+              except TypeError:
+                  pass
+      - name: Çatışmayan açarlar və ya boş mətn ValueError verir
+        code: |
+          for bad in [{}, {"text": "ok"}, {"label": 0}, {"text": "   ", "label": 1}]:
+              try:
+                  validate_sample(bad)
+                  assert False, f"{bad!r} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+      - name: Yanlış tipdə text və ya bool label TypeError verir
+        code: |
+          for bad in [{"text": 123, "label": 1}, {"text": "ok", "label": True}, {"text": "ok", "label": "1"}]:
+              try:
+                  validate_sample(bad)
+                  assert False, f"{bad!r} üçün TypeError gözlənilirdi"
+              except TypeError:
+                  pass
+      - name: 0 və ya 1 olmayan label ValueError verir
+        code: |
+          for bad_label in [-1, 2, 99]:
+              try:
+                  validate_sample({"text": "ok", "label": bad_label})
+                  assert False, f"label={bad_label} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def validate_sample(record: dict) -> dict:
+          if not isinstance(record, dict):
+              raise TypeError("record must be a dict")
+          if "text" not in record or "label" not in record:
+              raise ValueError("missing required field")
+          text = record["text"]
+          label = record["label"]
+          if not isinstance(text, str):
+              raise TypeError("text must be a str")
+          cleaned = text.strip()
+          if not cleaned:
+              raise ValueError("text must not be empty")
+          if isinstance(label, bool) or not isinstance(label, int):
+              raise TypeError("label must be an int")
+          if label not in (0, 1):
+              raise ValueError("label must be 0 or 1")
+          return {"text": cleaned, "label": label}
+    explanation: |
+      Guard clause-lar sıra ilə tipi (`TypeError`), açarların mövcudluğunu (`ValueError`), mətnin tipini və boş olmamasını, nəhayət `label`-in `bool` olmadan `0` və ya `1` olduğunu yoxlayır.
+  - id: ex-pyerr-debug-score-parser
+    type: code
+    title: "Debug: səssizcə 0.0 qaytaran parser"
+    prompt: |
+      Aşağıdakı `parse_probabilities(raw_values: list[str]) -> list[float]` funksiyası string siyahısını `[0.0, 1.0]` aralığında ehtimallara çevirməlidir.
+      Hazırkı kod `except: pass` istifadə edir və səhv dəyərləri səssizcə keçir.
+
+      Funksiyanı elə düzəlt ki:
+      - Hər elementi `float(item)` ilə çevirsin (alınmasa `ValueError` qalxsın).
+      - Əgər çevrilmiş ədəd `< 0.0` və ya `> 1.0` olarsa, `ValueError` qaldırsın.
+      - Heç bir xətanı gizlətməsin!
+    skills: [py-errors, debugging]
+    category: debug
+    difficulty: 1
+    hints:
+      - "`try/except: pass` blokunu tamamilə sil — `float(item)` özü lazım olanda `ValueError` qaldırır."
+      - "`val < 0.0 or val > 1.0` şərtində açıq `raise ValueError(...)` yaz."
+    starter_code: |
+      def parse_probabilities(raw_values: list[str]) -> list[float]:
+          probs = []
+          for item in raw_values:
+              try:
+                  probs.append(float(item))
+              except:
+                  pass
+          return probs
+    tests:
+      - name: Düzgün ehtimallar siyahısı
+        code: |
+          assert parse_probabilities(["0.0", "0.25", "1.0"]) == [0.0, 0.25, 1.0]
+      - name: Ədəd olmayan string ValueError qaldırır
+        code: |
+          try:
+              parse_probabilities(["0.5", "bad", "0.2"])
+              assert False, "ValueError gözlənilirdi"
+          except ValueError:
+              pass
+      - name: "[0, 1] aralığından kənar ədəd ValueError qaldırır"
+        code: |
+          for out_of_range in [["-0.1"], ["1.05"]]:
+              try:
+                  parse_probabilities(out_of_range)
+                  assert False, f"{out_of_range} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def parse_probabilities(raw_values: list[str]) -> list[float]:
+          probs: list[float] = []
+          for item in raw_values:
+              val = float(item)
+              if val < 0.0 or val > 1.0:
+                  raise ValueError(f"probability must be in [0, 1], got {val}")
+              probs.append(val)
+          return probs
+    explanation: |
+      `except: pass` silindikdə həm yanlış string formatı (`float("bad")`), həm də `[0, 1]` aralığından kənar ehtimallar dərhal aşkarlanır və səssizcə siyahıdan itmir.
+  - id: ex-pyerr-predict-try-flow
+    type: text
+    title: "Predict the output: try/except axını"
+    prompt: |
+      ```python
+      def check(x):
+          try:
+              val = int(x)
+              if val < 0:
+                  raise ValueError("neg")
+              return val * 2
+          except ValueError:
+              return -1
+
+      print(check("4"), check("-3"), check("abc"))
+      ```
+      Nə çap olunacaq?
+    skills: [py-errors, debugging]
+    category: predict-output
+    difficulty: 1
+    accepted: ["8 -1 -1"]
+    hints:
+      - "`int(\"4\")` → `4` → `8`."
+      - Həm `raise ValueError("neg")`, həm də `int("abc")` eyni `except ValueError:` blokuna düşür.
+    explanation: |
+      `"4"` normal keçir (`8`). `"-3"` üçün `if val < 0` şərti `ValueError` qaldırır və `except` onu tutub `-1` qaytarır. `"abc"` üçün `int("abc")` özü `ValueError` qaldırır və yenə `-1` qaytarılır.
+references:
+  - title: Python Tutorial — Errors and Exceptions
+    url: https://docs.python.org/3/tutorial/errors.html
+    note: Rəsmi Python exception handling bələdçisi
+  - title: Built-in Exceptions — Python Documentation
+    url: https://docs.python.org/3/library/exceptions.html
+    note: Standart exception iyerarxiyası (ValueError, TypeError, KeyError)

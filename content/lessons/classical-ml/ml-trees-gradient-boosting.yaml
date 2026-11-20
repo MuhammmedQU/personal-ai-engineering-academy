@@ -1,0 +1,466 @@
+id: ml-trees-gradient-boosting
+track: classical-ml
+module: ml-algorithms
+title: "Decision Trees, Random Forest və Gradient Boosting — cədvəl datasının çempionları"
+summary: "Qərar ağaclarının Gini Impurity ilə necə bölündüyünü, Random Forest-in (Bagging) dispersiyanı necə azaltdığını və Gradient Boosted Decision Trees-in (XGBoost / LightGBM / HistGradientBoosting) qalıq xətaları (pseudo-residuals) ardıcıl düzəldərək cədvəl datasında niyə lider olduğunu öyrənəcəksən."
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [ml-overfitting-regularization]
+next: ml-kmeans-pca-unsupervised
+skills: [ml-algorithms, ml-generalization]
+objectives:
+  - "Gini Impurity ($G$) və çəkili təmizlik qazancını ($\\Delta G$) əllə və Python-da hesablamaq"
+  - "Bagging (Random Forest) ilə Boosting (Gradient Boosted Trees) arasındakı fundamental bias-variance fərqini izah etmək"
+  - "Gradient Boosting-in addım-addım yenilənmə düsturunu ($\\hat{y}_i^{(m)} = \\hat{y}_i^{(m-1)} + \\eta \\cdot h_m(x_i)$) və pseudo-residual anlayışını tətbiq etmək"
+  - "GBDT hiperparametrlərini (`max_depth`, `learning_rate`, `n_estimators`, `min_samples_leaf`, early stopping) düzgün tənzimləmək"
+why_it_matters: |
+  Sənayedəki real ML problemlərinin böyük əksəriyyəti — kredit riski (scoring), müştəri itkisi (churn), fırıldaqçılıq (fraud detection), qiymət və tələb proqnozu — **cədvəl (tabular) datası** üzərində qurulur.
+
+  Deep Learning şəkil, səs və mətndə inqilab etsə də, strukturlaşdırılmış cədvəl datasında **Gradient Boosted Decision Trees (XGBoost, LightGBM, CatBoost, scikit-learn `HistGradientBoosting`)** hələ də ən güclü, ən sürətli öyrənən və ən etibarlı standartdır. Tək bir ağacın necə qərar verdiyini və yüzlərlə dayaz ağacın bir-birinin səhvini necə ardıcıl düzəltdiyini başa düşmək səni "sadəcə `.fit()` çağıran" istifadəçidən şüurlu ML mühəndisinə çevirir.
+terms:
+  - term: Gini Impurity (Gini qarışıqlığı)
+    definition: "Düymədəki (node) siniflərin nə qədər qarışıq olduğunu ölçən ədəd: $G = 1 - \\sum_{k=1}^K p_k^2$. Tam təmiz düymədə $G = 0$, bərabər bölünmüş ikili sinifdə $G = 0.5$."
+  - term: Impurity Reduction (Təmizlik qazancı)
+    definition: "Bölünmədən əvvəlki qarışıqlıq ilə sol və sağ uşaq düymələrinin çəkili orta qarışıqlığı arasındakı fərq ($\\Delta G$). Ağac hər addımda $\\Delta G$-ni maksimum edən xüsusiyyət və həddi (threshold) seçir."
+  - term: Bagging (Bootstrap Aggregating)
+    definition: "Datanın təsadüfi alt-seçmələri üzərində müstəqil modelləri paralel öyrədib nəticələrini ortalamaq (və ya səsvermə keçirmək). Əsas məqsədi yüksək dispersiyanı (variance) azaltmaqdır."
+  - term: Random Forest
+    definition: "Bagging + hər bölünmədə yalnız təsadüfi seçilmiş xüsusiyyətlər alt-çoxluğuna baxan dərin qərar ağacları ansamblı."
+  - term: Gradient Boosted Decision Trees (GBDT)
+    definition: "Ağacları ardıcıl (sequential) öyrədən ansambl: hər yeni dayaz ağac əvvəlki ağacların buraxdığı qalıq xətanı (pseudo-residual) proqnozlaşdırır."
+  - term: Pseudo-residual (Qalıq xəta)
+    definition: "Loss funksiyasının cari proqnoza görə mənfi qradiyenti. MSE loss üçün bu sadəcə həqiqi dəyərlə cari proqnozun fərqidir: $r_i^{(m)} = y_i - \\hat{y}_i^{(m-1)}$."
+  - term: Shrinkage (Learning rate, η)
+    definition: "Hər yeni ağacın töhfəsini kiçildən əmsal ($0 < \\eta \\le 1$). Kiçik $\\eta$ overfitting-in qarşısını alır, lakin daha çox ağac (`n_estimators`) tələb edir."
+sections:
+  - id: tree-splits-and-ensembles
+    kind: explanation
+    title: "Qərar ağacları, Random Forest və Gradient Boosting necə işləyir?"
+    body: |
+      ### 1. Decision Tree (Qərar Ağacı): Bölünmə necə seçilir?
+
+      Qərar ağacı datanı ardıcıl `if-else` sualları (`income >= 800?`, `missed_payments > 1?`) ilə daha təmiz alt-qruplara bölür. Bəs ağac yüzlərlə mümkün xüsusiyyət və kəsim nöqtəsi (threshold) arasından **ən yaxşı sualı** necə tapır?
+
+      Təsnifat (classification) məsələlərində ən çox istifadə olunan meyar **Gini Impurity** düsturudur:
+
+      $$G = 1 - \sum_{k=1}^{K} p_k^2$$
+
+      Simvollar:
+      - $K$ — siniflərin ümumi sayı (məsələn, ikili təsnifatda $K = 2$)
+      - $p_k$ — həmin düymədəki (node) nümunələrin $k$-cı sinfə aid olma payı ($0 \le p_k \le 1$, $\sum_{k=1}^K p_k = 1$)
+      - $G$ — düymənin qarışıqlıq dərəcəsi. Əgər bütün nümunələr eyni sinifdədirsə ($p_1 = 1, p_2 = 0$), $G = 1 - (1^2 + 0^2) = 0.0$ (**tam təmiz**). İkili təsnifatda siniflər 50/50 qarışıbsa ($p_1 = 0.5, p_2 = 0.5$), $G = 1 - (0.25 + 0.25) = 0.50$ (**maksimum qarışıqlıq**).
+
+      Bir valideyn düyməni ($n$ nümunə) sol ($n_L$ nümunə) və sağ ($n_R$ nümunə) uşaq düymələrinə böləndə **çəkili qarışıqlıq azalması (weighted impurity reduction)** hesablanır:
+
+      $$\Delta G = G_{\text{parent}} - \left(\frac{n_L}{n} G_L + \frac{n_R}{n} G_R\right)$$
+
+      Simvollar:
+      - $G_{\text{parent}}$ — bölünmədən əvvəlki düymənin Gini qarışıqlığı
+      - $n, n_L, n_R$ — uyğun olaraq valideyn, sol uşaq və sağ uşaq düymələrindəki nümunə sayı ($n = n_L + n_R$)
+      - $G_L, G_R$ — sol və sağ uşaq düymələrinin Gini qarışıqlığı
+      - $\Delta G$ — bölünmənin gətirdiyi təmizlik qazancı. Ağac bütün xüsusiyyətlər və hədlər üzrə axtarış edib **$\Delta G$-ni maksimum edən** bölünməni seçir.
+
+      ---
+
+      ### 2. Tək ağacın problemi və iki ansambl fəlsəfəsi: Bagging vs Boosting
+
+      Məhdudiyyət qoyulmayan tək bir qərar ağacı bütün yarpaqlar təmiz olana qədər bölünür — nəticədə training datasındakı küyü əzbərləyir (**aşağı bias, çox yüksək variance / overfitting**). Datanın kiçik dəyişməsi tamamilə fərqli ağac yaradır.
+
+      Bu problemi həll etmək üçün iki fərqli ansambl yanaşması var:
+
+      | Xüsusiyyət | Random Forest (Bagging) | Gradient Boosting (GBDT) |
+      |---|---|---|
+      | **Quruluş** | Ağaclar **paralel** və bir-birindən müstəqil öyrənir | Ağaclar **ardıcıl (sequential)** öyrənir; hər ağac əvvəlkilərin xətasını düzəldir |
+      | **Ağacların dərinliyi** | Adətən **dərin** ağaclar (aşağı bias, yüksək variance) | Adətən **dayaz** ağaclar (`max_depth=3..6`, yüksək bias, aşağı variance — "weak learners") |
+      | **Əsas hədəfi** | Müstəqil ağacları ortalayaraq **variance-ı (dispersiyanı) azaltmaq** | Ardıcıl düzəlişlərlə **bias-ı (sistematik xətanı) azaltmaq** |
+      | **Çox ağac (`n_estimators`) riski** | Daha çox ağac demək olar ki, overfitting yaratmır | Həddindən artıq ağac küyü əzbərləyir (**early stopping** lazımdır) |
+
+      ---
+
+      ### 3. Gradient Boosted Decision Trees (GBDT) riyaziyyatı
+
+      Tutaq ki, reqressiya məsələsini MSE loss $L(y_i, \hat{y}_i) = \frac{1}{2}(y_i - \hat{y}_i)^2$ ilə həll edirik.
+
+      1. **Başlanğıc addım ($m = 0$):** Model bütün nümunələr üçün sabit başlanğıc proqnoz verir (məsələn, hədəfin ortalaması $\hat{y}_i^{(0)} = \bar{y}$).
+      2. **Hər $m = 1, 2, \dots, M$ addımında:**
+         - Cari proqnozun **pseudo-residual (qalıq xəta)** dəyərini hesablayırıq:
+           $$r_i^{(m)} = -\frac{\partial L(y_i, \hat{y}_i^{(m-1)})}{\partial \hat{y}_i^{(m-1)}} = y_i - \hat{y}_i^{(m-1)}$$
+         - Yeni dayaz qərar ağacı $h_m(x)$ həqiqi $y$-i deyil, məhz **bu qalıq xətaları ($r_i^{(m)}$)** proqnozlaşdırmaq üçün öyrədilir!
+         - Ümumi proqnoz **learning rate (shrinkage) $\eta$** ilə yenilənir:
+           $$\hat{y}_i^{(m)} = \hat{y}_i^{(m-1)} + \eta \cdot h_m(x_i)$$
+
+      $M$ ağacdan sonra yekun proqnoz başlanğıc dəyərlə bütün ağacların kiçildilmiş düzəlişlərinin cəmidir:
+
+      $$\hat{y}_i^{(M)} = \hat{y}_i^{(0)} + \eta \sum_{m=1}^{M} h_m(x_i)$$
+
+      ---
+
+      ### 4. Niyə GBDT cədvəl datasında dominantdır və əsas hiperparametrlər
+
+      Cədvəl datasında xüsusiyyətlər fərqli ölçü vahidlərində olur (yaş, maaş, kateqoriya, boş dəyərlər) və hədəflə qeyri-xətti, kəskin hədd (threshold) əlaqələrinə malikdir. Ağac əsaslı modellər:
+      - **Feature scaling tələb etmir** (monoton çevrilmələr bölünmə sırasını dəyişmir),
+      - **Xüsusiyyətlər arası qarşılıqlı təsiri (feature interactions)** avtomatik tutur (`yaş < 25 VƏ kredit_tarixçəsi == yox`),
+      - `LightGBM`, `XGBoost` və `HistGradientBoosting` boş dəyərləri (`NaN`) özü optimal budağa yönləndirir.
+
+      **Əsas hiperparametrlər:**
+      - `max_depth` (və ya LightGBM-də `num_leaves`): Hər ağacın mürəkkəbliyi. GBDT-də adətən `3` ilə `6` arasında saxlanılır.
+      - `learning_rate` ($\eta$): Hər ağacın addım ölçüsü (adətən `0.01` – `0.1`). Kiçik $\eta$ daha yaxşı ümumiləşdirir.
+      - `n_estimators` ($M$): Ağacların sayı. `learning_rate` kiçildikcə `n_estimators` artırılmalıdır.
+      - `min_samples_leaf` (və ya `min_child_samples`): Yarpaqda tələb olunan minimum nümunə sayı — tək-tük outlier-lərin özünə ayrıca yarpaq açmasının qarşısını alır.
+      - **Early Stopping:** Validation loss ardıcıl $p$ addım ərzində yaxşılaşmadıqda yeni ağac əlavə etməyi dayandırır.
+  - id: golf-putts-vs-crowd-vote
+    kind: analogy
+    title: "Mental model: Müstəqil münsiflər heyəti (Random Forest) vs Qolf zərbələri (Gradient Boosting)"
+    body: |
+      Təsəvvür et ki, bir evin bazar qiymətini ($y = 180\,000\text{ AZN}$) tapmaq istəyirsən.
+
+      - **Random Forest (Bagging) — Müstəqil münsiflər heyəti:**
+        100 fərqli qiymətləndiricini ayrı-ayrı otaqlara salırsan. Hər birinə şəhərdəki ev satışlarının təsadüfi bir hissəsini və evin xüsusiyyətlərinin yalnız bir qismini verirsən. Biri $195\,000$, digəri $168\,000$, üçüncüsü $179\,000$ deyir. Onlar bir-birinin cavabını **görmür**. Sonda 100 nəfərin ortalamasını götürürsən — fərdi təsadüfi səhvlər bir-birini sıfırlayır (**variance azalır**).
+
+      - **Gradient Boosting (GBDT) — Qolfçunun ardıcıl zərbələri:**
+        Topu dəliyə ($180\,000$) salmaq istəyirsən:
+        1. **Başlanğıc təxmin ($\hat{y}^{(0)}$):** Şəhər üzrə orta qiyməti götürürsən: $100\,000$. Dəliyə qalan məsafə (**residual** $r^{(1)}$) $= +80\,000$.
+        2. **1-ci ağac ($h_1$):** Yalnız qalan $+80\,000$ fərqi izah etməyə çalışır. Amma topu dəlikdən keçirməmək üçün tam gücünlə yox, ehtiyatlı əmsalla ($\eta = 0.25$) vurursan: proqnoz $100\,000 + 0.25 \times 80\,000 = 120\,000$ olur.
+        3. **2-ci ağac ($h_2$):** İndi yeni qalan məsafəni ($r^{(2)} = 180\,000 - 120\,000 = +60\,000$) ölçür və yenə ehtiyatlı düzəliş edir.
+
+        Hər növbəti ağac əvvəlki zərbələrin topu harada saxladığına baxır və yalnız **qalan məsafəni** düzəldir.
+  - id: bagging-vs-boosting-flow
+    kind: diagram
+    title: "Random Forest (Paralel Bagging) vs Gradient Boosting (Ardıcıl Residual öyrənmə)"
+    body: |
+      ```mermaid
+      flowchart TD
+        subgraph RF["Random Forest (Bagging — Paralel)"]
+          D1["Training Data"] --> T1["Ağac 1 (dərin)"]
+          D1 --> T2["Ağac 2 (dərin)"]
+          D1 --> T3["Ağac 3 (dərin)"]
+          T1 --> AVG["Ortalama / Səsvermə"]
+          T2 --> AVG
+          T3 --> AVG
+        end
+
+        subgraph GB["Gradient Boosting (Sequential — Ardıcıl)"]
+          P0["Başlanğıc proqnoz: y_hat^(0)"] --> R1["Residual r^(1) = y - y_hat^(0)"]
+          R1 --> B1["Dayaz Ağac h_1(x)"]
+          B1 --> P1["y_hat^(1) = y_hat^(0) + η * h_1(x)"]
+          P1 --> R2["Residual r^(2) = y - y_hat^(1)"]
+          R2 --> B2["Dayaz Ağac h_2(x)"]
+          B2 --> P2["y_hat^(2) = y_hat^(1) + η * h_2(x)"]
+        end
+      ```
+
+      Diaqramdakı əsas fərqə diqqət yetir: Random Forest-də Ağac 2-ni öyrətmək üçün Ağac 1-in bitməsini gözləmək lazım deyil (tam paraleldir). Gradient Boosting-də isə $h_2(x)$ ağacının hədəf dəyərləri ($r^{(2)}$) yalnız $\hat{y}^{(1)}$ hesablandıqdan sonra məlum olur.
+  - id: worked-gini-and-boosting-steps
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: Gini bölünməsi və Boosting yenilənməsi"
+    body: |
+      ### Hissə A: Gini Impurity ilə ən yaxşı bölünmənin seçilməsi
+
+      Valideyn düymədə $n = 6$ kredit müraciəti var: 3 nəfər krediti qaytarıb (`1`), 3 nəfər gecikdirib (`0`).
+      - Valideyn düymədə sinif payları: $p_1 = \frac{3}{6} = 0.5$, $p_0 = \frac{3}{6} = 0.5$.
+      - Valideynin Gini qarışıqlığı:
+        $$G_{\text{parent}} = 1 - (0.5^2 + 0.5^2) = 1 - 0.50 = 0.50$$
+
+      Tutaq ki, ağac `gəlir >= 800 AZN` şərtini yoxlayır:
+      - **Sol düymə (`gəlir >= 800`):** $n_L = 2$ nümunə, etiketlər `[1, 1]`.
+        - $p_1 = 1.0, p_0 = 0.0 \implies G_L = 1 - (1^2 + 0^2) = 0.0$ (tam təmiz!)
+      - **Sağ düymə (`gəlir < 800`):** $n_R = 4$ nümunə, etiketlər `[1, 0, 0, 0]`.
+        - $p_1 = \frac{1}{4} = 0.25, p_0 = \frac{3}{4} = 0.75$
+        - $G_R = 1 - (0.25^2 + 0.75^2) = 1 - (0.0625 + 0.5625) = 1 - 0.625 = 0.375$
+
+      **Çəkili orta qarışıqlıq və təmizlik qazancı ($\Delta G$):**
+
+      $$G_{\text{weighted}} = \frac{2}{6}(0.0) + \frac{4}{6}(0.375) = 0 + 0.25 = 0.25$$
+
+      $$\Delta G = G_{\text{parent}} - G_{\text{weighted}} = 0.50 - 0.25 = 0.25$$
+
+      ---
+
+      ### Hissə B: Gradient Boosting-in 2 ardıcıl ağacla proqnoz yeniləməsi
+
+      Bir mənzilin həqiqi qiyməti $y = 80$ (min AZN), başlanğıc proqnoz $\hat{y}^{(0)} = 50$, learning rate $\eta = 0.2$-dir.
+
+      | Addım ($m$) | Cari proqnoz $\hat{y}^{(m-1)}$ | Qalıq xəta $r^{(m)} = y - \hat{y}^{(m-1)}$ | Ağacın çıxışı $h_m(x)$ | Yenilənmiş proqnoz $\hat{y}^{(m)} = \hat{y}^{(m-1)} + \eta \cdot h_m(x)$ | Yeni qalıq $y - \hat{y}^{(m)}$ |
+      |---|---|---|---|---|---|
+      | **1** | $50.0$ | $80 - 50 = 30.0$ | $30.0$ | $50.0 + 0.2 \times 30.0 = \mathbf{56.0}$ | $80 - 56.0 = \mathbf{24.0}$ |
+      | **2** | $56.0$ | $80 - 56 = 24.0$ | $20.0$ | $56.0 + 0.2 \times 20.0 = \mathbf{60.0}$ | $80 - 60.0 = \mathbf{20.0}$ |
+
+      Göründüyü kimi, qalıq xəta $30.0 \to 24.0 \to 20.0$ şəklində addım-addım kiçilir.
+  - id: gbdt-python-and-sklearn
+    kind: code
+    title: "Kod: Gini, Boosting mexanikası və scikit-learn HistGradientBoosting"
+    body: |
+      Əvvəlcə Gini Impurity və Gradient Boosting toplama mexanizmini saf Python-da yazaq, sonra isə production-da istifadə olunan `HistGradientBoostingClassifier` (LightGBM alqoritminin scikit-learn qarşılığı) konfiqurasiyasına baxaq:
+
+      ```python
+      from collections import Counter
+
+
+      def gini_impurity(labels: list[int]) -> float:
+          """Calculate Gini impurity G = 1 - sum(p_k^2). Empty list -> 0.0."""
+          if not labels:
+              return 0.0
+          n = len(labels)
+          counts = Counter(labels)
+          return 1.0 - sum((c / n) ** 2 for c in counts.values())
+
+
+      def weighted_gini_gain(parent: list[int], left: list[int], right: list[int]) -> float:
+          """Calculate impurity reduction Delta G for a binary split."""
+          n = len(parent)
+          if n == 0:
+              return 0.0
+          g_parent = gini_impurity(parent)
+          g_children = (len(left) / n) * gini_impurity(left) + (len(right) / n) * gini_impurity(right)
+          return g_parent - g_children
+
+
+      print(round(gini_impurity([1, 1, 1, 0, 0, 0]), 4))  # 0.5
+      print(round(weighted_gini_gain([1, 1, 1, 0, 0, 0], [1, 1], [1, 0, 0, 0]), 4))  # 0.25
+      ```
+
+      **Real layihədə `HistGradientBoostingClassifier` və Early Stopping:**
+
+      ```python
+      # Real production konfiqurasiyası (scikit-learn >= 1.0)
+      from sklearn.ensemble import HistGradientBoostingClassifier
+
+      model = HistGradientBoostingClassifier(
+          learning_rate=0.05,        # kiçik addım ölçüsü (shrinkage)
+          max_iter=500,              # maksimum ağac sayı (n_estimators)
+          max_depth=4,               # dayaz ağaclar -> yüksək dərəcəli overfitting-in qarşısını alır
+          min_samples_leaf=20,       # hər yarpaqda ən azı 20 nümunə olsun
+          early_stopping=True,       # validation loss yaxşılaşmayanda avtomatik dayan
+          validation_fraction=0.15,  # early stopping üçün ayrılan daxili validation payı
+          n_iter_no_change=15,       # 15 ağac boyunca yaxşılaşma olmasa dayandır
+          random_state=42,
+      )
+      ```
+
+      Vacib detallar:
+      - `max_depth=4` hər ağaca ən çox $2^4 = 16$ yarpaq icazə verir. Tək ağac üçün bu azdır, amma yüzlərlə ardıcıl ağac üçün ideal nizamlayıcıdır.
+      - `early_stopping=True` sayəsində `max_iter=500` yazsaq belə, əgər 140-cı ağacdan sonra validation loss düşmürsə, model 140-cı ağacda dayanır.
+  - id: gbdt-common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər: GBDT-ni necə korlamaq olar?"
+    body: |
+      **1. GBDT-də Random Forest kimi dərin ağaclar (`max_depth=15..20`) istifadə etmək**
+      Random Forest-də dərin ağaclar müstəqil olduğu üçün ortalananda küy azalır. GBDT-də isə 1-ci ağac `max_depth=15` ilə bütün qalıqları sıfırlayıb küyü əzbərləsə, sonrakı ağacların öyrənəcəyi faydalı siqnal qalmır — model dərhal overfit olur. **Düzəliş:** GBDT-də `max_depth` adətən `3..6` aralığında seçilir.
+
+      **2. `learning_rate` və `n_estimators`-ı bir-birindən ayrı tənzimləmək**
+      `learning_rate`-i `0.1`-dən `0.01`-ə salıb `n_estimators=100` saxlasan, model hələ hədəfə çatmamış dayanacaq (**underfitting**). Əksinə, `learning_rate=0.3` ilə `n_estimators=2000` versən, model validation datasını əzbərləyəcək (**overfitting**). **Düzəliş:** `learning_rate`-i kiçiltdikdə `n_estimators`-ı artır və həmişə **validation set üzərində early stopping** qoş.
+
+      **3. Ağac modellərindən xətti ekstrapolyasiya (extrapolation) gözləmək**
+      Qərar ağacları yalnız training datasında gördüyü minimum və maksimum hədəf dəyərləri arasında sabit pilləli (`piecewise-constant`) proqnozlar verir. Əgər training-də ev sahəsi $40..150\text{ m}^2$ və maksimum qiymət $250\,000\text{ AZN}$ olubsa, ağac modeli $300\text{ m}^2$-lik villaya da ən sağ yarpağın qiymətini ($250\,000\text{ AZN}$) verəcək! **Düzəliş:** Zaman sıralarında trend varsa, hədəfi fərqlərə (`diff` / faiz dəyişimi) çevir və ya xətti/hibrid model istifadə et.
+
+      **4. İmbalans datada yarpaq ölçüsünü (`min_samples_leaf`) nəzərə almamaq**
+      Nadir fırıldaqçılıq (0.5% fraud) datasında `min_samples_leaf=500` qoysan, heç bir yarpaq azlıq sinfini ayıra bilməyəcək. Digər tərəfdən `min_samples_leaf=1` qoysan, tək bir səhv etiketlənmiş sətir özünə ayrıca qayda yaradacaq.
+  - id: tabular-model-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndis seçimləri: Hansı cədvəl modelini nə vaxt seçməli?"
+    body: |
+      | Meyar | Logistic / Linear Regression | Random Forest | Gradient Boosting (XGBoost / LightGBM) |
+      |---|---|---|---|
+      | **Dəqiqlik (Tabular data)** | Orta (yalnız xətti sərhədlər) | Yüksək | **Ən yüksək** (adətən qalib) |
+      | **Hiperparametr həssaslığı** | Çox aşağı | Aşağı (default-larla yaxşı işləyir) | **Yüksək** (`lr`, `depth`, early stopping vacibdir) |
+      | **Ekstrapolyasiya (Trend)** | **Bəli** (xətti davam edir) | Xeyr (sərhəddə sabit qalır) | Xeyr (sərhəddə sabit qalır) |
+      | **İzaholunma (Interpretability)** | Çox yüksək (birbaşa əmsallar $w_j$) | Orta (Feature Importance / SHAP) | Orta (SHAP values, Monotonic Constraints) |
+      | **İnferens gecikməsi (Latency)** | Mikrosaniyə ($\mu s$) | Millisaniyə (dərin ağaclar böyükdür) | Sub-millisaniyə (dayaz ağaclar sürətlidir) |
+
+      **Praktik qayda:**
+      1. Həmişə sadə `LogisticRegression` / `Ridge` ilə **baseline** qur.
+      2. Sonra sürətli və az tənzimləmə istəyən `RandomForest` və ya default `HistGradientBoosting` yoxla.
+      3. Maksimum keyfiyyət lazımdırsa, `LightGBM` / `XGBoost` + early stopping + SHAP analizi tətbiq et.
+mastery_criteria:
+  - "İstənilən ikili bölünmə üçün valideyn və uşaq düymələrinin Gini Impurity dəyərini və $\\Delta G$ qazancını düzgün hesablayırsan"
+  - "Başlanğıc proqnoz, ağac çıxışları və learning rate verildikdə GBDT-nin addım-addım yenilənmiş proqnozunu və qalıq xətasını çıxara bilirsən"
+  - "Random Forest ilə GBDT-nin `max_depth` və `n_estimators` davranışındakı fərqi bias-variance baxımından əsaslandıra bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlgb-gini-pure
+      type: numeric
+      title: "Gini Impurity hesabı"
+      prompt: |
+        Bir qərar ağacı düyməsində 10 nümunə var: onların 8-i `1` sinfinə, 2-si isə `0` sinfinə aiddir.
+        Bu düymənin **Gini Impurity ($G = 1 - \sum p_k^2$)** dəyərini hesabla.
+      skills: [ml-algorithms]
+      category: math
+      answer: 0.32
+      tolerance: 0.005
+      hints:
+        - "$p_1 = 8/10 = 0.8$ və $p_0 = 2/10 = 0.2$."
+        - "$G = 1 - (0.8^2 + 0.2^2)$ ifadəsini hesabla."
+      explanation: "$p_1 = 0.8, p_0 = 0.2 \\implies G = 1 - (0.64 + 0.04) = 1 - 0.68 = 0.32$."
+    - id: q-mlgb-bagging-vs-boosting
+      type: mcq
+      title: "Random Forest vs Gradient Boosting"
+      prompt: "Gradient Boosted Decision Trees (GBDT) modelində hər yeni ağac ($h_m$) nəyi proqnozlaşdırmaq üçün öyrədilir?"
+      skills: [ml-algorithms]
+      category: concept
+      options:
+        - id: a
+          text: "Orijinal hədəf dəyərini ($y$) təsadüfi bootstrap seçməsi üzərində sıfırdan proqnozlaşdırmaq üçün"
+          feedback: "Xeyr — bu Random Forest (Bagging) yanaşmasıdır."
+        - id: b
+          text: "Əvvəlki ağaclar ansamblının buraxdığı qalıq xətaları (pseudo-residuals $r_i^{(m)} = y_i - \\hat{y}_i^{(m-1)}$) proqnozlaşdırmaq üçün"
+          feedback: "Doğru! GBDT-də hər yeni ağac əvvəlki mərhələnin qalıq xətasını (loss-un mənfi qradiyentini) düzəltməyə öyrədilir."
+        - id: c
+          text: "Əvvəlki ağacın ən yüksək Gini qarışıqlığına malik yarpağını iki yerə bölmək üçün"
+          feedback: "Xeyr — hər ağac bütün nümunələrin cari qalıq xətaları üzərində yeni ağac kimi qurulur."
+        - id: d
+          text: "Xüsusiyyətlərin sayını PCA kimi azaltmaq üçün"
+          feedback: "Xeyr — GBDT nəzarətli (supervised) ansambl modelidir, ölçü azaltma metodu deyil."
+      answer: b
+      explanation: "Gradient Boosting-də $m$-ci ağac orijinal $y$-ə deyil, cari ansamblın buraxdığı pseudo-residual-lara ($r_i^{(m)}$) fit olunur və $\\eta$ əmsalı ilə proqnoza əlavə edilir."
+    - id: q-mlgb-hyperparams-multi
+      type: multi
+      title: "GBDT-də overfitting-i azaltmaq"
+      prompt: "Gradient Boosting modelin training-də `ROC-AUC = 0.99`, validation-da isə `ROC-AUC = 0.74` göstərir. Overfitting-i azaltmaq üçün hansı addımlar doğrudur? **Hamısını seç.**"
+      skills: [ml-algorithms, ml-generalization]
+      category: concept
+      options:
+        - id: a
+          text: "`max_depth` dəyərini `12`-dən `4`-ə endirmək"
+          feedback: "Doğru — dayaz ağaclar yüksək dərəcəli saxta qarşılıqlı təsirləri əzbərləyə bilmir."
+        - id: b
+          text: "Validation dəsti üzərində `early_stopping` aktivləşdirmək"
+          feedback: "Doğru — validation loss pisləşməyə başlayanda əlavə ağacların qurulmasını dayandırır."
+        - id: c
+          text: "`min_samples_leaf` dəyərini artırmaq (məsələn, `1`-dən `30`-a)"
+          feedback: "Doğru — yarpaqların tək-tük küylü nümunələrə uyğunlaşmasının qarşısını alır."
+        - id: d
+          text: "`learning_rate`-i `0.05`-dən `0.8`-ə qaldırmaq və `max_depth=20` etmək"
+          feedback: "Yanlış — böyük learning rate və çox dərin ağaclar GBDT-də overfitting-i daha da şiddətləndirir."
+      answers: [a, b, c]
+      explanation: "Dayaz ağaclar (`max_depth=3..6`), daha böyük `min_samples_leaf`, kiçik `learning_rate` və `early_stopping` GBDT-nin əsas requlyarizasiya mexanizmləridir."
+    - id: q-mlgb-tree-extrapolation
+      type: mcq
+      title: "Ağac modellərinin ekstrapolyasiya davranışı"
+      prompt: |
+        Training datasında reklam büdcəsi $x \in [10, 100]$ min AZN, satışlar isə $y \in [50, 400]$ min AZN aralığındadır.
+        Öyrədilmiş Gradient Boosting modelinə $x = 250$ min AZN (training aralığından çox yuxarı) verdikdə model necə davranacaq?
+      skills: [ml-algorithms, ml-generalization]
+      category: concept
+      options:
+        - id: a
+          text: "Xətti trendi davam etdirib təxminən 1000 min AZN proqnoz verəcək"
+          feedback: "Xeyr — qərar ağacları yarpaqlarda xətti tənlik yox, sabit ədəd saxlayır."
+        - id: b
+          text: "Training aralığının ən yuxarı sərhədindəki (`x <= 100`) yarpaqların verdiyi maksimum proqnoza (~400 min AZN) yaxın sabit dəyər qaytaracaq"
+          feedback: "Doğru! Ağacdakı sonuncu `x >= 95` kimi şərt $x=100$ üçün də, $x=250$ üçün də eyni sağ yarpağa düşür."
+        - id: c
+          text: "Avtomatik olaraq `ValueError` qaldıracaq"
+          feedback: "Xeyr — ağac modeli istənilən ədədi `if-else` budaqlarından keçirib mövcud yarpaqlardan birinə salır."
+      answer: b
+      explanation: "Qərar ağacları və onların ansamblları (RF, GBDT) training diapazonundan kənarda ekstrapolyasiya edə bilmir; ən kənar yarpağın sabit dəyərini qaytarır."
+exercises:
+  - id: ex-mlgb-gini-and-boosting
+    type: code
+    title: "Gini Impurity və Gradient Boosting proqnoz toplayıcısını yaz"
+    prompt: |
+      İki funksiyanı müqaviləyə uyğun implementasiya et:
+
+      1. `gini_impurity(labels: list[int]) -> float`:
+         - Verilmiş sinif etiketləri siyahısı üçün $G = 1 - \sum_{k} p_k^2$ hesablayır.
+         - Əgər `labels` boşdursa (`[]`), `0.0` qaytarır.
+
+      2. `gradient_boosting_predictions(init_pred: float, tree_outputs_per_sample: list[list[float]], lr: float) -> list[float]`:
+         - `init_pred` ($\hat{y}_0$): bütün nümunələr üçün başlanğıc proqnoz.
+         - `tree_outputs_per_sample`: hər nümunə ($i$) üçün ardıcıl ağacların çıxışları siyahısı $[h_1(x_i), h_2(x_i), \dots, h_M(x_i)]$.
+         - `lr` ($\eta$): learning rate. Əgər `lr <= 0` olarsa, `ValueError` qaldırmalıdır.
+         - Hər nümunə üçün $\hat{y}_i = \hat{y}_0 + \eta \sum_{m=1}^{M} h_m(x_i)$ dəyərini hesablayıb yeni `list[float]` qaytarır.
+    skills: [ml-algorithms, ml-generalization]
+    category: python
+    difficulty: 2
+    hints:
+      - "`gini_impurity` üçün boş list-i əvvəlcə yoxla (`if not labels: return 0.0`), sonra hər sinfin sayını `len(labels)`-ə bölərək kvadratlarını cəmlə."
+      - "`gradient_boosting_predictions` daxilində əvvəlcə `if lr <= 0: raise ValueError(...)` yoxlamasını yaz."
+      - "Hər `sample_trees` siyahısı üçün `init_pred + lr * sum(sample_trees)` ifadəsi yekun proqnozu verir."
+    starter_code: |
+      def gini_impurity(labels: list[int]) -> float:
+          # TODO: G = 1 - sum(p_k^2) hesabla (boş list üçün 0.0)
+          return -1.0
+
+
+      def gradient_boosting_predictions(
+          init_pred: float,
+          tree_outputs_per_sample: list[list[float]],
+          lr: float,
+      ) -> list[float]:
+          # TODO: lr <= 0 olduqda ValueError qaldır; y_hat = init_pred + lr * sum(h_m) hesabla
+          return []
+    tests:
+      - name: "Gini Impurity: təmiz, bərabər və qeyri-bərabər paylanmalar"
+        code: |
+          assert gini_impurity([]) == 0.0, "Boş list üçün 0.0 qaytarılmalıdır"
+          assert abs(gini_impurity([1, 1, 1, 1]) - 0.0) < 1e-9, "Təmiz düymə üçün Gini 0.0 olmalıdır"
+          assert abs(gini_impurity([1, 0, 1, 0]) - 0.5) < 1e-9, "50/50 bölünmə üçün Gini 0.5 olmalıdır"
+          assert abs(gini_impurity([1, 0, 0, 0]) - 0.375) < 1e-9, "[1, 0, 0, 0] üçün Gini 0.375 olmalıdır"
+      - name: "Gradient Boosting: ardıcıl ağac çıxışlarının toplanması"
+        code: |
+          preds = gradient_boosting_predictions(
+              init_pred=50.0,
+              tree_outputs_per_sample=[[30.0, 20.0], [-10.0, -5.0]],
+              lr=0.2,
+          )
+          assert len(preds) == 2
+          assert abs(preds[0] - 60.0) < 1e-9, f"1-ci nümunə üçün 60.0 gözlənilirdi, alınan: {preds[0]}"
+          assert abs(preds[1] - 47.0) < 1e-9, f"2-ci nümunə üçün 47.0 gözlənilirdi, alınan: {preds[1]}"
+      - name: "Gradient Boosting: lr <= 0 olduqda ValueError və boş nümunələr"
+        code: |
+          assert gradient_boosting_predictions(10.0, [], 0.1) == []
+          raised = False
+          try:
+              gradient_boosting_predictions(10.0, [[1.0]], 0.0)
+          except ValueError:
+              raised = True
+          assert raised, "lr <= 0 olduqda ValueError qaldırılmalıdır"
+    solution: |
+      def gini_impurity(labels: list[int]) -> float:
+          if not labels:
+              return 0.0
+          n = len(labels)
+          counts: dict[int, int] = {}
+          for label in labels:
+              counts[label] = counts.get(label, 0) + 1
+          return 1.0 - sum((count / n) ** 2 for count in counts.values())
+
+
+      def gradient_boosting_predictions(
+          init_pred: float,
+          tree_outputs_per_sample: list[list[float]],
+          lr: float,
+      ) -> list[float]:
+          if lr <= 0:
+              raise ValueError("lr must be positive")
+          return [init_pred + lr * sum(outputs) for outputs in tree_outputs_per_sample]
+    explanation: |
+      `gini_impurity` hər sinfin nisbi tezliyini ($p_k = c_k / n$) tapıb $1 - \sum p_k^2$ hesablayır. `gradient_boosting_predictions` isə hər nümunə üzrə bütün ağacların düzəlişlərini $\eta$ (`lr`) ilə vurub başlanğıc proqnoza əlavə edir.
+  - id: ex-mlgb-residual-numeric
+    type: numeric
+    title: "Gradient Boosting: 1-ci addımdan sonra yenilənmiş proqnoz"
+    prompt: |
+      Gradient Boosting reqressiya modelində bir nümunə üçün:
+      - Həqiqi hədəf dəyəri: $y = 80$
+      - Başlanğıc proqnoz: $\hat{y}^{(0)} = 50$
+      - 1-ci ağacın həmin nümunə üçün çıxışı: $h_1(x) = 30$
+      - Learning rate (shrinkage): $\eta = 0.2$
+
+      1-ci ağac əlavə olunduqdan sonra yenilənmiş proqnozu ($\hat{y}^{(1)} = \hat{y}^{(0)} + \eta \cdot h_1(x)$) hesabla.
+    skills: [ml-algorithms]
+    category: math
+    difficulty: 1
+    answer: 56
+    tolerance: 0.01
+    hints:
+      - "Yenilənmə düsturu: $\\hat{y}^{(1)} = \\hat{y}^{(0)} + \\eta \\cdot h_1(x)$."
+      - "$50 + 0.2 \\times 30$ ifadəsini hesabla."
+    explanation: "$\\hat{y}^{(1)} = 50 + 0.2 \\times 30 = 50 + 6 = 56$. Növbəti (2-ci) ağacın öyrənəcəyi qalıq xəta isə $r^{(2)} = 80 - 56 = 24$ olacaq."
+references:
+  - title: "scikit-learn User Guide — Ensemble methods (Bagging & Gradient Tree Boosting)"
+    url: https://scikit-learn.org/stable/modules/ensemble.html
+    note: "Random Forest və HistGradientBoosting rəsmi sənədləri"
+  - title: "XGBoost Documentation — Introduction to Boosted Trees"
+    url: https://xgboost.readthedocs.io/en/stable/tutorials/model.html
+    note: "Gradient Boosting və ağac requlyarizasiyasının riyazi izahı"

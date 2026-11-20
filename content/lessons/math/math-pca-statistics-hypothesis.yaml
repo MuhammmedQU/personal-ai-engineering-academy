@@ -1,0 +1,389 @@
+id: math-pca-statistics-hypothesis
+track: math
+module: probability-statistics
+title: "Statistik Qiymətləndirmə, Hipotez Testi və PCA — Confidence Interval və Xüsusi Ədədlər"
+summary: "Seçmə ortalaması, qərəzsiz dispersiya (n-1), Standard Error, 95% etibarlılıq intervalı (Confidence Interval) ilə model A/B testlərində səs-küyü həqiqi irəliləyişdən ayırmağı, kovariasiya matrisi və xüsusi ədədlərlə (eigenvalues) PCA ölçü azaltmasını öyrənəcəksən."
+level: core
+estimated_minutes: [55, 80]
+prerequisites: [math-probability-bayes, math-matrices-shapes]
+next: null
+skills: [statistics-basics, matrices-shapes, ml-algorithms]
+objectives:
+  - "Seçmə ortalaması ($\\bar{x}$), qərəzsiz seçmə dispersiyası ($s^2$, $n-1$ məxrəci), standart meyl ($s$) və ortalamanın standart xətasını ($\\text{SE} = s / \\sqrt{n}$) hesablamaq"
+  - "95% Confidence Interval ($\\bar{x} \\pm 1.96 \\cdot \\text{SE}$) qurmaq və kiçik test dəstlərindəki ($n=100$) kiçik metrik artımlarının niyə statistik səs-küy ola biləcəyini əsaslandırmaq"
+  - "Kovariasiya matrisinin ($\\Sigma$) xüsusi ədədləri ($\\lambda_1 \\ge \\dots \\ge \\lambda_d \\ge 0$) vasitəsilə PCA-da izah olunan dispersiya nisbətini ($\\text{EVR}_k$) hesablamaq"
+  - "Verilmiş hədəf informasiya payını (məs. 90% və ya 95%) qorumaq üçün lazım olan minimum baş komponent sayını ($k$) tapmaq"
+why_it_matters: |
+  AI mühəndisliyində iki sual hər həftə qarşına çıxır:
+  1. **"Yeni prompt / model test dəstində dəqiqliyi 82.0%-dən 82.6%-ə qaldırdı — production-a çıxaqmı?"**
+     Əgər test dəstində cəmi $n = 100$ sual varsa, standart xəta $\text{SE} \approx 3.8\%$, 95%-lik etibarlılıq intervalı isə $\pm 7.5\%$-dir! Yəni $+0.6\%$ fərq sadəcə təsadüfi seçmə səs-küyüdür (sampling noise). Statistik savadı olmayan komanda səs-küyün arxasınca qaçıb vaxt itirir.
+  2. **"1536 ölçülü embedding vektorlarımız axtarışda çox yaddaş tutur — məlumatı itirmədən ölçünü 256-ya endirə bilərikmi?"**
+     **Principal Component Analysis (PCA)** kovariasiya matrisinin ən böyük xüsusi ədədlərinə ($\lambda_k$) uyğun istiqamətləri seçərək səs-küylü ölçüləri atır və faydalı dispersiyanın 90–95%-ni saxlayır.
+terms:
+  - term: Sample variance (s²)
+    definition: "Seçmədəki dəyərlərin ortalamadan kvadratik yayılması: $s^2 = \\frac{1}{n-1}\\sum_{i=1}^n (x_i - \\bar{x})^2$. $n-1$ (Bessel düzəlişi) populyasiya dispersiyasını qərəzsiz qiymətləndirmək üçündür."
+  - term: Standard Error of the Mean (SE)
+    definition: "Seçmə ortalamasının ($\\bar{x}$) həqiqi populyasiya ortalaması ($\\mu$) ətrafında nə qədər oynadığını göstərən kəmiyyət: $\\text{SE} = \\frac{s}{\\sqrt{n}}$."
+  - term: 95% Confidence Interval (CI)
+    definition: "$\\bar{x} \\pm 1.96 \\cdot \\text{SE}$ aralığı. Eyni üsulla çoxlu müstəqil seçmə götürsək, qurulan intervalların təxminən 95%-i həqiqi $\\mu$ parametrini öz daxilində saxlayar."
+  - term: Covariance matrix (Σ)
+    definition: "$d$ əlamət arasındakı birgə dəyişkənliyi göstərən $d \\times d$ simmetrik matris; diaqonalda hər əlamətin öz dispersiyası, qeyri-diaqonalda isə cüt-cüt kovariasiyalar dayanır."
+  - term: Eigenvalue (Xüsusi ədəd, λ)
+    definition: "$\\Sigma v_k = \\lambda_k v_k$ tənliyində $v_k$ baş komponent istiqaməti (eigenvector) boyunca datanın nə qədər dispersiyaya (enerjiyə/informasiyaya) malik olduğunu göstərən mənfi olmayan ədəd."
+  - term: Explained Variance Ratio (EVR)
+    definition: "$k$-cı baş komponentin ümumi dispersiyadakı payı: $\\text{EVR}_k = \\frac{\\lambda_k}{\\sum_{j=1}^d \\lambda_j}$."
+sections:
+  - id: stats-ci-and-pca-theory
+    kind: explanation
+    title: "Seçmə Statistikası, 95% Etibarlılıq İntervalı və PCA Riyaziyyatı"
+    body: |
+      ### 1. Seçmə Ortalaması, Qərəzsiz Dispersiya ($n-1$) və Standard Error
+      $n$ müşahidədən ibarət $x_1, x_2, \dots, x_n$ seçməsi (məsələn, $n$ sorğunun gecikmə vaxtı və ya modelin $n$ fold üzrə xətası) verildikdə:
+
+      $$\bar{x} = \frac{1}{n}\sum_{i=1}^n x_i, \qquad s^2 = \frac{1}{n-1}\sum_{i=1}^n (x_i - \bar{x})^2, \qquad s = \sqrt{s^2}$$
+
+      Simvollar:
+      - $n$ — seçmədəki nümunələrin sayı ($n \ge 2$)
+      - $\bar{x}$ — seçmə ortalaması (sample mean)
+      - $s^2$ — qərəzsiz seçmə dispersiyası (unbiased sample variance; məxrəcdə $n-1$ Bessel düzəlişidir, çünki $\bar{x}$ özü həmin seçmədən hesablandığı üçün 1 sərbəstlik dərəcəsi itirilir)
+      - $s$ — seçmə standart meyli (tək-tək müşahidələrin yayılması)
+
+      **Diqqət — $s$ ilə $\text{SE}$ fərqi:** $s$ tək bir müşahidənin nə qədər yayıldığını göstərir. Bizə isə **ortalamanın özünün ($\bar{x}$)** nə qədər dəqiq olduğu lazımdır. Mərkəzi Limit Teoreminə görə ortalamanın standart xətası:
+
+      $$\text{SE} = \frac{s}{\sqrt{n}}, \qquad \text{CI}_{95\%} = \left[\bar{x} - 1.96 \cdot \text{SE},\; \bar{x} + 1.96 \cdot \text{SE}\right]$$
+
+      $\sqrt{n}$ məxrəcdə dayandığı üçün etibarlılıq intervalını **2 dəfə daraltmaq** üçün test nümunələrinin sayını ($n$) **4 dəfə artırmaq** lazımdır!
+
+      ### 2. Kovariasiya Matrisi və PCA (Principal Component Analysis)
+      Mərkəzləşdirilmiş data matrisi $X \in \mathbb{R}^{n \times d}$ üçün kovariasiya matrisi $\Sigma = \frac{1}{n-1} X^\top X$ ölçüsü $d \times d$ olan simmetrik, müsbət yarı-müəyyən matrisdir.
+      Onun xüsusi ədədlərini azalan sırada düzək: $\lambda_1 \ge \lambda_2 \ge \dots \ge \lambda_d \ge 0$.
+      - $\lambda_k$ — $k$-cı baş komponent (Principal Component) oxu üzərindəki dispersiyadır.
+      - Bütün ölçülər üzrə ümumi dispersiya $\sum_{j=1}^d \lambda_j$-yə bərabərdir.
+      - İlk $k$ komponentin saxladığı **kumulyativ izah olunan dispersiya nisbəti (Cumulative Explained Variance Ratio)**:
+
+      $$\text{Cumulative EVR}(k) = \frac{\sum_{i=1}^k \lambda_i}{\sum_{j=1}^d \lambda_j}$$
+  - id: radar-and-shadow-analogy
+    kind: analogy
+    title: "Mental model: Buludlu Radarda Hədəf və 3D Obyektin Kölgəsi"
+    body: |
+      - **Standard Error və Confidence Interval (Radar ekranı):** Tək bir ölçmə ($n=1$) dumanlı havada təyyarənin yerini təxmin etmək kimidir — etibarlılıq dairəsi ($\pm 1.96 \cdot \text{SE}$) çox genişdir. $n=100$ və $n=10\,000$ ölçmə topladıqca duman çəkilir, dairə $\frac{1}{\sqrt{n}}$ sürəti ilə kiçilir. İki modelin dairələri bir-birinin üstünə düşürsə, hansının öndə olduğunu qəti demək olmaz.
+      - **PCA və Xüsusi Ədədlər (3D obyektin ən informativ kölgəsi):** Əlində uzunsov bir qələm (3D bulud) var. İşığı elə bucaqdan salmalısan ki, divardakı 2D kölgə qələmin uzunluğunu maksimum göstərsin ($\lambda_1$ — ən böyük dispersiya oxu). Əgər qələmə düz ucundan baxsan, kölgə sadəcə kiçik bir nöqtə ($\lambda_3 \approx 0$) olar və bütün forma məlumatı itər.
+  - id: ci-and-pca-diagram
+    kind: diagram
+    title: "Model A/B Müqayisəsi və PCA Ölçü Azaltma Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        subgraph AB["Statistik Qiymətləndirmə (95% CI)"]
+          S["n seçmə: x₁..xₙ"] --> M["x̄ və s (n-1)"]
+          M --> SE["SE = s / √n"]
+          SE --> CI["[x̄ - 1.96·SE, x̄ + 1.96·SE]"]
+        end
+
+        subgraph PCA["PCA Ölçü Azaltma"]
+          X["Mərkəzləşmiş X (n × d)"] --> Cov["Σ = XᵀX / (n-1)"]
+          Cov --> Eig["Xüsusi ədədlər: λ₁ ≥ λ₂ ≥ ... ≥ λ_d"]
+          Eig --> TopK["Σ_{i=1..k} λ_i / Σ λ_j ≥ target"]
+        end
+      ```
+  - id: worked-ci-and-evr
+    kind: worked_example
+    title: "Addım-addım rəqəmsal həll: 95% CI və PCA Komponent Seçimi"
+    body: |
+      ### Nümunə 1: 4 eksperiment üzrə 95% Confidence Interval
+      Modelin 4 müstəqil qiymətləndirmə dəstində gecikmə vaxtı (ms): `samples = [10.0, 12.0, 14.0, 16.0]` ($n = 4$).
+      1. **Ortalama:** $\bar{x} = \frac{10 + 12 + 14 + 16}{4} = 13.0$
+      2. **Qərəzsiz dispersiya ($n - 1 = 3$):**
+         $$s^2 = \frac{(10-13)^2 + (12-13)^2 + (14-13)^2 + (16-13)^2}{4 - 1} = \frac{9 + 1 + 1 + 9}{3} = \frac{20}{3} \approx 6.6667$$
+      3. **Standart meyl və Standard Error:**
+         $$s = \sqrt{6.6667} \approx 2.5820, \qquad \text{SE} = \frac{s}{\sqrt{4}} = \frac{2.5820}{2} \approx 1.2910$$
+      4. **95% Etibarlılıq İntervalı:**
+         $$13.0 \pm 1.96 \times 1.2910 = 13.0 \pm 2.5303 \implies [10.47,\; 15.53]$$
+
+      ---
+
+      ### Nümunə 2: PCA Xüsusi Ədədlərindən Ölçü Seçimi
+      5 ölçülü əlamət fəzasının kovariasiya matrisinin xüsusi ədədləri: $\lambda = [5.0, 3.0, 1.0, 0.6, 0.4]$.
+      - **Ümumi dispersiya:** $\sum_{j=1}^5 \lambda_j = 5.0 + 3.0 + 1.0 + 0.6 + 0.4 = 10.0$.
+
+      | Komponent ($k$) | $\lambda_k$ | $\text{EVR}_k = \lambda_k / 10.0$ | Kumulyativ EVR ($\sum_{i=1}^k \text{EVR}_i$) |
+      |---|---|---|---|
+      | 1 | 5.0 | 0.50 (50%) | **0.50 (50%)** |
+      | 2 | 3.0 | 0.30 (30%) | **0.80 (80%)** |
+      | 3 | 1.0 | 0.10 (10%) | **0.90 (90%)** |
+      | 4 | 0.6 | 0.06 (6%) | **0.96 (96%)** |
+      | 5 | 0.4 | 0.04 (4%) | **1.00 (100%)** |
+
+      Əgər hədəfimiz dispersiyanın ən azı **90%-ni (`target_ratio = 0.90`)** saxlamaqdırsa, ilk **$k = 3$** baş komponent kifayətdir (ölçünü 5-dən 3-ə endirdik, informasiyanın 90%-i qaldı!).
+  - id: code-ci-and-pca
+    kind: code
+    title: "Kod — 95% Confidence Interval və PCA Variance Selector"
+    body: |
+      ```python
+      import math
+
+
+      def confidence_interval_95(samples: list[float]) -> tuple[float, float, float]:
+          """Return (mean, lower_95, upper_95) using unbiased sample standard deviation."""
+          n = len(samples)
+          if n < 2:
+              raise ValueError("At least 2 samples are required to compute sample variance")
+          mean = sum(samples) / n
+          variance = sum((x - mean) ** 2 for x in samples) / (n - 1)
+          std_dev = math.sqrt(variance)
+          se = std_dev / math.sqrt(n)
+          margin = 1.96 * se
+          return (mean, mean - margin, mean + margin)
+
+
+      def pca_components_for_variance(
+          eigenvalues: list[float],
+          target_ratio: float,
+      ) -> int:
+          """Return minimum number of top principal components to reach target_ratio."""
+          if not eigenvalues or not (0.0 < target_ratio <= 1.0):
+              raise ValueError("Invalid eigenvalues or target_ratio")
+          sorted_eigs = sorted(eigenvalues, reverse=True)
+          if sorted_eigs[-1] < 0 or sum(sorted_eigs) <= 0:
+              raise ValueError("Eigenvalues of a covariance matrix must be non-negative with positive sum")
+
+          total_var = sum(sorted_eigs)
+          cumulative = 0.0
+          for k, lam in enumerate(sorted_eigs, start=1):
+              cumulative += lam
+              if (cumulative / total_var) + 1e-12 >= target_ratio:
+                  return k
+          return len(sorted_eigs)
+
+
+      mean, lo, hi = confidence_interval_95([10.0, 12.0, 14.0, 16.0])
+      print(f"Mean={mean:.2f}, 95% CI=[{lo:.2f}, {hi:.2f}]")
+      # Mean=13.00, 95% CI=[10.47, 15.53]
+
+      k_needed = pca_components_for_variance([5.0, 3.0, 1.0, 0.6, 0.4], target_ratio=0.90)
+      print("90% dispersiya üçün lazım olan komponent sayı:", k_needed)  # 3
+      ```
+  - id: math-common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən riyazi və ML səhvləri"
+    body: |
+      **1. Standart meyl ($s$) ilə Standard Error ($\text{SE} = s/\sqrt{n}$) qarışıqlığı**
+      Etibarlılıq intervalında $\bar{x} \pm 1.96 \cdot s$ yazmaq kobud səhvdir: $n \to \infty$ artdıqca $s$ sabit qalır (populyasiyanın təbii yayılmasıdır), amma ortalamanın xətası $\text{SE} = s/\sqrt{n}$ sıfıra yaxınlaşır!
+
+      **2. Seçmə dispersiyasında $n-1$ əvəzinə $n$-ə bölmək**
+      `numpy.std(x)` və `numpy.var(x)` default olaraq `ddof=0` ($n$-ə bölmə) istifadə edir! Kiçik seçmələrdə bu, dispersiyanı aşağı qiymətləndirir (biased). Qərəzsiz seçmə standart meyli üçün `ddof=1` ($n-1$) istifadə edilməlidir (`statistics.stdev(x)` Python-da avtomatik $n-1$ istifadə edir).
+
+      **3. PCA-dan əvvəl datanı mərkəzləşdirməmək və scale etməmək**
+      Əgər bir sütun maaş (`0..100 000 AZN`), digəri isə yaş (`18..70`) olarsa, `StandardScaler` tətbiq etmədən PCA işlətsən, 1-ci baş komponent sadəcə maaş sütununu seçəcək — çünki vahid fərqinə görə onun dispersiyası milyon dəfə böyükdür!
+
+      **4. PCA-nı Train/Test bölməsindən əvvəl bütün dataya `fit` etmək (Data Leakage!)**
+      PCA-nın ortalama və xüsusi vektorları **yalnız `X_train`** üzərində `pca.fit(X_train)` ilə öyrənilməli, `X_test`-ə isə yalnız `pca.transform(X_test)` tətbiq olunmalıdır.
+  - id: stats-pca-tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs"
+    body: |
+      - **PCA ilə ölçü azaltma vs Yozula bilmə (Interpretability):** Orijinal əlamətlər (`yaş`, `gəlir`, `gecikmə_günü`) biznes üçün aydın məna daşıyır. PCA-dan çıxan `PC1 = 0.61*yaş - 0.54*gəlir + ...` xətti kombinasiyası isə sıxılma və səs-küy azaldılması üçün əladır, lakin birbaşa insan dilində izah oluna bilmə qabiliyyətini itirir.
+      - **Geniş Eval Set ($n$) xərci vs Statistik Güc:** LLM-i $n = 50$ sualda yoxlamaq ucuz və sürətlidir ($\text{SE}$ böyükdür, yalnız $\ge 10\%$ fərqləri tutur). $n = 2500$ sualda yoxlamaq API xərcini 50 dəfə artırır, lakin $\text{SE}$-ni $\sqrt{50} \approx 7$ dəfə kiçildərək $1.5\%$-lik incə keyfiyyət artımlarını etibarlı görməyə imkan verir.
+      - **Normal paylanma fərziyyəsi ($\pm 1.96 \cdot \text{SE}$):** $1.96$ əmsalı Mərkəzi Limit Teoreminə əsasən $n \ge 30$ üçün yaxşı işləyir. Çox kiçik seçmələrdə ($n < 15$) və ya ağır quyruqlu (heavy-tailed latency) paylanmalarda Student $t$-paylanması və ya Bootstrap resampling daha dəqiqdir.
+mastery_criteria:
+  - "Verilmiş seçmədən $\\bar{x}$, qərəzsiz $s$ ($n-1$), $\\text{SE}$ və 95% etibarlılıq intervalını dəqiq hesablaya bilirsən"
+  - "İki modelin etibarlılıq intervalları kəsişdikdə fərqin statistik əhəmiyyətsiz (səs-küy) olduğunu əsaslandıra bilirsən"
+  - "Xüsusi ədədlər siyahısından izah olunan dispersiya nisbətini (EVR) və hədəf nisbət üçün lazım olan minimum komponent sayını ($k$) tapa bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mathstat-se-quadruple
+      type: mcq
+      title: "Seçmə həcminin Standard Error-a təsiri"
+      prompt: "Qiymətləndirmə dəstindəki nümunələrin sayını $n = 100$-dən $n = 400$-ə (4 dəfə) artırsaq və standart meyl $s$ dəyişməz qalsa, ortalamanın standart xətası ($\\text{SE} = s / \\sqrt{n}$) və 95% etibarlılıq intervalının eni necə dəyişər?"
+      skills: [statistics-basics]
+      category: math
+      options:
+        - id: a
+          text: "4 dəfə kiçilər"
+          feedback: "Məxrəcdə $n$ yox, $\\sqrt{n}$ dayanır: $\\sqrt{400} / \\sqrt{100} = 20 / 10 = 2$."
+        - id: b
+          text: "2 dəfə kiçilər"
+          feedback: "Doğru! $\\text{SE}$ $\\frac{1}{\\sqrt{n}}$ ilə mütənasibdir; $n$ 4 dəfə artanda $\\sqrt{n}$ 2 dəfə artır və $\\text{SE}$ yarıya düşür."
+        - id: c
+          text: "Dəyişməz qalar"
+          feedback: "$s$ sabit qalsa da, $\\text{SE} = s/\\sqrt{n}$ nümunə sayı artdıqca azalır."
+      answer: b
+      explanation: "$\\text{SE} = \\frac{s}{\\sqrt{n}}$ düsturuna görə seçmə sayını 4 dəfə artırmaq standart xətanı $\\sqrt{4} = 2$ dəfə azaldır."
+    - id: q-mathstat-ab-overlap
+      type: mcq
+      title: "Model A/B testində etibarlılıq intervalının şərhi"
+      prompt: "Model A-nın dəqiqliyi 95% CI ilə $80.0\\% \\pm 3.0\\%$ ($[77.0\\%, 83.0\\%]$), yeni Model B-nin dəqiqliyi isə eyni ölçülü testdə $81.2\\% \\pm 3.0\\%$ ($[78.2\\%, 84.2\\%]$) çıxıb. Hansı mühəndis qərarı statistik cəhətdən doğrudur?"
+      skills: [statistics-basics, ml-algorithms]
+      category: ml-metric
+      options:
+        - id: a
+          text: "Model B $+1.2\\%$ daha yüksəkdir, deməli mütləq daha yaxşıdır"
+          feedback: "$+1.2\\%$ fərq $\\pm 3.0\\%$ qeyri-müəyyənlik marjasından xeyli kiçikdir."
+        - id: b
+          text: "Fərq ($+1.2\\%$) etibarlılıq intervallarının səs-küy marjası ($\\pm 3.0\\%$) daxilindədir; mövcud seçmə həcmi ilə Model B-nin həqiqətən üstün olduğunu iddia etmək olmaz"
+          feedback: "Doğru! İntervallar güclü şəkildə üst-üstə düşür; qərar üçün ya daha böyük eval set ($n$), ya da cütləşmiş (paired) test lazımdır."
+        - id: c
+          text: "Model A daha yaxşıdır"
+          feedback: "Heç birinin digərindən statistik əhəmiyyətli fərqi sübut olunmayıb."
+      answer: b
+      explanation: "Müşahidə olunan fərq ($1.2\\%$) standart xəta marjasından kiçik olduqda, nəticə təsadüfi seçmə səs-küyündən fərqləndirilə bilmir."
+    - id: q-mathstat-bessel-correction
+      type: mcq
+      title: "Niyə seçmə dispersiyasında (n - 1) istifadə olunur?"
+      prompt: "Qərəzsiz seçmə dispersiyası düsturunda $s^2 = \\frac{1}{n-1}\\sum_{i=1}^n (x_i - \\bar{x})^2$ məxrəcdə $n$ əvəzinə $n-1$ (Bessel düzəlişi) yazılmasının səbəbi nədir?"
+      skills: [statistics-basics]
+      category: math
+      options:
+        - id: a
+          text: "Sıfıra bölmənin qarşısını almaq üçün"
+          feedback: "$n=1$ olduqda $n-1$ məhz sıfır olur; səbəb bu deyil."
+        - id: b
+          text: "Seçmə ortalaması $\\bar{x}$ həmin seçmənin özündən hesablandığı üçün bir sərbəstlik dərəcəsi itirilir və $n$-ə bölmək həqiqi populyasiya dispersiyasını sistematik olaraq kiçik qiymətləndirir"
+          feedback: "Doğru! $\\sum (x_i - \\bar{x})^2$ həmişə $\\sum (x_i - \\mu)^2$-dən kiçik-bərabər olduğu üçün $n-1$ məxrəci bu qərəzi (bias) aradan qaldırır."
+        - id: c
+          text: "Hesablamanı kompyuterdə sürətləndirmək üçün"
+          feedback: "$n$ və ya $n-1$-ə bölmənin hesablama sürəti eynidir."
+      answer: b
+      explanation: "Nöqtələr həqiqi $\\mu$-ə nisbətən öz seçmə ortalaması $\\bar{x}$-ə daha yaxın olur. $n-1$-ə bölmək bu fərqi kompensasiya edərək qərəzsiz ($E[s^2] = \\sigma^2$) qiymətləndirmə verir."
+    - id: q-mathstat-pca-properties
+      type: multi
+      title: "Kovariasiya matrisi və PCA xassələri"
+      prompt: "PCA (Principal Component Analysis) və kovariasiya matrisi $\\Sigma$ haqqında hansı ifadələr doğrudur? Hamısını seç."
+      skills: [matrices-shapes, ml-algorithms]
+      category: math
+      options:
+        - id: a
+          text: "Kovariasiya matrisinin bütün xüsusi ədədləri mənfi deyil ($\\lambda_k \\ge 0$) və onların cəmi datanın ümumi dispersiyasına bərabərdir"
+          feedback: "Bəli — $\\Sigma$ simmetrik müsbət yarı-müəyyən matrisdir və $\\text{Tr}(\\Sigma) = \\sum \\lambda_k$."
+        - id: b
+          text: "1-ci baş komponent (ən böyük $\\lambda_1$-ə uyğun xüsusi vektor) datanın ən çox dispersiyaya malik olduğu istiqaməti göstərir"
+          feedback: "Bəli — PCA-nın tərifinə görə ilk ox maksimum dispersiyanı tutur."
+        - id: c
+          text: "Baş komponent istiqamətləri (eigenvectors) bir-birinə ortoqonaldır (perpendikulyardır)"
+          feedback: "Bəli — simmetrik matrisin xüsusi vektorları ortonormal bazis əmələ gətirir."
+        - id: d
+          text: "PCA-nı test datası daxil olmaqla bütün dataset üzərində `fit` etmək təlim/test sızmasına (data leakage) səbəb olmur"
+          feedback: "Yanlış! PCA parametrləri yalnız train dəstində `fit` olunmalıdır."
+      answers: [a, b, c]
+      explanation: "Kovariasiya matrisi $\\Sigma$ simmetrik və müsbət yarı-müəyyəndir: ortoqonal xüsusi vektorlara və cəmi ümumi dispersiyanı verən $\\lambda_k \\ge 0$ xüsusi ədədlərinə malikdir."
+exercises:
+  - id: ex-mathstat-ci-and-pca
+    type: code
+    title: "95% Confidence Interval və PCA Komponent Seçicisini implementasiya et"
+    prompt: |
+      Python standart kitabxanasından (`math`) istifadə edərək aşağıdakı iki funksiyanı yaz:
+
+      **1. `confidence_interval_95(samples: list[float]) -> tuple[float, float, float]`**
+      - Seçmədəki elementlərin sayı 2-dən azdırsa (`len(samples) < 2`), `ValueError` qaldır.
+      - Seçmə ortalamasını ($\bar{x}$), **qərəzsiz** standart meyli ($s = \sqrt{\frac{1}{n-1}\sum (x_i - \bar{x})^2}$) və standart xətanı ($\text{SE} = s / \sqrt{n}$) hesabla.
+      - `(mean, lower, upper)` tuple-nı qaytar, burada `lower = mean - 1.96 * se` və `upper = mean + 1.96 * se`.
+
+      **2. `pca_components_for_variance(eigenvalues: list[float], target_ratio: float) -> int`**
+      - Əgər `eigenvalues` boşdursa, içində mənfi ədəd varsa, cəmi `<= 0`-dırsa və ya `not (0.0 < target_ratio <= 1.0)` olarsa, `ValueError` qaldır.
+      - Xüsusi ədədləri azalan sırada sırala (input qarışıq sırada verilə bilər!).
+      - Kumulyativ izah olunan dispersiya nisbətinin (`cumulative / total_variance`) ən azı `target_ratio`-ya çatması üçün lazım olan **minimum** komponent sayını ($k \in \{1, \dots, d\}$) qaytar (üzən nöqtə xətası üçün `cumulative / total + 1e-12 >= target_ratio` müqayisəsindən istifadə et).
+    skills: [statistics-basics, matrices-shapes, ml-algorithms]
+    category: math
+    difficulty: 2
+    hints:
+      - "`confidence_interval_95` üçün: `n = len(samples)`, `mean = sum(samples) / n`, `var = sum((x - mean) ** 2 for x in samples) / (n - 1)`, `se = math.sqrt(var) / math.sqrt(n)`."
+      - "`pca_components_for_variance` üçün əvvəlcə doğrulamaları et: `if not eigenvalues or any(x < 0 for x in eigenvalues) or sum(eigenvalues) <= 0 or not (0.0 < target_ratio <= 1.0): raise ValueError(...)`."
+      - "`sorted_eigs = sorted(eigenvalues, reverse=True)` üzərində `for k, val in enumerate(sorted_eigs, start=1):` ilə cəmi topla və `(cum / total) + 1e-12 >= target_ratio` olduqda `return k`."
+    starter_code: |
+      import math
+
+      def confidence_interval_95(samples: list[float]) -> tuple[float, float, float]:
+          # TODO: (mean, lower, upper) hesabla (n-1 məxrəci ilə)
+          return (0.0, 0.0, 0.0)
+
+      def pca_components_for_variance(eigenvalues: list[float], target_ratio: float) -> int:
+          # TODO: target_ratio üçün lazım olan minimum top komponent sayını qaytar
+          return 0
+    tests:
+      - name: "confidence_interval_95: [10, 12, 14, 16] üçün dəqiq ortalama və 95% CI"
+        code: |
+          mean, lo, hi = confidence_interval_95([10.0, 12.0, 14.0, 16.0])
+          assert abs(mean - 13.0) < 1e-9, f"mean səhvdir: {mean}"
+          assert abs(lo - 10.46965318) < 1e-4, f"lower səhvdir (n-1 istifadə etdiyinə əmin ol): {lo}"
+          assert abs(hi - 15.53034682) < 1e-4, f"upper səhvdir: {hi}"
+      - name: "pca_components_for_variance: sıralı və qarışıq eigenvalues üçün minimum k"
+        code: |
+          eigs = [1.0, 5.0, 0.4, 3.0, 0.6]  # cəm = 10.0, sıralı: [5.0, 3.0, 1.0, 0.6, 0.4]
+          assert pca_components_for_variance(eigs, 0.50) == 1
+          assert pca_components_for_variance(eigs, 0.80) == 2
+          assert pca_components_for_variance(eigs, 0.90) == 3
+          assert pca_components_for_variance(eigs, 0.95) == 4
+      - name: "Səhv input-lar üçün ValueError qaldırır"
+        code: |
+          for bad_samples in ([], [42.0]):
+              raised = False
+              try:
+                  confidence_interval_95(bad_samples)
+              except ValueError:
+                  raised = True
+              assert raised, f"samples={bad_samples} üçün ValueError qaldırılmalıdır"
+
+          for bad_eigs, bad_target in (([], 0.9), ([1.0, -0.5], 0.8), ([2.0, 1.0], 0.0), ([2.0, 1.0], 1.5)):
+              raised = False
+              try:
+                  pca_components_for_variance(bad_eigs, bad_target)
+              except ValueError:
+                  raised = True
+              assert raised, f"eigs={bad_eigs}, target={bad_target} üçün ValueError qaldırılmalıdır"
+    solution: |
+      import math
+
+      def confidence_interval_95(samples: list[float]) -> tuple[float, float, float]:
+          n = len(samples)
+          if n < 2:
+              raise ValueError("At least 2 samples are required")
+          mean = sum(samples) / n
+          variance = sum((x - mean) ** 2 for x in samples) / (n - 1)
+          se = math.sqrt(variance) / math.sqrt(n)
+          margin = 1.96 * se
+          return (mean, mean - margin, mean + margin)
+
+      def pca_components_for_variance(eigenvalues: list[float], target_ratio: float) -> int:
+          if not eigenvalues or not (0.0 < target_ratio <= 1.0):
+              raise ValueError("Invalid eigenvalues or target_ratio")
+          if any(x < 0 for x in eigenvalues):
+              raise ValueError("Eigenvalues must be non-negative")
+          total = sum(eigenvalues)
+          if total <= 0:
+              raise ValueError("Total variance must be positive")
+          sorted_eigs = sorted(eigenvalues, reverse=True)
+          cumulative = 0.0
+          for k, val in enumerate(sorted_eigs, start=1):
+              cumulative += val
+              if (cumulative / total) + 1e-12 >= target_ratio:
+                  return k
+          return len(sorted_eigs)
+    explanation: |
+      `confidence_interval_95` Bessel düzəlişli ($n-1$) dispersiyadan standart xətanı ($\text{SE} = s/\sqrt{n}$) tapır. `pca_components_for_variance` isə xüsusi ədədləri azalan sırada toplayaraq hədəf dispersiya payına çatan ilk $k$ indeksini qaytarır.
+  - id: ex-mathstat-evr-numeric
+    type: numeric
+    title: "Kumulyativ Explained Variance Ratio hesabla"
+    prompt: |
+      4 ölçülü datasetin kovariasiya matrisinin xüsusi ədədləri (eigenvalues) belədir:
+
+      $$\lambda = [6.0,\; 2.5,\; 1.0,\; 0.5]$$
+
+      İlk **2 baş komponentin** ($k = 2$) saxladığı **kumulyativ izah olunan dispersiya nisbətini** ($\text{Cumulative EVR}_2 = \frac{\lambda_1 + \lambda_2}{\sum_{j=1}^4 \lambda_j}$) onluq kəsr şəklində (`0` ilə `1` arasında) hesabla.
+    skills: [matrices-shapes, ml-algorithms]
+    category: math
+    difficulty: 1
+    answer: 0.85
+    tolerance: 0.001
+    hints:
+      - "Əvvəlcə bütün xüsusi ədədlərin cəmini tap: $6.0 + 2.5 + 1.0 + 0.5$."
+      - "İlk 2 xüsusi ədədin cəmini ($6.0 + 2.5$) ümumi cəmə böl."
+    explanation: |
+      Ümumi dispersiya $= 6.0 + 2.5 + 1.0 + 0.5 = 10.0$. İlk iki komponentin dispersiya cəmi $= 6.0 + 2.5 = 8.5$. Kumulyativ EVR $= \frac{8.5}{10.0} = 0.85$ (85%).
+references:
+  - title: "Python Standard Library — statistics (Mathematical statistics functions)"
+    url: https://docs.python.org/3/library/statistics.html
+    note: "Python-da mean, variance və stdev funksiyalarının rəsmi sənədləri"
+  - title: "scikit-learn User Guide — Principal Component Analysis (PCA)"
+    url: https://scikit-learn.org/stable/modules/decomposition.html#pca
+    note: "explained_variance_ və explained_variance_ratio_ anlayışlarının praktiki tətbiqi"

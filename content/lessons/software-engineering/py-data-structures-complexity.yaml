@@ -1,0 +1,386 @@
+id: py-data-structures-complexity
+track: software-engineering
+module: python-engineering
+title: Data structures və Big-O — list, set, dict seçiminin real qiyməti
+summary: 100 sətirdə ani işləyən kodun 100,000 sətirdə niyə donduğunu başa düşəcəksən. list, set və dict-in O(1) vs O(n) fərqini, sıranı qoruyaraq deduplikasiyanı və sürətli join/lookup qurmağı öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [py-errors-validation]
+next: py-testing-pytest
+skills: [py-data-structures, py-control-flow]
+objectives:
+  - list, set və dict-də axtarış (`in`) və əlavə etmə əməliyyatlarının Big-O mürəkkəbliyini müqayisə etmək
+  - İç-içə list dövründən (`O(n²)`) `set` və ya `dict` indeksinə (`O(n)`) keçərək darboğazı aradan qaldırmaq
+  - Sıranı qoruyaraq (order-preserving) təkrarlanan elementləri `O(n)` vaxtda silmək
+  - Tezlik sayımı (frequency counting) və id-yə görə join əməliyyatını `dict` ilə yazmaq
+why_it_matters: |
+  AI mühəndisliyində kiçik oyuncaq datada (`100` nümunə) hər kod sürətli görünür. Amma real RAG sistemində `200,000` sənəd chunk-ını deduplikasiya edəndə və ya `100,000` istifadəçi sorğusunu log cədvəli ilə birləşdirəndə (join) `if item in seen_list:` yazmaq `10,000,000,000` (10 milyard!) müqayisə yaradır və pipeline-ı saatlarla dondurur.
+
+  `seen_list` əvəzinə `seen_set` yazmaq eyni işi **bir neçə saniyədən az** vaxta endirir. Düzgün data strukturu seçmək "optimallaşdırma hiyləsi" deyil — işləyən sistemlə donan sistem arasındakı fərqdir.
+terms:
+  - term: Big-O notation
+    definition: "Input ölçüsü ($n$) böyüdükcə əməliyyat sayının necə artdığını göstərən ölçü (`O(1)` sabit, `O(n)` xətti, `O(n²)` kvadratik)."
+  - term: Hash table
+    definition: "`set` və `dict`-in arxasında duran struktur; açarın hash dəyərindən istifadə edərək elementi orta hesabla `O(1)` vaxtda tapır."
+  - term: Lookup (axtarış)
+    definition: "`x in collection` və ya `mapping[key]` ilə elementin mövcudluğunu yoxlamaq və ya dəyərini götürmək."
+  - term: Deduplication
+    definition: Kolleksiyadakı təkrarlanan elementləri silib yalnız unikal nümunələri saxlamaq.
+  - term: Indexing (dict lookup table)
+    definition: "Siyahını bir dəfə gəzərək `{id: record}` şəklində `dict` qurmaq ki, sonrakı axtarışlar `O(1)` olsun."
+sections:
+  - id: list-set-dict-complexity
+    kind: explanation
+    title: "list vs set vs dict: əməliyyatların qiyməti"
+    body: |
+      Python-da ən çox istifadə etdiyimiz üç struktur fərqli suallar üçün dizayn olunub:
+
+      | Əməliyyat | `list` | `set` | `dict` | Səbəb |
+      |---|---|---|---|---|
+      | İndekslə oxumaq (`xs[i]`) | `O(1)` | — | — | `list` yaddaşda ardıcıl massivdir |
+      | Sona əlavə (`append` / `add` / `d[k]=v`) | `O(1)` | `O(1)` | `O(1)` | Amortizasiya olunmuş sabit vaxt |
+      | Axtarış (`x in col`) | **`O(n)`** | **`O(1)`** | **`O(1)`** | `list` tək-tək baxır; `set`/`dict` hash hesablayır |
+      | Başdan/ortadan silmək (`remove`/`pop(0)`) | **`O(n)`** | `O(1)` | `O(1)` | `list` qalan elementləri sürüşdürür |
+
+      **Qızıl qayda:**
+      - Ardıcıllıq və sıra nömrəsi (`xs[i]`) lazımdırsa → **`list`**
+      - *"Bu element artıq görünübmü?"* (`x in seen`) sualını dövr içində soruşursansa → **`set`**
+      - *"Bu ID-yə uyğun obyekt/say hansıdır?"* (`by_id[doc_id]`) sualını soruşursansa → **`dict`**
+  - id: library-analogy
+    kind: analogy
+    title: "Mental model: rəfdə tək-tək axtarmaq vs kataloq nömrəsi"
+    body: |
+      Təsəvvür et ki, 100,000 kitablıq kitabxanada `"ISBN-9842"` kitabını axtarırsan:
+
+      - **`list` içində `in` axtarışı:** Birinci rəfdən başlayıb hər kitabın üzünü tək-tək oxuyursan. Kitab axırdadırsa, 100,000 kitabın hamısına baxmalısan (`O(n)`).
+      - **`set` və ya `dict` axtarışı:** Kataloq sistemi `"ISBN-9842"` kodundan birbaşa *"Rəf 42, Sıra 7"* ünvanını hesablayır (hash) və bir addımda kitabı götürürsən (`O(1)`).
+
+      Bir kitab axtaranda fərq hiss olunmur. Amma 100,000 tələbənin hər biri üçün kitab axtaranda (`n` dəfə axtarış), rəfləri tək-tək gəzmək `n * n = 10,000,000,000` addım (`O(n²)`), kataloqla isə cəmi `100,000` addım (`O(n)`) çəkir.
+  - id: complexity-diagram
+    kind: diagram
+    title: "O(n²) vs O(n) deduplikasiya axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        subgraph Slow["Yavaş: O(n²) — yalnız list"]
+          A1["Hər x üçün"] --> B1["x in result_list ? (O(n) scan)"]
+          B1 --> C1["n = 100,000 -> ~5 milyard müqayisə"]
+        end
+        subgraph Fast["Sürətli: O(n) — list + set"]
+          A2["Hər x üçün"] --> B2["x in seen_set ? (O(1) hash)"]
+          B2 --> C2["result.append(x) + seen.add(x)"]
+        end
+      ```
+
+      Hər iki üsul eyni nəticəni qaytarır, amma sağ tərəf əlavə `seen_set` saxlamaqla vaxtı kvadratikdən xəttiyə salır.
+  - id: worked-dedup-join
+    kind: worked_example
+    title: Kiçik nümunə ilə sıranı qoruyan deduplikasiya və join
+    body: |
+      **Məsələ 1 — Sıranı qoruyaraq deduplikasiya:**
+      Verilib: `tokens = ["ai", "ml", "ai", "dl", "ml"]`.
+      Sadəcə `list(set(tokens))` yazsaq, `set` sıranı qarışdıra bilər! Həm ilkin sıranı qorumaq, həm də `O(n)` işləmək üçün iki struktur birlikdə işlədilir: `seen = set()` (sürətli yoxlama) və `out = []` (sıralı nəticə).
+
+      | Addım | `tok` | `tok in seen`? | `seen` | `out` |
+      |---|---|---|---|---|
+      | 1 | `"ai"` | Xeyr | `{"ai"}` | `["ai"]` |
+      | 2 | `"ml"` | Xeyr | `{"ai", "ml"}` | `["ai", "ml"]` |
+      | 3 | `"ai"` | **Bəli** (keç) | `{"ai", "ml"}` | `["ai", "ml"]` |
+      | 4 | `"dl"` | Xeyr | `{"ai", "ml", "dl"}` | `["ai", "ml", "dl"]` |
+      | 5 | `"ml"` | **Bəli** (keç) | `{"ai", "ml", "dl"}` | `["ai", "ml", "dl"]` |
+
+      *(Qeyd: Python 3.7+ versiyalarında `list(dict.fromkeys(tokens))` də eyni məntiqlə sıranı qoruyaraq `O(n)` deduplikasiya edir.)*
+
+      **Məsələ 2 — İki cədvəli ID ilə birləşdirmək (Join):**
+      `predictions = [{"id": "u1", "score": 0.9}, {"id": "u2", "score": 0.2}]` və `labels = [{"id": "u2", "y": 0}, {"id": "u1", "y": 1}]`.
+      Hər prediction üçün `labels` list-ini başdan-ayağa axtarmaq əvəzinə, əvvəlcə `label_by_id = {row["id"]: row["y"] for row in labels}` qururuq (`O(n)`), sonra hər prediction üçün `label_by_id[pred["id"]]` ilə `O(1)` vaxtda cavabı tapırıq.
+  - id: code-walkthrough
+    kind: code
+    title: Kod — O(n) deduplikasiya, tezlik sayımı və join
+    body: |
+      ```python
+      def deduplicate_ordered(items: list[str]) -> list[str]:
+          """Return unique items preserving first-seen order in O(n) time."""
+          seen: set[str] = set()
+          result: list[str] = []
+          for item in items:
+              if item not in seen:      # O(1) set lookup
+                  seen.add(item)
+                  result.append(item)
+          return result
+
+
+      def word_frequencies(tokens: list[str]) -> dict[str, int]:
+          """Count occurrences of each token in O(n) time."""
+          counts: dict[str, int] = {}
+          for tok in tokens:
+              counts[tok] = counts.get(tok, 0) + 1
+          return counts
+
+
+      def attach_labels(predictions: list[dict], gold_labels: list[dict]) -> list[dict]:
+          """Join predictions with gold labels by 'id' in O(n + m) time."""
+          label_by_id = {row["id"]: row["label"] for row in gold_labels}
+          merged: list[dict] = []
+          for pred in predictions:
+              doc_id = pred["id"]
+              if doc_id in label_by_id:
+                  merged.append({
+                      "id": doc_id,
+                      "pred": pred["pred"],
+                      "label": label_by_id[doc_id],
+                  })
+          return merged
+      ```
+
+      Fikir ver:
+      - Heç bir funksiyada dövrün içində list üzərində `in` və ya `.index()` axtarışı yoxdur.
+      - `counts.get(tok, 0) + 1` idiomu açar yoxdursa `0` götürür, varsa üzərinə `1` gəlir (standart kitabxanada `collections.Counter` də eyni işi görür).
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Dövrün içində `if x not in result_list:` yazmaq**
+      ```python
+      result = []
+      for x in items:
+          if x not in result:   # BUG: result böyüdükcə hər yoxlama O(n) olur -> cəmi O(n²)
+              result.append(x)
+      ```
+      100,000 unikal elementdə bu kod ~5 milyard müqayisə edir. Yanında `seen = set()` saxlamaqla dərhal `O(n)` olur.
+
+      **2. `list(set(items))` ilə sıranın qorunacağını düşünmək**
+      `set` sıra saxlamır! Token sırası, tarixçə və ya ranking siyahısında `set`-ə çevirib geri qaytarmaq ardıcıllığı pozur.
+
+      **3. Mutable obyekti (`list`, `dict`) `set`-ə əlavə etməyə çalışmaq**
+      ```python
+      s = set()
+      s.add([1, 2])   # TypeError: unhashable type: 'list'
+      ```
+      `set` elementləri və `dict` açarları **immutable** (hashable) olmalıdır: `str`, `int`, `float`, `tuple`. Koordinat və ya cütlük saxlamaq üçün `list` əvəzinə `tuple` (`(1, 2)`) istifadə et.
+
+      **4. Dövrün içində `tokens.count(w)` çağırmaq**
+      `{w: tokens.count(w) for w in tokens}` hər söz üçün bütün list-i yenidən sayır → `O(n²)`. Bir dəfə dövr ilə `counts.get(w, 0) + 1` yazmaq → `O(n)`.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Zaman vs Yaddaş (Time-Space Trade-off):** `set` və `dict` sürətlidir (`O(1)`), amma hash cədvəli saxladığı üçün eyni elementli `list`-dən təxminən 2-4 dəfə çox RAM işlədir. Əksər hallarda `O(n²)`-dən `O(n)`-ə düşmək üçün bu əlavə RAM tamamilə dəyər.
+      - **Kiçik `n` üçün sadəlik:** Əgər siyahıda həmişə maksimum 10-20 element varsa (məsələn, modelin dəstəklədiyi 5 dil kodu), `list` ilə `set` arasında mikrosaniyə fərqi əhəmiyyətsizdir. Amma dataset sətirləri, sənəd chunk-ları və ya lüğət (vocabulary) ilə işləyəndə həmişə `n`-in böyüyəcəyini fərz et.
+      - **`dict.fromkeys` vs açıq `seen` seti:** Sadə elementləri (`list[str]`) sıranı qoruyaraq deduplikasiya etmək üçün `list(dict.fromkeys(items))` qısa və sürətlidir. Amma mürəkkəb obyektləri müəyyən açara görə (məsələn, `doc["id"]`) deduplikasiya edəndə açıq `seen_ids = set()` dövrü daha oxunaqlıdır.
+mastery_criteria:
+  - Kod parçasında gizli O(n²) list axtarışını tapıb O(n) set/dict həllinə çevirə bilirsən
+  - Sıranı qoruyaraq deduplikasiya və ID üzrə join funksiyalarını O(n) mürəkkəbliklə yaza bilirsən
+  - Hansı obyektlərin hashable (set/dict açarı ola bilən) olduğunu izah edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pyds-lookup-complexity
+      type: mcq
+      title: list vs set axtarış mürəkkəbliyi
+      prompt: "`n` elementli `items_list` (`list`) və `items_set` (`set`) verilib. `x in items_list` və `x in items_set` əməliyyatlarının orta vaxt mürəkkəbliyi nədir?"
+      skills: [py-data-structures]
+      category: concept
+      options:
+        - id: a
+          text: "Hər ikisi O(1)"
+          feedback: "`list` hash cədvəli saxlamır, elementləri əvvəldən sona qədər yoxlayır."
+        - id: b
+          text: "list üçün O(n), set üçün O(1)"
+          feedback: Doğru. `list` xətti axtarış edir (`O(n)`), `set` isə hash ilə birbaşa tapır (`O(1)`).
+        - id: c
+          text: "list üçün O(1), set üçün O(log n)"
+          feedback: Python `set`-i ağac deyil, hash table üzərində qurulub (`O(1)`).
+      answer: b
+      explanation: "`list`-də `in` operatoru elementləri sıra ilə müqayisə edir (`O(n)`). `set` və `dict` isə hash table sayəsində `O(1)` orta vaxtda cavab verir."
+    - id: q-pyds-nested-count-bug
+      type: mcq
+      title: Bu kodun Big-O mürəkkəbliyi nədir?
+      prompt: |
+        ```python
+        def unique_words(words: list[str]) -> list[str]:
+            out = []
+            for w in words:
+                if w not in out:
+                    out.append(w)
+            return out
+        ```
+        `len(words) = n` olarsa, ən pis halda (bütün sözlər fərqlidirsə) bu funksiyanın vaxt mürəkkəbliyi nədir?
+      skills: [py-data-structures, py-control-flow]
+      category: explain-code
+      options:
+        - id: a
+          text: "O(n) — çünki yalnız bir `for` dövrü var"
+          feedback: "`if w not in out` sətri özü gizli bir dövrdür (`out` list-ini başdan-ayağa gəzir)."
+        - id: b
+          text: "O(n²) — çünki `w not in out` hər addımda `out` list-ini xətti axtarır"
+          feedback: Doğru. `1 + 2 + ... + n = n(n-1)/2` müqayisə → `O(n²)`.
+        - id: c
+          text: "O(1)"
+          feedback: Dövr `n`-dən asılıdır.
+      answer: b
+      explanation: Tək `for` dövrü sizi aldatmasın — list üzərində `in` operatoru `O(n)` olduğu üçün dövrün içində çağırılanda ümumi vaxt `O(n²)` olur.
+    - id: q-pyds-hashable-types
+      type: multi
+      title: Hansılar dict açarı (və ya set elementi) ola bilər?
+      prompt: Aşağıdakı Python obyektlərindən hansıları `set`-ə əlavə edilə və ya `dict` açarı kimi istifadə oluna bilər (hashable-dır)? Hamısını seç.
+      skills: [py-data-structures]
+      category: python
+      options:
+        - id: a
+          text: "\"doc_42\" (str)"
+          feedback: Bəli — `str` immutable və hashable-dır.
+        - id: b
+          text: "[10, 20] (list)"
+          feedback: "Xeyr — `list` mutable olduğu üçün `TypeError: unhashable type: 'list'` verir."
+        - id: c
+          text: "(10, 20) (int-lərdən ibarət tuple)"
+          feedback: Bəli — içindəki elementlər də immutable olan `tuple` hashable-dır.
+        - id: d
+          text: "{\"id\": 1} (dict)"
+          feedback: Xeyr — `dict` mutable-dır, açar ola bilməz.
+      answers: [a, c]
+      explanation: Yalnız immutable obyektlər (`str`, `int`, `float`, və immutable elementli `tuple`) hashable-dır və `set`/`dict` açarı ola bilər.
+    - id: q-pyds-predict-dict-get
+      type: text
+      title: "Predict the output: tezlik sayımı"
+      prompt: |
+        ```python
+        counts = {}
+        for ch in ["a", "b", "a", "a"]:
+            counts[ch] = counts.get(ch, 0) + 1
+        print(counts["a"], counts.get("c", 0))
+        ```
+        Nə çap olunacaq?
+      skills: [py-data-structures]
+      category: predict-output
+      accepted: ["3 0"]
+      hints:
+        - "`\"a\"` siyahıda neçə dəfə təkrarlanır?"
+        - "`\"c\"` lüğətdə olmadığı üçün `counts.get(\"c\", 0)` default dəyəri qaytarır."
+      explanation: "`\"a\"` 3 dəfə sayılır (`counts[\"a\"] == 3`), `\"c\"` isə lüğətdə olmadığı üçün `.get(\"c\", 0)` `0` qaytarır → `3 0`."
+exercises:
+  - id: ex-pyds-dedup-by-id
+    type: code
+    title: Sıranı qoruyaraq sənədləri ID-yə görə deduplikasiya et
+    prompt: |
+      RAG ingestion pipeline-da müxtəlif mənbələrdən gələn sənəd siyahısında eyni `"id"`-li sənədlər təkrarlanır.
+      `deduplicate_docs(docs: list[dict]) -> list[dict]` funksiyasını yaz:
+
+      - Hər sənəd `{"id": str, "text": str}` formatındadır.
+      - Eyni `"id"` təkrarlanarsa, **yalnız ilk rast gəlinən** sənədi saxla.
+      - Sənədlərin ilkin sırası qorunmalıdır.
+      - Input list dəyişdirilməməlidir və alqoritm `O(n)` vaxtda işləməlidir (`set` istifadə et).
+    skills: [py-data-structures, py-control-flow]
+    category: python
+    difficulty: 1
+    hints:
+      - "`seen_ids = set()` və `unique_docs = []` yarat."
+      - Hər `doc` üçün `doc_id = doc["id"]` götür; əgər `doc_id not in seen_ids` olarsa, hər ikisinə əlavə et.
+    starter_code: |
+      def deduplicate_docs(docs: list[dict]) -> list[dict]:
+          # TODO: O(n) vaxtda ilk rast gəlinən id-ləri sıranı qoruyaraq saxla
+          return docs
+    tests:
+      - name: Təkrarlanan ID-lər silinir, ilk görünən və sıra qorunur
+        code: |
+          raw = [
+              {"id": "d2", "text": "ikinci"},
+              {"id": "d1", "text": "birinci"},
+              {"id": "d2", "text": "ikinci dublikat"},
+              {"id": "d3", "text": "üçüncü"},
+              {"id": "d1", "text": "birinci dublikat"},
+          ]
+          out = deduplicate_docs(raw)
+          assert out == [
+              {"id": "d2", "text": "ikinci"},
+              {"id": "d1", "text": "birinci"},
+              {"id": "d3", "text": "üçüncü"},
+          ], f"alınan: {out}"
+      - name: Boş siyahı və input-un dəyişməməsi
+        code: |
+          assert deduplicate_docs([]) == []
+          sample = [{"id": "a", "text": "1"}, {"id": "a", "text": "2"}]
+          out_sample = deduplicate_docs(sample)
+          assert len(sample) == 2 and out_sample is not sample, "input list dəyişdirilməməlidir"
+      - name: Bütün elementlər unikal olduqda sıra və say saxlanılır
+        code: |
+          uniq = [{"id": "x1", "text": "a"}, {"id": "x2", "text": "b"}]
+          assert deduplicate_docs(uniq) == uniq
+    solution: |
+      def deduplicate_docs(docs: list[dict]) -> list[dict]:
+          seen_ids: set[str] = set()
+          result: list[dict] = []
+          for doc in docs:
+              doc_id = doc["id"]
+              if doc_id not in seen_ids:
+                  seen_ids.add(doc_id)
+                  result.append(doc)
+          return result
+    explanation: |
+      `seen_ids` `set` olduğu üçün `doc_id not in seen_ids` yoxlaması `O(1)` vaxt aparır, `result` `list`-i isə sənədlərin ilkin gəliş sırasını dəqiq saxlayır.
+  - id: ex-pyds-join-records
+    type: code
+    title: Sürətli O(n + m) prediction-label join
+    prompt: |
+      Modelin proqnozlarını (`predictions`) həqiqi cavablarla (`ground_truth`) `"id"` sahəsinə görə birləşdirən `match_predictions(predictions: list[dict], ground_truth: list[dict]) -> list[tuple[int, int]]` funksiyasını yaz:
+
+      - `predictions` içindəki hər element: `{"id": str, "pred": int}`
+      - `ground_truth` içindəki hər element: `{"id": str, "label": int}`
+      - `predictions` sırası ilə gəzərək, yalnız `ground_truth`-da qarşılığı olan `"id"`-lər üçün `(pred, label)` tuple-larından ibarət `list` qaytar.
+      - İç-içə list dövrü yazma; əvvəlcə `ground_truth`-dan `dict` indeksi qur.
+    skills: [py-data-structures, py-control-flow]
+    category: python
+    difficulty: 2
+    hints:
+      - "`truth_by_id = {row[\"id\"]: row[\"label\"] for row in ground_truth}` ilə `O(m)` indeks qur."
+      - Sonra `predictions` üzərində dövr qurub `if p["id"] in truth_by_id:` olduqda `(p["pred"], truth_by_id[p["id"]])` əlavə et.
+    starter_code: |
+      def match_predictions(
+          predictions: list[dict], ground_truth: list[dict]
+      ) -> list[tuple[int, int]]:
+          # TODO: ground_truth üçün dict indeksi qur və (pred, label) cütlərini qaytar
+          return []
+    tests:
+      - name: Uyğun ID-lər predictions sırası ilə birləşdirilir
+        code: |
+          preds = [
+              {"id": "q1", "pred": 1},
+              {"id": "q2", "pred": 0},
+              {"id": "q3", "pred": 1},
+          ]
+          truth = [
+              {"id": "q3", "label": 0},
+              {"id": "q1", "label": 1},
+          ]
+          assert match_predictions(preds, truth) == [(1, 1), (1, 0)]
+      - name: Uyğunluq olmadıqda və ya boş siyahıda [] qaytarır
+        code: |
+          assert match_predictions([{"id": "x", "pred": 1}], [{"id": "y", "label": 1}]) == []
+          assert match_predictions([], []) == []
+      - name: Böyük siyahıda (5000 qeyd) sürətli O(n + m) birləşmə
+        code: |
+          p_big = [{"id": f"id_{i}", "pred": i % 2} for i in range(5000)]
+          t_big = [{"id": f"id_{i}", "label": (i + 1) % 2} for i in range(0, 5000, 2)]
+          joined = match_predictions(p_big, t_big)
+          assert len(joined) == 2500 and joined[0] == (0, 1)
+    solution: |
+      def match_predictions(
+          predictions: list[dict], ground_truth: list[dict]
+      ) -> list[tuple[int, int]]:
+          truth_by_id = {row["id"]: row["label"] for row in ground_truth}
+          pairs: list[tuple[int, int]] = []
+          for p in predictions:
+              doc_id = p["id"]
+              if doc_id in truth_by_id:
+                  pairs.append((p["pred"], truth_by_id[doc_id]))
+          return pairs
+    explanation: |
+      Əvvəlcə `truth_by_id` lüğətini qurmaq `O(m)`, sonra `predictions` üzərində gəzmək `O(n)` vaxt aparır — cəmi `O(n + m)`. İç-içə dövr olsaydı `O(n * m)` olardı.
+references:
+  - title: Python Wiki — TimeComplexity
+    url: https://wiki.python.org/moin/TimeComplexity
+    note: Standart Python data strukturlarının Big-O cədvəli
+  - title: Python Tutorial — Data Structures
+    url: https://docs.python.org/3/tutorial/datastructures.html
+    note: list, set, dict və tuple üzrə rəsmi bələdçi

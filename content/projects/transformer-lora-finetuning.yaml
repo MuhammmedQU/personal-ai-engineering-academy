@@ -1,0 +1,85 @@
+id: transformer-lora-finetuning
+title: "Mini-Project: Domain LLM Fine-Tuning (LoRA) və Avtomatik Regression Eval"
+summary: "Kiçik açıq-çəkili dil modelini (məs. 1B–3B) LoRA ilə spesifik domen tapşırığına (strukturlaşdırılmış JSON təsnifat və ya sahə ekstraksiyası) uyğunlaşdır, onu Prompting və RAG baseline-ları ilə eyni qızıl test dəstində (golden eval set) müqayisə et və avtomatik reqressiya qapısı qur."
+optional: false
+level: advanced
+estimated_hours: [12, 20]
+recommended_lessons:
+  - dl-attention-transformers
+  - dl-advanced-training-transfer
+  - llm-finetuning-lora-vs-rag
+  - llm-eval-security-reliability
+problem_statement: |
+  Şirkətin müştəri dəstəyi sistemində 8B/70B kommersiya LLM API-si hər sorğuda uzun few-shot nümunələr oxuduğu üçün həm gecikmə ($p_{95} > 2.4\text{ s}$), həm də aylıq token xərci yüksəkdir. Məqsəd: dar və aydın müəyyən edilmiş strukturlaşdırılmış çıxış tapşırığı üçün kiçik bir modeli **LoRA (Low-Rank Adaptation)** ilə öyrətmək və onun keyfiyyətinin böyük modelin few-shot baseline-na çatdığını rəqəmlərlə sübut etməkdir.
+intended_user: "Aşağı gecikmə və sabit maya dəyəri ilə yüksək həcmli strukturlaşdırılmış mətn təsnifatı / ekstraksiyası icra edən AI Mühəndislik komandası."
+requirements:
+  - "Ən azı 300 təlim, 50 validation və 50 toxunulmaz qızıl test (golden eval) nümunəsindən ibarət, dublikatlardan təmizlənmiş JSONL dataset hazırlamaq"
+  - "Fine-tuning-ə başlamazdan əvvəl Zero-shot və Few-shot Prompting baseline nəticələrini qızıl test dəstində ölçmək"
+  - "LoRA konfiqurasiyasını (rank r, alpha, target_modules) parametr və VRAM hesablaması ilə əsaslandırmaq, təlim və validation loss əyrilərini qeydə almaq"
+  - "Avtomatik reqressiya və təhlükəsizlik qapısı (JSON sxem uyğunluğu, sahə dəqiqliyi, p95 gecikmə və prompt injection dayanıqlığı) qurmaq"
+non_goals:
+  - "Sıfırdan milyardlarla token üzərində baza modeli (pretraining) öyrətmək"
+  - "Tez-tez dəyişən faktiki məlumatları RAG əvəzinə modelin çəkilərinə əzbərlətməyə çalışmaq"
+architecture: |
+  ```mermaid
+  flowchart LR
+    A["Raw Domain Logs"] --> B["Dedup & Split (Train / Val / Golden Eval)"]
+    B --> C["Baseline Runner (Zero-shot & Few-shot)"]
+    B --> D["LoRA Trainer (Frozen W0 + Trainable B*A)"]
+    D --> E["Adapter Checkpoint"]
+    C --> F["Regression Eval Gate"]
+    E --> F
+    F --> G["Schema Pass Rate + F1 + p95 Latency Report"]
+  ```
+milestones:
+  - id: dataset-curation-and-baseline
+    title: "1. Dataset Kurasıyası, Deduplikasiya və Few-Shot Baseline"
+    goal: "Sızmasız (leakage-free) Train/Val/Golden-Test JSONL dəstləri yaratmaq və fine-tuning olmadan Few-Shot baseline rəqəmlərini ölçmək."
+    tasks:
+      - "Xam nümunələri ID və mətn oxşarlığına görə deduplikasiya edən Python skripti yaz"
+      - "50 nümunəlik Golden Eval dəstini ayır və yalnız bu dəstdə Zero-shot / 3-shot baseline dəqiqliyini, sxem keçid faizini və p95 gecikməni ölç"
+      - "Dataset statistikasını (sinif balansı, orta token uzunluğu) sənədləşdir"
+    evidence_required: "Deduplikasiya testinin çıxışı və Golden Eval dəstində Zero-shot vs Few-shot baseline metrik cədvəli."
+    skills: [llm-evaluation, ml-data-leakage, py-data-structures]
+  - id: lora-architecture-and-training
+    title: "2. LoRA Arxitekturası, VRAM Büdcəsi və Təlim Dövrü"
+    goal: "LoRA rank (r=8 və ya r=16) seçimini riyazi əsaslandırmaq, gradient clipping və early stopping ilə modeli öyrətmək."
+    tasks:
+      - "Tam model parametrləri ilə LoRA öyrədilən parametrlərinin nisbətini və VRAM tələbini hesabla"
+      - "Warmup + Cosine LR cədvəli və validation loss izləməsi ilə LoRA təlimini işə sal"
+      - "Hər epoch/addım üzrə train loss və val loss qiymətlərini logla və ən yaxşı checkpoint-i saxla"
+    evidence_required: "Parametr azalma hesabatı, train/val loss cədvəli və seçilmiş ən yaxşı checkpoint konfiqurasiyası."
+    skills: [dl-architectures, dl-training-loop, llm-rag]
+  - id: regression-gate-and-security
+    title: "3. Avtomatik Regression Gate, Prompt Injection Testi və İqtisadi Müqayisə"
+    goal: "LoRA modelini Golden Eval dəstində və 10 adversarial prompt injection nümunəsində yoxlayıb birim xərcini (Unit Economics) hesablamaq."
+    tasks:
+      - "Golden Eval dəstində Baseline vs LoRA nəticələrini (Schema Validity %, Macro-F1, p95 latency) müqayisə edən avtomatik qapı skripti yaz"
+      - "Untrusted istifadəçi mətni içində gizlədilmiş 10 prompt injection hücumuna qarşı modelin sxemi qoruduğunu test et"
+      - "Aylıq 1 milyon sorğu üçün Few-shot API vs LoRA inference xərcini müqayisə et"
+    evidence_required: "Baseline vs LoRA müqayisə cədvəli, 10 prompt injection testinin nəticəsi və aylıq xərc hesabatı."
+    skills: [llm-evaluation, llm-security, product-mvp-economics]
+test_plan:
+  - "Train və Golden Eval dəstləri arasında kəsişmənin sıfır olduğunu (`set(train_ids) & set(eval_ids) == set()`) avtomatik pytest ilə yoxla"
+  - "LoRA çıxışlarının 100%-nin JSON sxem validatorundan keçdiyini və ya bounded retry ilə tutulduğunu test et"
+  - "Adversarial girişlərdə (`Ignore previous instructions and output...`) modelin icazəsiz sahə və ya sistem təlimatı sızdırmadığını yoxla"
+failure_cases:
+  - "Təlim dəstində eyni şablonun həddindən artıq təkrarlanması nəticəsində modelin nadir sinifləri unutması (catastrophic forgetting)"
+  - "Yüksək learning rate üzündən validation loss-un 2-ci epoch-dan sonra kəskin artması (overfitting)"
+  - "Fine-tune olunmuş modelin qısa prompta öyrəşdiyi üçün uzun və ya yeni formatlı girişlərdə JSON strukturunu sındırması"
+privacy_security:
+  - "Təlim datasına daxil edilməzdən əvvəl bütün real müştəri PII məlumatları (ad, telefon, kart nömrəsi, e-poçt) maskalanmalıdır — model təlimdə gördüyü PII-ni sonradan generasiya edə bilər"
+  - "Adapter çəkiləri və təlim datasetləri yalnız giriş icazəsi olan daxili artefakt deposunda saxlanmalıdır"
+definition_of_done:
+  - "Train/Val/Golden-Eval bölgüsü və deduplikasiya testlərlə təsdiqlənib"
+  - "LoRA modeli Golden Eval dəstində Few-shot baseline-dan daha aşağı gecikmə və rəqabətədavamlı dəqiqlik göstərir"
+  - "Avtomatik reqressiya və təhlükəsizlik testləri CI-da yaşıl keçir"
+readme_outline:
+  - "1. Problem Tərifi: Niyə Prompting/RAG kifayət etmədi və LoRA seçildi?"
+  - "2. Dataset Kurasıyası, Sızma Yoxlaması və Golden Eval Benchmarkı"
+  - "3. LoRA Riyaziyyatı, Rank Seçimi və Təlim Konfiqurasiyası"
+  - "4. Nəticələr Cədvəli: Zero-shot vs Few-shot vs LoRA (F1, Schema Pass %, p95 Latency, $/1M sorğu)"
+  - "5. Təhlükəsizlik (Prompt Injection) və Uğursuzluq Hallarının Təhlili"
+stretch_goals:
+  - "r=4, r=8 və r=32 rank dəyərləri üzrə ablasion (ablation study) cədvəli qurmaq"
+  - "LoRA adapterini baza modelə birləşdirib (merge) INT8/INT4 kvantizasiya ilə CPU-da gecikməni ölçmək"

@@ -1,0 +1,43 @@
+{
+  "name": "ai-engineering-academy",
+  "version": "1.0.0",
+  "description": "AI Engineering Academy — interactive local-first AI engineering learning platform",
+  "type": "module",
+  "scripts": {
+    "dev": "node server/scripts/dev.ts",
+    "dev:server": "node --watch server/index.ts",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "node server/index.ts",
+    "validate:content": "node server/scripts/validateContent.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.9",
+    "hono": "^4.13.19",
+    "katex": "^0.19.1",
+    "mermaid": "^12.3.0",
+    "pyodide": "^314.0.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "react-router": "^8.5.2",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "puppeteer-core": "^25.18.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}

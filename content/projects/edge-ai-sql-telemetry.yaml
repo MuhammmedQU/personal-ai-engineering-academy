@@ -1,0 +1,83 @@
+id: edge-ai-sql-telemetry
+title: "Mini-Project: Modulyar Edge AI Telemetriya Pipeline-ı (Protocol, SQL və INT8 Quantization)"
+summary: "Protocol əsaslı modulyar Python arxitekturası, lazy generator axını, SQLite analitik telemetriya bazası və INT8 kvantizasiya simulyatorundan ibarət uçdan-uca mühəndislik sistemi qur."
+optional: true
+level: core
+estimated_hours: [10, 16]
+recommended_lessons:
+  - py-oop-architecture-protocols
+  - py-generators-streaming-pipelines
+  - sw-git-debugging-structured-logging
+  - sw-sql-relational-analytics
+  - spec-edge-ai-quantization-security
+problem_statement: |
+  Səhra şəraitində işləyən avtonom dron və ya kənar (edge) kamera cihazı saniyədə yüzlərlə sensor və deteksiya qeydi yaradır. Yaddaş məhdud olduğu üçün bütün axını birdən RAM-a yükləmək olmur, model çəkiləri INT8 formatına sıxılmalı, hər bir proqnoz və anomaliya isə sonradan SQL ilə təhlil edilmək üçün strukturlaşdırılmış şəkildə lokal SQLite bazasına yazılmalıdır.
+intended_user: "Edge AI, robototexnika və yüksək ötürücülü data pipeline-ları quran AI / Sistem Mühəndisi."
+requirements:
+  - "typing.Protocol ilə dəyişdirilə bilən (pluggable) Preprocessor, QuantizedModel və TelemetrySink interfeysləri dizayn etmək"
+  - "Böyük sensor axınını O(1) yaddaşla emal edən lazy generator micro-batching funksiyası yazmaq"
+  - "FP32 model çəkilərini simmetrik INT8 formatına kvantizasiya edib dekvantizasiya RMSE xətasını və yaddaş qənaətini (4x) ölçmək"
+  - "Telemetriya və proqnozları parametrləşdirilmiş sorğularla SQLite bazasına yazıb LEFT JOIN və GROUP BY ilə cihaz/versiya üzrə xəta analitikası çıxarmaq"
+non_goals:
+  - "Xüsusi FPGA və ya mikrodenetleyici (MCU) üçün C/Assembly səviyyəsində sürücü yazmaq"
+  - "Bulud üzərində paylanmış (distributed) Kafka klasteri qurmaq"
+architecture: |
+  ```mermaid
+  flowchart LR
+    A["Sensor JSONL Stream"] --> B["Lazy Generator (stream_clean_batches)"]
+    B --> C["Protocol Pipeline (Validate & Normalize)"]
+    C --> D["INT8 Quantized Inference Step"]
+    D --> E["Structured Logger (request_id)"]
+    D --> F["SQLite Telemetry DB (Indexed)"]
+    F --> G["SQL Analytics (LEFT JOIN + GROUP BY)"]
+  ```
+milestones:
+  - id: protocol-and-streaming-core
+    title: "1. Protocol İnterfeysləri və Lazy Streaming Generator"
+    goal: "Inheritance əvəzinə Composition və Protocol istifadə edən pipeline nüvəsi və O(1) yaddaşlı batch generatoru yazmaq."
+    tasks:
+      - "PipelineStep Protocol-u və immutable SensorRecord dataclass-ı təyin et"
+      - "Sınıq sətirləri rədd edib təmiz qeydləri batch_size ölçülü paketlərlə yield edən generator yaz"
+      - "Generatorun tükənmə (exhaustion) və səhv batch_size hallarını əhatə edən ən azı 6 pytest testi yaz"
+    evidence_required: "pytest çıxışı və 100,000 sətirlik axında sabit RAM istifadəsinin qeydi."
+    skills: [py-functions, py-control-flow, py-testing]
+  - id: int8-quantization-benchmark
+    title: "2. Simmetrik INT8 Kvantizasiya və Dəqiqlik/Yaddaş Benchmarkı"
+    goal: "Model qatlarının FP32 çəkilərini INT8-ə sıxmaq, 4x yaddaş qənaətini və çıxış fərqini (RMSE) ölçmək."
+    tasks:
+      - "symmetric_int8_quantize funksiyasını tətbiq et və sıfır vektoru / outlier çəki hallarını test et"
+      - "FP32 və INT8 modellərinin eyni 500 sensor nümunəsindəki proqnoz fərqini (MAE və RMSE) hesabla"
+      - "Outlier çəkilərin scale faktorunu necə korladığını nümunə ilə göstər"
+    evidence_required: "FP32 vs INT8 yaddaş (MB), RMSE və təsnifat uyğunluğu cədvəli."
+    skills: [spec-robotics, dl-architectures, ml-regression-metrics]
+  - id: sqlite-telemetry-and-git-ci
+    title: "3. SQLite Analitik Bazası, İndekslər və Strukturlaşdırılmış Logging"
+    goal: "Proqnozları və operator rəylərini SQLite-da saxlayıb LEFT JOIN + GROUP BY ilə model versiyalarını müqayisə etmək."
+    tasks:
+      - "telemetry_predictions və operator_alerts cədvəllərini və (device_id, created_at) indeksini yarat"
+      - "Parametrləşdirilmiş (?) sorğularla batch insert və LEFT JOIN + GROUP BY analitik hesabat funksiyası yaz"
+      - "Hər batch üçün request_id və latency_ms ehtiva edən strukturlaşdırılmış JSON log çıxışı əlavə et"
+    evidence_required: "SQLite analitik sorğusunun nəticə cədvəli və SQL injection testinin keçid sübutu."
+    skills: [sql-basics, git-workflow, prod-monitoring]
+test_plan:
+  - "Generator və Protocol addımlarını saxta (mock) komponentlərlə izolyasiyada yoxlayan unit testlər"
+  - "INT8 kvantizasiyasında bütün q_i dəyərlərinin [-127, 127] aralığında qaldığını yoxlayan sərhəd testləri"
+  - "Heç bir həyəcan siqnalı (alert) olmayan cihazların LEFT JOIN sorğusunda itmədiyini (count=0 çıxdığını) təsdiqləyən SQL testi"
+failure_cases:
+  - "Generatoru iki dəfə dövrə salmağa çalışdıqda ikinci mərhələnin səssizcə 0 qeyd emal etməsi"
+  - "Tək bir nəhəng outlier çəkinin INT8 scale faktorunu böyüdərək bütün kiçik çəkiləri 0-a yuvarlaqlaşdırması (underflow)"
+  - "LEFT JOIN əvəzinə INNER JOIN yazıldığı üçün xətasız işləyən cihazların hesabatdan tamamilə yoxa çıxması"
+privacy_security:
+  - "Bütün SQL sorğularında f-string əvəzinə yalnız `?` placeholder-ləri istifadə edilməlidir"
+  - "Cihaz identifikatorları və koordinatlar loglara yazılarkən həssas ərazi koordinatları maskalanmalı və ya yuvarlaqlaşdırılmalıdır"
+definition_of_done:
+  - "Modulyar pipeline, generator, INT8 kvantizator və SQLite analitik modulu bütün pytest testlərindən keçir"
+  - "FP32 vs INT8 trade-off cədvəli və SQL analitik çıxışı README-də sənədləşdirilib"
+  - "Kod feature branch və təmiz commit tarixçəsi ilə tərtib olunub"
+readme_outline:
+  - "1. Sistem Arxitekturası: Protocol-based Pipeline və Lazy Streaming"
+  - "2. INT8 Kvantizasiya Riyaziyyatı və FP32 vs INT8 Benchmark Cədvəli"
+  - "3. SQLite Telemetriya Sxemi, İndeks Seçimi və Analitik Sorğular"
+  - "4. Quraşdırma və pytest Testlərinin İşə Salınması"
+stretch_goals:
+  - "Per-channel (hər çıxış kanalı üçün ayrı scale s_c) INT8 kvantizasiya yazıb per-tensor kvantizasiya ilə RMSE fərqini müqayisə etmək"

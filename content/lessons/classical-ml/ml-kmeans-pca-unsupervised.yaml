@@ -1,0 +1,442 @@
+id: ml-kmeans-pca-unsupervised
+track: classical-ml
+module: ml-algorithms
+title: "Unsupervised Learning — KMeans klasterləşdirmə, Feature Scaling və PCA praktikada"
+summary: "Etiketsiz datada struktur tapmağı öyrənəcəksən: KMeans-in İnersiya hədəfini və 2 addımlı Lloyd alqoritmini, ölçü vahidlərinin (feature scaling) məsafə və dispersiyanı necə təhrif etdiyini, PCA ilə ölçü azaltmanı və klaster sayını (K) seçməyi mənimsəyəcəksən."
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [ml-trees-gradient-boosting, math-vectors-dot-product]
+next: null
+skills: [ml-algorithms, vectors-dot-product]
+objectives:
+  - "KMeans-in hədəf funksiyasını (İnersiya $J$) və 2 addımlı Lloyd alqoritmini (təyinat və mərkəz yeniləmə) əllə və kodla icra etmək"
+  - "Standartlaşdırma (`StandardScaler`) olmadan KMeans və PCA-nın niyə böyük ölçü vahidli sütun tərəfindən zəbt edildiyini sübut etmək"
+  - "Elbow metodu, Silhouette skoru və biznes faydalılığı ilə klaster sayını ($K$) seçmək"
+  - "KMeans və PCA-nın uğursuz olduğu halları (qeyri-kürəvi klasterlər, outlier həssaslığı, qeyri-xətti manifoldlar) tanımaq"
+why_it_matters: |
+  Real dünyada datanın böyük hissəsi **etiketsizdir (unlabeled)**: milyonlarla müştəri əməliyyatı, istifadəçi sessiyası və ya sensor qeydi var, amma heç kim onları əllə siniflərə ayırmayıb.
+
+  **Unsupervised learning (nəzarətsiz öyrənmə)** bizə etiketsiz datanı seqmentlərə ayırmağa (**KMeans klasterləşdirmə**), yüzlərlə korrelyasiyalı sütunu bir neçə əsas oxda sıxışdırıb vizuallaşdırmağa və küyü azaltmağa (**PCA — Principal Component Analysis**) imkan verir. Eyni zamanda məsafə və dispersiya əsaslı bu alqoritmlər ölçü vahidlərinə (`AZN` vs `il`) son dərəcə həssasdır — burada edilən tək bir preprocessing səhvi bütün seqmentasiyanı mənasız edir.
+terms:
+  - term: Unsupervised Learning (Nəzarətsiz öyrənmə)
+    definition: "Hədəf etiketi ($y$) olmadan yalnız giriş matrisindəki ($X$) daxili strukturu, qrupları (clustering) və ya aşağı ölçülü proyeksiyanı (dimensionality reduction) öyrənən metodlar."
+  - term: Centroid (Klaster mərkəzi)
+    definition: "Klasterə aid olan bütün nöqtələrin koordinat üzrə ədədi ortası ($\\boldsymbol{\\mu}_k$)."
+  - term: Inertia (Within-Cluster Sum of Squares — WCSS)
+    definition: "Hər bir nöqtədən öz təyin olunduğu klaster mərkəzinə qədər olan kvadratik Evklid məsafələrinin cəmi: $J = \\sum_{i=1}^n \\|\\mathbf{x}_i - \\boldsymbol{\\mu}_{c(i)}\\|_2^2$."
+  - term: Lloyd's Algorithm
+    definition: "KMeans-i həll edən 2 addımlı iterativ alqoritm: (1) hər nöqtəni ən yaxın mərkəzə təyin et, (2) hər mərkəzi öz nöqtələrinin ortalamasına sürüşdür."
+  - term: Feature Standardization (Z-score scaling)
+    definition: "Hər sütundan ortalamanı çıxıb standart meylə bölmək ($z = (x - \\mu)/\\sigma$); bütün sütunları orta $=0$, dispersiya $=1$ miqyasına gətirir."
+  - term: PCA (Principal Component Analysis)
+    definition: "Datanı maksimum dispersiya (variance) istiqamətlərinə proyeksiya edərək bir-biri ilə korrelyasiyasız (ortoqonal) yeni oxlara çevirən xətti ölçü azaltma metodu."
+  - term: Silhouette Score
+    definition: "Nöqtənin öz klasterinə nə qədər yaxın ($a_i$) və ən yaxın qonşu klasterdən nə qədər uzaq ($b_i$) olduğunu ölçən $[-1, +1]$ aralığında keyfiyyət metriki: $s_i = (b_i - a_i)/\\max(a_i, b_i)$."
+sections:
+  - id: scaling-kmeans-and-pca
+    kind: explanation
+    title: "Ölçü vahidləri tələsi, KMeans riyaziyyatı və PCA"
+    body: |
+      ### 1. Niyə KMeans və PCA ölçü vahidlərinə (Feature Units) qarşı kor-koranə həssasdır?
+
+      Qərar ağacları hər sütuna ayrı-ayrılıqda baxdığı üçün maaşı `AZN`-dən `qəpiyə` çevirsən belə ağacın bölünməsi dəyişmir. Amma **KMeans** və **PCA** həndəsi məsafə və dispersiya ilə işləyir!
+
+      Tutaq ki, iki müştəri arasında Evklid məsafəsini hesablayırıq:
+      - Xüsusiyyət 1: Aylıq maaş $\in [1000, 5000]\text{ AZN}$
+      - Xüsusiyyət 2: Yaş $\in [20, 60]\text{ il}$
+
+      Müştəri A $(2000\text{ AZN}, 25\text{ yaş})$ və Müştəri B $(2500\text{ AZN}, 55\text{ yaş})$ arasındakı kvadratik məsafə:
+
+      $$d^2(A, B) = (\underbrace{2500 - 2000}_{500})^2 + (\underbrace{55 - 25}_{30})^2 = 250\,000 + 900 = 250\,900$$
+
+      Maaş fərqinin kvadratı ($250\,000$) yaş fərqinin kvadratından ($900$) **277 dəfə böyükdür**! Standartlaşdırma (`StandardScaler`) etməsən:
+      - **KMeans** müştəriləri faktiki olaraq **yalnız maaşa görə** qruplaşdıracaq, yaş sütununu tamamilə rədd edəcək.
+      - **PCA** 1-ci baş komponenti (`PC1`) maksimum dispersiya axtardığı üçün demək olar ki, 100% maaş oxu üzərinə yönəldəcək.
+
+      > **Qızıl qayda:** KMeans və ya PCA tətbiq etməzdən əvvəl bütün ədədi sütunları `StandardScaler` ($z = \frac{x - \mu}{\sigma}$) ilə eyni miqyasa gətir.
+
+      ---
+
+      ### 2. KMeans Hədəf Funksiyası (Inertia) və 2 Addımlı Lloyd Alqoritmi
+
+      KMeans $n$ nöqtəni ($\mathbf{x}_1, \dots, \mathbf{x}_n \in \mathbb{R}^d$) əvvəlcədən seçilmiş $K$ klasterə elə bölmək istəyir ki, **İnersiya (Within-Cluster Sum of Squares)** minimum olsun:
+
+      $$J = \sum_{i=1}^{n} \left\| \mathbf{x}_i - \boldsymbol{\mu}_{c(i)} \right\|_2^2$$
+
+      Simvollar:
+      - $\mathbf{x}_i$ — $i$-ci data nöqtəsinin $d$-ölçülü xüsusiyyət vektoru
+      - $c(i) \in \{0, 1, \dots, K-1\}$ — $i$-ci nöqtənin təyin olunduğu klasterin indeksi
+      - $\boldsymbol{\mu}_k$ — $k$-cı klasterin mərkəzi (centroid)
+      - $\|\mathbf{x}_i - \boldsymbol{\mu}_{c(i)}\|_2^2$ — nöqtə ilə onun klaster mərkəzi arasındakı kvadratik Evklid məsafəsi
+
+      Bu optimallaşdırma **Lloyd alqoritmi** ilə iki növbələşən addımda həll olunur:
+      1. **Addım 1 — Təyinat (Assignment step):** Mərkəzləri sabit saxla, hər $\mathbf{x}_i$ nöqtəsini ən yaxın mərkəzə təyin et:
+         $$c(i) = \arg\min_{k \in \{0, \dots, K-1\}} \|\mathbf{x}_i - \boldsymbol{\mu}_k\|_2$$
+      2. **Addım 2 — Mərkəz yeniləmə (Update step):** Təyinatları sabit saxla, hər klasterin mərkəzini həmin klasterə düşən nöqtələrin ədədi ortası kimi yenidən hesabla:
+         $$\boldsymbol{\mu}_k = \frac{1}{|C_k|} \sum_{i \in C_k} \mathbf{x}_i$$
+
+      Hər iki addım İnersiya $J$-ni yalnız azalda (və ya dəyişməz saxlaya) bilər, ona görə alqoritm sonlu sayda addımdan sonra mütləq dayanır (lokal minimuma yığılır). Başlanğıc mərkəzlərin uğursuz seçilməsi riskini azaltmaq üçün **KMeans++** (`init="k-means++"`) başlanğıc mərkəzləri bir-birindən uzaq seçir.
+
+      ---
+
+      ### 3. $K$ sayının seçilməsi, Uğursuzluq Rejimləri və PCA
+
+      - **Necə $K$ seçməli?**
+        1. **Elbow (Dirsək) metodu:** $K=1, 2, \dots, 10$ üçün İnersiya $J$-ni qurursan. Diqqət et: $K$ artdıqca İnersiya **həmişə azalır** ($K=n$ olduqda $J=0$ olur!). Ona görə ən kiçik $J$-ni yox, azalma sürətinin kəskin yavaşladığı "dirsək" nöqtəsini seçirsən.
+        2. **Silhouette Score:** Klasterlərin daxili sıxlığını və klasterlərarası ayrılmanı ölçür ($+1$-ə nə qədər yaxındırsa, bir o qədər yaxşıdır).
+        3. **Biznes faydalılığı (Domain utility):** Marketinq komandası 47 fərqli kampaniya idarə edə bilməz — bəzən $K=4$ və ya $K=5$ praktiki əməliyyat tələbidir.
+      - **KMeans-in uğursuz olduğu hallar:**
+        - **Qeyri-kürəvi (non-spherical) və ya fərqli sıxlıqlı klasterlər:** Aypara, halqa və ya uzunsov diaqonal qrupları KMeans ortadan kəsir (Evklid kürələri fərz edir).
+        - **Outlier həssaslığı:** Mərkəz ədədi orta ($\mu$) olduğu üçün tək bir ekstremal outlier mərkəzi özünə tərəf dartır.
+      - **PCA praktikada:** Yüksək ölçülü datanı ($d=100$) KMeans-ə verməzdən əvvəl və ya 2D qrafikdə çəkmək üçün `PCA(n_components=0.95)` (dispersiyanın 95%-ni saxlayan komponentlər) ilə sıxmaq həm küyü təmizləyir, həm də "ölçü lənətini" (curse of dimensionality) yumşaldır.
+  - id: emergency-hubs-analogy
+    kind: analogy
+    title: "Mental model: Şəhərdə 3 təcili yardım stansiyasının yerləşdirilməsi"
+    body: |
+      Təsəvvür et ki, şəhərdə $K = 3$ səyyar təcili yardım stansiyası (**centroid**) qurmalısan ki, sakinlərin stansiyaya orta məsafəsi minimum olsun:
+
+      1. Əvvəlcə 3 furqonu şəhərin təsadüfi 3 nöqtəsində saxlayırsan.
+      2. **Addım 1 (Assignment):** Şəhərdəki hər bir ev xəritəyə baxır və özünə **ən yaxın** furqona bağlanır. Şəhər 3 zonaya bölünür.
+      3. **Addım 2 (Update):** Hər furqonun sürücüsü öz zonasına düşən bütün evlərin koordinatlarının **mərkəzinə (ağırlıq mərkəzinə)** sürür.
+      4. Furqonlar yerini dəyişdiyi üçün sərhəddəki bəzi evlər indi başqa furqona daha yaxın olur — yenidən Addım 1 və Addım 2 təkrarlanır. Heç bir ev öz stansiyasını dəyişməyəndə sistem tarazlığa çatır!
+  - id: kmeans-pipeline-diagram
+    kind: diagram
+    title: "Standartlaşdırma + PCA + KMeans İterasiya Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        RAW["X_raw (fərqli vahidlər: AZN, yaş)"] --> SC["StandardScaler (μ=0, σ=1)"]
+        SC --> PCA["PCA (ixtiyari: küyü azalt / 2D proyeksiya)"]
+        PCA --> INIT["KMeans++ ilə K mərkəz seç"]
+        INIT --> ASSIGN["Addım 1: Hər nöqtəni ən yaxın mərkəzə təyin et"]
+        ASSIGN --> UPDATE["Addım 2: Mərkəzləri klaster ortalaması ilə yenilə"]
+        UPDATE --> CHECK{"Mərkəzlər dəyişdi?"}
+        CHECK -- "Bəli" --> ASSIGN
+        CHECK -- "Xeyr" --> DONE["Yekun Klasterlər və İnersiya J"]
+      ```
+
+      Diaqramda `StandardScaler`-in ən başda durmasına diqqət et: həm PCA, həm də KMeans məsafə/dispersiya hesabladığı üçün miqyaslama ilk addım olmalıdır.
+  - id: worked-2d-kmeans
+    kind: worked_example
+    title: "Addım-addım 2D rəqəmlərlə: KMeans-in 1 tam iterasiyası"
+    body: |
+      4 nöqtəmiz (standartlaşdırılmış 2D koordinatlar) və $K = 2$ başlanğıc mərkəzimiz var:
+      - Nöqtələr: $x_0 = [1.0, 1.0]$, $x_1 = [1.0, 3.0]$, $x_2 = [5.0, 5.0]$, $x_3 = [7.0, 5.0]$
+      - Başlanğıc mərkəzlər: $\mu_0 = [1.0, 1.0]$, $\mu_1 = [5.0, 5.0]$
+
+      **Addım 1: Hər nöqtədən $\mu_0$ və $\mu_1$-ə Evklid məsafəsini hesablayıb ən yaxın klasterə təyin edirik**
+
+      | Nöqtə $x_i$ | $\mu_0 = [1, 1]$-ə məsafə $\sqrt{\Delta x^2 + \Delta y^2}$ | $\mu_1 = [5, 5]$-ə məsafə | Ən yaxın klaster $c(i)$ |
+      |---|---|---|---|
+      | $x_0 = [1, 1]$ | $\sqrt{0^2 + 0^2} = \mathbf{0.0}$ | $\sqrt{4^2 + 4^2} = \sqrt{32} \approx 5.66$ | **Klaster 0** |
+      | $x_1 = [1, 3]$ | $\sqrt{0^2 + 2^2} = \mathbf{2.0}$ | $\sqrt{4^2 + 2^2} = \sqrt{20} \approx 4.47$ | **Klaster 0** |
+      | $x_2 = [5, 5]$ | $\sqrt{4^2 + 4^2} \approx 5.66$ | $\sqrt{0^2 + 0^2} = \mathbf{0.0}$ | **Klaster 1** |
+      | $x_3 = [7, 5]$ | $\sqrt{6^2 + 4^2} = \sqrt{52} \approx 7.21$ | $\sqrt{2^2 + 0^2} = \mathbf{2.0}$ | **Klaster 1** |
+
+      Təyinat siyahısı: `assignments = [0, 0, 1, 1]`.
+
+      **Addım 2: Hər klasterin yeni mərkəzini (nöqtələrin ortalamasını) hesablayırıq**
+      - **Klaster 0** nöqtələri: $x_0 = [1, 1]$ və $x_1 = [1, 3]$
+        $$\mu_0^{\text{new}} = \left[\frac{1 + 1}{2}, \frac{1 + 3}{2}\right] = [1.0, 2.0]$$
+      - **Klaster 1** nöqtələri: $x_2 = [5, 5]$ və $x_3 = [7, 5]$
+        $$\mu_1^{\text{new}} = \left[\frac{5 + 7}{2}, \frac{5 + 5}{2}\right] = [6.0, 5.0]$$
+
+      **Yeni İnersiya ($J$):**
+      - Klaster 0 daxili kvadratik məsafələr: $\|[1,1]-[1,2]\|_2^2 + \|[1,3]-[1,2]\|_2^2 = 1^2 + 1^2 = 2.0$
+      - Klaster 1 daxili kvadratik məsafələr: $\|[5,5]-[6,5]\|_2^2 + \|[7,5]-[6,5]\|_2^2 = 1^2 + 1^2 = 2.0$
+      - Ümumi İnersiya: $J = 2.0 + 2.0 = 4.0$ (başlanğıcdakı $0^2 + 2^2 + 0^2 + 2^2 = 8.0$-dan $4.0$-a düşdü!).
+  - id: kmeans-pca-code
+    kind: code
+    title: "Kod: Saf Python-da KMeans addımı və scikit-learn Pipeline (Scaler + PCA + KMeans)"
+    body: |
+      ```python
+      import math
+
+
+      def euclidean_distance(a: list[float], b: list[float]) -> float:
+          return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+      def kmeans_step(
+          points: list[list[float]],
+          centroids: list[list[float]],
+      ) -> tuple[list[int], list[list[float]]]:
+          """Run one Lloyd iteration: assign points and recompute centroids."""
+          k = len(centroids)
+          dim = len(centroids[0])
+          assignments: list[int] = []
+          clusters: list[list[list[float]]] = [[] for _ in range(k)]
+
+          for pt in points:
+              # Ən kiçik Evklid məsafəli mərkəzin indeksini tap (bərabərlikdə kiçik indeks)
+              best_idx = min(range(k), key=lambda idx: euclidean_distance(pt, centroids[idx]))
+              assignments.append(best_idx)
+              clusters[best_idx].append(pt)
+
+          new_centroids: list[list[float]] = []
+          for idx, member_pts in enumerate(clusters):
+              if not member_pts:
+                  # Boş qalan klasterin köhnə mərkəzini qoru
+                  new_centroids.append(list(centroids[idx]))
+              else:
+                  m = len(member_pts)
+                  mean_vec = [sum(p[d] for p in member_pts) / m for d in range(dim)]
+                  new_centroids.append(mean_vec)
+
+          return assignments, new_centroids
+
+
+      pts = [[1.0, 1.0], [1.0, 3.0], [5.0, 5.0], [7.0, 5.0]]
+      init_c = [[1.0, 1.0], [5.0, 5.0]]
+      labels, updated_c = kmeans_step(pts, init_c)
+      print(labels)     # [0, 0, 1, 1]
+      print(updated_c)  # [[1.0, 2.0], [6.0, 5.0]]
+      ```
+
+      **Production-da `StandardScaler`, `PCA` və `KMeans` birlikdə necə qurulur?**
+
+      ```python
+      from sklearn.cluster import KMeans
+      from sklearn.decomposition import PCA
+      from sklearn.metrics import silhouette_score
+      from sklearn.pipeline import make_pipeline
+      from sklearn.preprocessing import StandardScaler
+
+      # 1. Miqyaslama + Ölçü azaltma (dispersiyanın 95%-ni saxla)
+      prep_pipe = make_pipeline(
+          StandardScaler(),
+          PCA(n_components=0.95, random_state=42),
+      )
+      X_reduced = prep_pipe.fit_transform(X_raw)
+
+      # 2. Müxtəlif K dəyərlərini Silhouette ilə yoxla
+      for k in range(2, 7):
+          km = KMeans(n_clusters=k, init="k-means++", n_init=10, random_state=42)
+          cluster_ids = km.fit_predict(X_reduced)
+          score = silhouette_score(X_reduced, cluster_ids)
+          print(f"K={k} | Inertia={km.inertia_:.1f} | Silhouette={score:.3f}")
+      ```
+  - id: unsup-common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Xam (scale olunmamış) dataya birbaşa `KMeans` və ya `PCA` tətbiq etmək**
+      Əgər bir sütun `0..1`, digəri `0..100000` aralığındadırsa, həm Evklid məsafəsi, həm də kovariasiya matrisi tamamilə ikinci sütunun əsirinə çevrilir. **Düzəliş:** Həmişə əvvəlcə `StandardScaler` (və ya outlier çoxdursa `RobustScaler`) tətbiq et.
+
+      **2. "Ən yaxşı $K$ inersiyası ($J$) ən kiçik olandır" düşünmək**
+      $K$-nı artırdıqca İnersiya $J$ riyazi olaraq **həmişə azalır**. $n=1000$ nöqtə üçün $K=1000$ seçsən, hər nöqtə özü bir mərkəz olar və $J = 0$ alınar — amma bu heç bir qruplaşdırma vermir! **Düzəliş:** İnersiyanın minimumunu yox, Elbow qırılma nöqtəsini və Silhouette skorunu axtar.
+
+      **3. Klaster etiketlərini (`0, 1, 2`) sabit mənalı sinif kimi qəbul etmək**
+      KMeans-də `random_state` dəyişəndə əvvəl `Klaster 0` olan VIP müştərilər növbəti işə salmada `Klaster 2` adlana bilər (label switching). **Düzəliş:** Klasterləri rəqəmlə yox, mərkəz profilinə (`centroid` dəyərlərinə) görə adlandır və avtomatik yoxla.
+
+      **4. Ekstremal outlier-ləri təmizləmədən KMeans işlətmək**
+      Tək bir milyarder müştəri və ya səhv yazılmış `9999999` dəyəri bütöv bir klaster mərkəzini öz üzərinə çəkir, qalan normal müştəriləri isə bir yerə sıxışdırır.
+  - id: clustering-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndis seçimləri: KMeans vs DBSCAN vs Hiyerarxik klasterləşdirmə və PCA"
+    body: |
+      | Metod | Üstünlüyü | Zəif tərəfi | Nə vaxt seçməli? |
+      |---|---|---|---|
+      | **KMeans** | Çox sürətli $O(n \cdot K \cdot d)$, böyük datada miqyaslanır (`MiniBatchKMeans`) | $K$ əvvəlcədən verilməlidir; yalnız kürəvi klasterlər; outlier-lərə həssasdır | Müştəri seqmentasiyası, vektor kvantlaması, böyük cədvəl datası |
+      | **DBSCAN / HDBSCAN** | $K$ tələb etmir; ixtiyari formalı klasterləri tapır; outlier-ləri `-1` (küy) kimi ayırır | Yüksək ölçülü datada məsafə sıxlığı pozulur (`eps` seçmək çətindir) | Coğrafi koordinatlar, anomaliya aşkarlama, qeyri-kürəvi həndəsə |
+      | **PCA** | Küyü azaldır, korrelyasiyalı sütunları sıxır, 2D/3D vizuallaşdırma verir | Yeni oxlar (`PC1, PC2`) orijinal xüsusiyyətlərin xətti qarışığıdır — birbaşa biznes izahı çətinləşir | Yüksək ölçülü ($d > 30$) ədədi datanı sıxmaq və vizuallaşdırmaq |
+mastery_criteria:
+  - "Verilmiş nöqtələr və mərkəzlər üçün KMeans-in təyinat və mərkəz yeniləmə addımını həm əllə, həm də Python-da səhvsiz icra edirsən"
+  - "Ölçü vahidləri fərqli olan sütunlarda `StandardScaler` olmadan KMeans və PCA-nın niyə səhv nəticə verdiyini riyazi məsafə düsturu ilə göstərə bilirsən"
+  - "İnersiya əyrisindən (Elbow) və Silhouette skorundan istifadə edərək $K$ seçimini əsaslandıra bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlunsup-inertia-k-equals-n
+      type: numeric
+      title: "K = n olduqda KMeans İnersiyası"
+      prompt: |
+        Əgər $n = 50$ fərqli data nöqtəmiz varsa və KMeans-də klaster sayını $K = 50$ seçsək (hər nöqtə özü ayrıca klaster mərkəzi olsa), minimum **İnersiya ($J$)** neçəyə bərabər olar?
+      skills: [ml-algorithms]
+      category: math
+      answer: 0
+      tolerance: 0.001
+      hints:
+        - "İnersiya hər nöqtədən öz klaster mərkəzinə qədər olan kvadratik məsafələrin cəmidir."
+        - "Hər nöqtə özü klaster mərkəzidirsə ($\\mathbf{x}_i = \\boldsymbol{\\mu}_{c(i)}$), məsafə nə qədərdir?"
+      explanation: "$K = n$ olduqda hər nöqtə öz mərkəzi ilə üst-üstə düşür ($\\|\\mathbf{x}_i - \\boldsymbol{\\mu}_{c(i)}\\|_2^2 = 0$), ona görə $J = 0$. Məhz buna görə $K$-nı sadəcə İnersiyanı sıfırlamaqla seçmək olmaz."
+    - id: q-mlunsup-pca-scaling
+      type: mcq
+      title: "PCA və Feature Scaling"
+      prompt: "Standartlaşdırılmamış datada 1-ci sütun `maaş (1000..8000 AZN)`, 2-ci sütun isə `iş_stajı (1..25 il)` olarsa, PCA-nın 1-ci baş komponenti (`PC1`) necə davranacaq?"
+      skills: [ml-algorithms, vectors-dot-product]
+      category: concept
+      options:
+        - id: a
+          text: "Hər iki sütuna bərabər çəki (0.707, 0.707) verəcək"
+          feedback: "Xeyr — bu yalnız hər iki sütunun dispersiyası eyni miqyasa gətirildikdə (StandardScaler-dən sonra) baş verir."
+        - id: b
+          text: "Demək olar ki, tamamilə `maaş` sütunu istiqamətinə yönələcək, çünki onun ədədi dispersiyası milyonlarla dəfə böyükdür"
+          feedback: "Doğru! PCA maksimum dispersiya (variance) istiqamətini axtarır; miqyaslama olmadan böyük vahidli sütun bütün dispersiyanı zəbt edir."
+        - id: c
+          text: "Avtomatik olaraq sütunları daxildə `[0, 1]` aralığına salacaq"
+          feedback: "Xeyr — standart `PCA` yalnız mərkəzləşdirmə ($\\mu$-nü çıxmaq) edir, standart meylə ($\\sigma$) bölmür."
+      answer: b
+      explanation: "PCA kovariasiya matrisinin məxsusi vektorlarını tapır. Sütunlar `StandardScaler` ilə miqyaslanmasa, böyük ölçü vahidli sütunun dispersiyası $\\sigma^2$ digərlərini tamamilə kölgədə qoyur."
+    - id: q-mlunsup-lloyd-steps
+      type: mcq
+      title: "Lloyd alqoritminin 2-ci addımı"
+      prompt: "KMeans-in 1-ci addımında bütün nöqtələr ən yaxın mərkəzə təyin olundu. 2-ci addımda hər klasterin yeni mərkəzi ($\\boldsymbol{\\mu}_k$) necə hesablanır?"
+      skills: [ml-algorithms, vectors-dot-product]
+      category: concept
+      options:
+        - id: a
+          text: "Klasterə düşən bütün nöqtələrin koordinat üzrə ədədi ortası (mean) kimi"
+          feedback: "Doğru! Kvadratik Evklid məsafələrinin cəmini minimum edən nöqtə məhz həmin nöqtələrin ədədi ortasıdır."
+        - id: b
+          text: "Klasterdəki ən uzaq iki nöqtənin fərqi kimi"
+          feedback: "Xeyr — bu klasterin diametri ilə bağlıdır, ağırlıq mərkəzi deyil."
+        - id: c
+          text: "Gini Impurity-ni maksimum edən kəsim nöqtəsi kimi"
+          feedback: "Xeyr — Gini qərar ağaclarında istifadə olunur."
+      answer: a
+      explanation: "Lloyd alqoritminin 2-ci addımında hər klasterin mərkəzi ona təyin olunmuş nöqtələrin koordinat üzrə ədədi ortasına ($\\boldsymbol{\\mu}_k = \\frac{1}{|C_k|}\\sum_{i \\in C_k} \\mathbf{x}_i$) bərabər edilir."
+    - id: q-mlunsup-failure-modes
+      type: multi
+      title: "KMeans-in zəif tərəfləri"
+      prompt: "Aşağıdakı hallardan hansılar standart **KMeans** alqoritminin məlum məhdudiyyətləridir? **Hamısını seç.**"
+      skills: [ml-algorithms]
+      category: concept
+      options:
+        - id: a
+          text: "Klaster sayının ($K$) əvvəlcədən verilməsini tələb edir"
+          feedback: "Doğru — $K$ hiperparametr kimi istifadəçi tərəfindən təyin edilməlidir."
+        - id: b
+          text: "Ekstremal outlier nöqtələr klaster mərkəzini (mean) özünə tərəf sürüşdürür"
+          feedback: "Doğru — ədədi orta outlier-lərə qarşı dayanıqlı deyil."
+        - id: c
+          text: "İç-içə halqa və ya iki aypara formalı qeyri-kürəvi klasterləri düzgün ayıra bilmir"
+          feedback: "Doğru — KMeans Evklid məsafəsi ilə kürəvi (Voronoi) sərhədlər qurur."
+        - id: d
+          text: "Yalnız hədəf etiketi ($y$) tam məlum olduqda işləyə bilir"
+          feedback: "Yanlış — KMeans unsupervised alqoritmdir, $y$ etiketi tələb etmir."
+      answers: [a, b, c]
+      explanation: "KMeans $K$-nın əvvəlcədən seçilməsini tələb edir, kürəvi klasterlər fərz edir və ədədi ortadan istifadə etdiyi üçün outlier-lərə həssasdır."
+exercises:
+  - id: ex-mlunsup-kmeans-step
+    type: code
+    title: "KMeans-in bir tam Lloyd addımını (kmeans_step) implementasiya et"
+    prompt: |
+      `kmeans_step(points, centroids)` funksiyasını yaz:
+
+      - **Input:**
+        - `points: list[list[float]]` — $n$ ədəd $d$-ölçülü nöqtə.
+        - `centroids: list[list[float]]` — $K$ ədəd $d$-ölçülü cari klaster mərkəzi.
+      - **Output:** `(assignments, new_centroids)` tuple-ı:
+        1. `assignments: list[int]` — hər nöqtə üçün ən yaxın mərkəzin indeksi (`0 .. K-1`). Məsafə Evklid məsafəsi ilə ölçülür. Əgər iki mərkəzə məsafə tam bərabərdirsə, **daha kiçik indeksi** seç.
+        2. `new_centroids: list[list[float]]` — hər klasterə düşən nöqtələrin koordinat üzrə ədədi ortası. Əgər hər hansı klasterə **0 nöqtə** düşübsə, həmin klaster üçün **köhnə mərkəzin kopyasını** saxla.
+      - Input list-ləri dəyişdirmə (mutate etmə).
+    skills: [ml-algorithms, vectors-dot-product]
+    category: python
+    difficulty: 2
+    hints:
+      - "İki nöqtə arasındakı kvadratik Evklid məsafəsi `sum((a - b) ** 2 for a, b in zip(pt, c))` məsafə sırasını qoruyur (`math.sqrt` yazsan da olar)."
+      - "`min(range(len(centroids)), key=lambda idx: dist(pt, centroids[idx]))` Python-da bərabərlik zamanı avtomatik ən kiçik `idx`-i qaytarır."
+      - "Hər klaster üçün nöqtələri topla; siyahı boşdursa `list(centroids[idx])`, əks halda hər koordinat `d` üzrə `sum(p[d] for p in cluster) / len(cluster)` hesabla."
+    starter_code: |
+      def kmeans_step(
+          points: list[list[float]],
+          centroids: list[list[float]],
+      ) -> tuple[list[int], list[list[float]]]:
+          # TODO: 1) hər nöqtəni ən yaxın mərkəzə təyin et
+          # TODO: 2) hər klasterin yeni mərkəzini (boş klasterdə köhnə mərkəzi) hesabla
+          return [], []
+    tests:
+      - name: "2D nöqtələrdə standart təyinat və mərkəz yeniləməsi"
+        code: |
+          pts = [[1.0, 1.0], [1.0, 3.0], [5.0, 5.0], [7.0, 5.0]]
+          cents = [[1.0, 1.0], [5.0, 5.0]]
+          assign, new_c = kmeans_step(pts, cents)
+          assert assign == [0, 0, 1, 1], f"Gözlənilən [0, 0, 1, 1], alınan {assign}"
+          assert new_c == [[1.0, 2.0], [6.0, 5.0]], f"Gözlənilən [[1.0, 2.0], [6.0, 5.0]], alınan {new_c}"
+      - name: "Boş qalan klaster öz köhnə mərkəzini qoruyur"
+        code: |
+          pts = [[0.0, 0.0], [2.0, 0.0]]
+          cents = [[1.0, 0.0], [100.0, 100.0]]
+          assign, new_c = kmeans_step(pts, cents)
+          assert assign == [0, 0], f"Alınan: {assign}"
+          assert new_c[0] == [1.0, 0.0], f"Klaster 0 mərkəzi: {new_c[0]}"
+          assert new_c[1] == [100.0, 100.0], f"Boş klaster köhnə mərkəzi saxlamalıdır: {new_c[1]}"
+      - name: "Bərabər məsafədə kiçik indeks seçilir və input mutasiya olunmur"
+        code: |
+          pts = [[5.0, 0.0]]
+          cents = [[0.0, 0.0], [10.0, 0.0]]
+          cents_copy = [list(c) for c in cents]
+          assign, new_c = kmeans_step(pts, cents)
+          assert assign == [0], f"Bərabər məsafədə kiçik indeks (0) seçilməlidir, alınan: {assign}"
+          assert new_c == [[5.0, 0.0], [10.0, 0.0]]
+          assert cents == cents_copy, "Input centroids dəyişdirilməməlidir"
+    solution: |
+      def kmeans_step(
+          points: list[list[float]],
+          centroids: list[list[float]],
+      ) -> tuple[list[int], list[list[float]]]:
+          k = len(centroids)
+          dim = len(centroids[0]) if centroids else 0
+          assignments: list[int] = []
+          clusters: list[list[list[float]]] = [[] for _ in range(k)]
+
+          for pt in points:
+              best_idx = min(
+                  range(k),
+                  key=lambda idx: sum((a - b) ** 2 for a, b in zip(pt, centroids[idx])),
+              )
+              assignments.append(best_idx)
+              clusters[best_idx].append(pt)
+
+          new_centroids: list[list[float]] = []
+          for idx, members in enumerate(clusters):
+              if not members:
+                  new_centroids.append(list(centroids[idx]))
+              else:
+                  m = len(members)
+                  new_centroids.append([sum(p[d] for p in members) / m for d in range(dim)])
+
+          return assignments, new_centroids
+    explanation: |
+      Funksiya əvvəlcə hər nöqtədən bütün mərkəzlərə kvadratik Evklid məsafəsini hesablayıb ən yaxın klasterə təyin edir, sonra isə hər klasterin nöqtələrini koordinat üzrə ortalayır. Boş qalan klasterlərdə sıfıra bölmə baş verməməsi üçün köhnə mərkəzin kopyası saxlanılır.
+  - id: ex-mlunsup-scaling-mcq
+    type: mcq
+    title: "Diaqnostika: Niyə KMeans yalnız gəlir sütununa baxdı?"
+    prompt: |
+      Bir pərakəndə satış komandası müştəriləri iki xüsusiyyətə görə $K = 3$ seqmentə ayırmaq üçün `KMeans(n_clusters=3).fit(X)` işlədir:
+      - `annual_income_azn`: İllik gəlir (`6 000 .. 120 000 AZN`)
+      - `monthly_visits`: Aylıq mağaza ziyarəti sayı (`1 .. 12 dəfə`)
+
+      Nəticələri yoxlayanda görürlər ki, klasterlər müştəriləri **yalnız illik gəlirə** görə (aşağı, orta, yüksək gəlir) bölüb; aylıq ziyarət sayının klasterlərə heç bir təsiri olmayıb.
+
+      Bu problemin kök səbəbi və düzgün həlli nədir?
+    skills: [ml-algorithms, vectors-dot-product]
+    category: debug
+    difficulty: 1
+    hints:
+      - "İki müştəri arasındakı Evklid məsafəsində $(60000 - 50000)^2$ ilə $(12 - 1)^2$ hədlərini müqayisə et."
+      - "KMeans-dən əvvəl hansı preprocessing addımı unudulub?"
+    options:
+      - id: a
+        text: "KMeans maksimum 1 xüsusiyyətlə işləyə bilir; 2 xüsusiyyət üçün Random Forest istifadə edilməlidir"
+        feedback: "Xeyr — KMeans istənilən sayda ($d$) ədədi xüsusiyyətlə işləyir."
+      - id: b
+        text: "Ölçü vahidləri miqyaslanmayıb (`StandardScaler` yoxdur): minlərlə AZN fərqi Evklid məsafəsində `1..12` ziyarət fərqini tamamilə üstələyir. KMeans-dən əvvəl `StandardScaler` tətbiq edilməlidir"
+        feedback: "Doğru! $10\\,000^2 = 10^8$ olduğu halda $11^2 = 121$-dir. Standartlaşdırma olmadan məsafə yalnız gəliri görür."
+      - id: c
+        text: "`n_clusters=3` əvəzinə `n_clusters=100` seçilməlidir ki, ziyarət sayı da nəzərə alınsın"
+        feedback: "Xeyr — $K$-nı artırmaq iki sütun arasındakı $10^6$ dəfəlik miqyas fərqini aradan qaldırmır."
+      - id: d
+        text: "`monthly_visits` sütunu tam ədəd olduğu üçün KMeans onu avtomatik silir"
+        feedback: "Xeyr — KMeans tam ədədləri də float kimi məsafə hesabına daxil edir."
+    answer: b
+    explanation: |
+      Evklid məsafəsi bütün koordinat fərqlərinin kvadratlarını birbaşa toplayır. Sütunlar `StandardScaler` ilə ($\mu=0, \sigma=1$) eyni miqyasa gətirilmədikdə, böyük ədədi diapazona malik sütun məsafəni təkbaşına müəyyən edir.
+references:
+  - title: "scikit-learn User Guide — Clustering (K-Means & Silhouette Analysis)"
+    url: https://scikit-learn.org/stable/modules/clustering.html#k-means
+    note: "KMeans, KMeans++, İnersiya və klaster qiymətləndirmə metrikləri"
+  - title: "scikit-learn User Guide — Importance of Feature Scaling"
+    url: https://scikit-learn.org/stable/auto_examples/preprocessing/plot_scaling_importance.html
+    note: "PCA və məsafə əsaslı alqoritmlərdə StandardScaler-in təsiri"

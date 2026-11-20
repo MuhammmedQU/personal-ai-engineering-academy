@@ -1,0 +1,354 @@
+id: llm-finetuning-lora-vs-rag
+track: llm-engineering
+module: llm-ops-safety
+title: "Fine-Tuning, LoRA/QLoRA və RAG — nə vaxt hansını seçməli?"
+summary: "Prompting, RAG və Supervised Fine-Tuning (SFT / LoRA) arasındakı mühəndislik qərar matrisini quracaq, LoRA-nın aşağı-ranqlı (low-rank) matris riyaziyyatını hesablayacaq və kiçik modelə distillasiya üçün təmiz təlim datası hazırlamağı öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [llm-rag-pipeline-evaluation, dl-pytorch-training-loop]
+next: llm-eval-security-reliability
+skills: [llm-rag, llm-evaluation, dl-training-loop]
+objectives:
+  - Prompting, RAG və Fine-Tuning (SFT/LoRA) arasında texniki və iqtisadi meyarlarla düzgün arxitektura seçmək
+  - "LoRA-nın riyazi düsturunu ($W' = W_0 + \\frac{\\alpha}{r}BA$) və öyrənilən parametr sayındakı azalmanı hesablamaq"
+  - QLoRA-nın 4-bit kvantizasiya ilə VRAM tələbini necə azaltdığını izah etmək
+  - Fine-tuning üçün dataset keyfiyyəti, deduplikasiya və prompt sızmasız (leakage-free) train/val/golden split qurmaq
+why_it_matters: |
+  Yeni başlayan komandaların ən bahalı səhvi: **"Model şirkətimizin sənədlərini bilmir, gəlin onu fine-tune edək!"**
+  Fine-tuning modelə yeni, tez-tez dəyişən faktları əzbərlətmək üçün **deyil** — o, mənbə sitatı (citation) verə bilmir, hər qiymət dəyişəndə yenidən GPU-da öyrədilməsi mümkün deyil və hallüsinasiyanı aradan qaldırmır.
+
+  Əksinə, **LoRA ilə Fine-Tuning** o zaman parlayır ki, sən modelə **davranış, sabit çıxış formatı, spesifik domen üslubu** öyrətmək və ya böyük, baha "müəllim" modelin (məs. GPT-4o / Claude Sonnet) dar bir tapşırıqdakı bacarığını 8B parametrlik ucuz və sürətli "tələbə" modelə **distillə etmək** istəyirsən. Bu fərqi bilmək həm minlərlə dollar GPU büdcəsinə, həm də həftələrlə mühəndis vaxtına qənaət edir.
+terms:
+  - term: Supervised Fine-Tuning (SFT)
+    definition: Əvvəlcədən öyrədilmiş (pre-trained) baza modelin çəkilərini konkret `(input, ideal_output)` nümunələri üzərində yeniləyərək dar tapşırığa uyğunlaşdırmaq.
+  - term: LoRA (Low-Rank Adaptation)
+    definition: "Orijinal $W_0$ çəki matrisini dondurub, yalnız kiçik ranqlı iki matrisin hasilini ($\\Delta W = BA$) öyrənən Parameter-Efficient Fine-Tuning (PEFT) metodu."
+  - term: QLoRA
+    definition: Dondurulmuş baza modeli 4-bit NormalFloat (NF4) formatında VRAM-da saxlayıb, üzərində 16-bit (BF16/FP16) LoRA adapterləri öyrədən yaddaş-effektiv üsul.
+  - term: Rank (r)
+    definition: "LoRA matris ayrılışının daxili ölçüsü ($B \\in \\mathbb{R}^{d_{\\text{out}} \\times r}, A \\in \\mathbb{R}^{r \\times d_{\\text{in}}}$). $r$ kiçik olduqca parametr sayı və VRAM sərfi azalır."
+  - term: LoRA Alpha (α)
+    definition: "Adapter yeniləməsinin miqyaslama əmsalı ($\\frac{\\alpha}{r} BA$). Öyrənmə addımının baza çəkilərinə nə qədər güclü təsir edəcəyini tənzimləyir."
+  - term: Knowledge Distillation
+    definition: Böyük və bahalı müəllim modelin yüksək keyfiyyətli çıxışlarını toplayıb, kiçik və sürətli tələbə modeli həmin nümunələr üzərində SFT ilə öyrətmək.
+  - term: Catastrophic Forgetting
+    definition: Modeli dar bir dataset üzərində həddən artıq fine-tune etdikdə onun əvvəlki ümumi məntiq və dil qabiliyyətlərini itirməsi.
+sections:
+  - id: decision-matrix
+    kind: explanation
+    title: "Mühəndislik qərar matrisi: Prompting vs RAG vs Fine-Tuning"
+    body: |
+      Hər üç yanaşma fərqli problemi həll edir və real production sistemlərində tez-tez **birlikdə** işlədilir:
+
+      | Meyar | Prompting + Few-shot | RAG (Retrieval-Augmented Generation) | SFT / LoRA Fine-Tuning |
+      |---|---|---|---|
+      | **Əsas məqsəd** | Sürətli baseline, təlimatsız tapşırıq | Dinamik faktlar, sənəd axtarışı, sitat | Sabit format, üslub, routing, distillasiya |
+      | **Faktların yenilənməsi** | Promptu dəyişməklə dərhal | İndeksə yeni sənəd əlavə etməklə (saniyələr) | Yenidən təlim tələb edir (saatlar/günlər) |
+      | **Mənbə sitatı (Citation) və ACL** | Yalnız promptdakı mətndən | Bəli — sənəd səviyyəsində icazə (ACL) və dəqiq sitat | Xeyr — çəkilərdəki məlumatın mənbəyi izlənmir |
+      | **İlkin data tələbi** | 0 – 5 nümunə | Təmizlənmiş sənəd korpusu + eval sualları | 500 – 50,000+ yüksək keyfiyyətli `(prompt, completion)` |
+      | **İnferens token xərci** | Uzun sistem promptu hər sorğuda ödənilir | Retrieved chunk-lar konteksti böyüdür | Qısa prompt kifayətdir + kiçik model istifadə oluna bilər |
+
+      **Qızıl qayda:**
+      1. Həmişə **Prompting + Few-shot** və **Golden Evaluation Set** ilə başla.
+      2. Problem **məlumat çatışmazlığıdırsa** (model aktual qiymətləri, daxili qaydanı, müştəri müqaviləsini bilmir) → **RAG** qur.
+      3. Problem **davranış və ya xərcdirsə** (model JSON sxemini pozur, uzun prompt hər sorğuda baha başa gəlir, tibbi/hüquqi təsnifatda xüsusi terminologiya tonu lazımdır) → **LoRA Fine-Tuning** tətbiq et.
+  - id: chef-analogy
+    kind: analogy
+    title: "Mental model: aşpaz, resept dəftəri və kulinariya məktəbi"
+    body: |
+      Baza LLM-i təcrübəli, çox şey oxumuş bir aşpaz kimi təsəvvür et:
+
+      - **Prompting (Sifariş vərəqi):** Aşpaza qısa təlimat verirsən: *"Bu gün yeməyi az duzlu və boşqabın ortasında təqdim et."* Sürətlidir, amma hər sifarişdə uzun-uzadı izah yazmalısan.
+      - **RAG (Mətbəxdəki açıq kataloq və anbar siyahısı):** Aşpaz yemək bişirərkən soyuducudakı bugünkü ərzaq siyahısına və müştərinin allergiya kartına baxır. Soyuducudakı ərzaq hər 5 dəqiqədən bir dəyişsə də, aşpaz həmişə aktual siyahını oxuyur və *"Anbar siyahısı #42-yə əsasən"* deyə bilir.
+      - **Fine-Tuning / LoRA (İxtisaslaşmış təlim kursu):** Aşpazı 3 həftəlik Yapon mətbəxi kursuna göndərirsən ki, bıçaq tutma texnikasını və suşi büküm standartını əzələ yaddaşına yazsın. Kurs aşpaza sabah bazarda balığın neçəyə olacağını öyrətmir — ona **necə işləməyi (davranışı və formanı)** öyrədir.
+  - id: decision-flow-diagram
+    kind: diagram
+    title: Arxitektura seçimi və LoRA adapter axını
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Yeni AI Tapşırığı"] --> B["1. Prompting + Golden Eval Set"]
+        B --> C{"Aktual faktlar, sitat və ya icazə (ACL) lazımdır?"}
+        C -- "Bəli" --> D["RAG Pipeline qur (Hybrid Search + Rerank)"]
+        C -- "Xeyr" --> E{"Sabit format, üslub və ya aşağı latency/xərc lazımdır?"}
+        D --> E
+        E -- "Xeyr" --> F["Prompting / RAG kifayətdir"]
+        E -- "Bəli" --> G["Yüksək keyfiyyətli SFT dataset topla + LoRA öyrət"]
+        G --> H["Dondurulmuş W0 + LoRA Adapter (B * A)"]
+      ```
+
+      Diqqət et: `D --> E` oxu göstərir ki, **RAG və Fine-Tuning rəqib deyil**. Sən RAG ilə tapılan sənədləri oxuyub, şirkətin xüsusi JSON hesabat formatında çıxış verən kiçik bir LoRA modelini birlikdə işlədə bilərsən.
+  - id: lora-math-worked
+    kind: worked_example
+    title: "LoRA riyaziyyatı: 16.78 milyon parametrdən 65 minə"
+    body: |
+      Tam fine-tuning zamanı neyron şəbəkənin hər bir xətti qatındakı $W_0 \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ çəki matrisini yeniləmək üçün eyni ölçüdə qradiyent və optimizer vəziyyəti (Adam-da $m$ və $v$ momentləri) saxlamaq lazımdır.
+
+      **LoRA (Hu et al., 2021)** fərziyyəsi belədir: adaptasiya zamanı çəki dəyişikliyi $\Delta W$ əslində **aşağı ranqlı (low-rank)** strukturda olur. Ona görə $W_0$-ı tamamilə dondururuq (qradiyent hesablanmır) və $\Delta W$-ni iki kiçik matrisin hasili kimi ifadə edirik:
+
+      $$W' = W_0 + \Delta W = W_0 + \frac{\alpha}{r} B A$$
+
+      Simvollar:
+      - $W_0 \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ — dondurulmuş (frozen) baza çəki matrisi
+      - $B \in \mathbb{R}^{d_{\text{out}} \times r}$ və $A \in \mathbb{R}^{r \times d_{\text{in}}}$ — öyrənilən (trainable) aşağı ranqlı matrislər
+      - $r \ll \min(d_{\text{in}}, d_{\text{out}})$ — LoRA ranqı (adətən $4, 8, 16, 32$)
+      - $\alpha$ — sabit miqyaslama hiperparametri (adətən $\alpha = r$ və ya $\alpha = 2r$)
+
+      Təlimin əvvəlində $A$ təsadüfi Qaus paylanması ilə, $B$ isə **sıfır matrisi** ($B = 0$) ilə inisializasiya olunur ki, ilk addımda $\Delta W = 0$ olsun və model baza davranışından pozulmadan başlasın.
+
+      **Ədədi müqayisə:** Tutaq ki, Transformer-in bir proyeksiya qatında $d_{\text{in}} = 4096$, $d_{\text{out}} = 4096$ və LoRA ranqı $r = 8$-dir.
+
+      1. **Tam (Full) parametr sayı:**
+         $$N_{\text{full}} = d_{\text{out}} \times d_{\text{in}} = 4096 \times 4096 = 16,777,216 \approx 16.78\text{M}$$
+      2. **LoRA öyrənilən parametr sayı:**
+         $$N_{\text{LoRA}} = (d_{\text{out}} \times r) + (r \times d_{\text{in}}) = r(d_{\text{out}} + d_{\text{in}}) = 8 \times (4096 + 4096) = 65,536$$
+      3. **Parametr azalması:**
+         $$\text{Azalma \%} = \left(1 - \frac{65,536}{16,777,216}\right) \times 100\% = 99.609375\% \approx 99.61\%$$
+
+      İnferens zamanı isə $W' = W_0 + \frac{\alpha}{r}BA$ matrisini əvvəlcədən toplayıb (merge) tək matris kimi saxlamaq olar — yəni **əlavə inferens gecikməsi (latency overhead) sıfır olur!**
+  - id: lora-code-walkthrough
+    kind: code
+    title: "Kod: LoRA parametr kalkulyatoru və sızmasız SFT dataset hazırlığı"
+    body: |
+      Fine-tuning layihəsində iki mühəndis aləti həmişə əl altında olmalıdır: (1) ranq seçiminin parametr və VRAM büdcəsinə təsirini ölçmək, (2) təlim datasını dublikatlardan və **prompt sızmasından (prompt leakage)** təmizləyib bölmək.
+
+      ```python
+      import hashlib
+
+      def lora_parameter_stats(d_in: int, d_out: int, rank: int) -> dict[str, int | float]:
+          """Calculate full vs LoRA trainable parameter counts and percentage reduction."""
+          if d_in <= 0 or d_out <= 0 or rank <= 0:
+              raise ValueError("Dimensions and rank must be positive integers.")
+          if rank >= min(d_in, d_out):
+              raise ValueError("LoRA rank must be strictly less than min(d_in, d_out).")
+
+          full_params = d_in * d_out
+          lora_params = rank * (d_in + d_out)
+          reduction_pct = round((1.0 - lora_params / full_params) * 100.0, 2)
+          return {
+              "full_params": full_params,
+              "lora_params": lora_params,
+              "reduction_pct": reduction_pct,
+          }
+
+
+      def deduplicate_sft_pairs(pairs: list[dict[str, str]]) -> list[dict[str, str]]:
+          """Deduplicate SFT examples by normalized prompt to prevent train/val leakage."""
+          seen_prompts: set[str] = set()
+          clean: list[dict[str, str]] = []
+          for item in pairs:
+              norm_prompt = " ".join(item["prompt"].strip().lower().split())
+              digest = hashlib.sha256(norm_prompt.encode("utf-8")).hexdigest()
+              if digest not in seen_prompts:
+                  seen_prompts.add(digest)
+                  clean.append(item)
+          return clean
+
+
+      print(lora_parameter_stats(4096, 4096, 8))
+      # {'full_params': 16777216, 'lora_params': 65536, 'reduction_pct': 99.61}
+      ```
+
+      **Niyə `prompt` üzrə deduplikasiya edirik?**
+      Əgər eyni (və ya yalnız boşluqları fərqli olan) sual həm `train`, həm də `validation`/`golden_eval` dəstində düşərsə, validation loss süni şəkildə aşağı görünəcək, amma model real istifadəçi sorğularında əzbərlədiyi cavabı təkrarlayacaq.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Dinamik faktları öyrətmək üçün Fine-Tuning etmək**
+      Məhsul kataloqu, valyuta məzənnəsi və ya gündəlik dəyişən qayda sənədlərini SFT ilə modelə yeritmək həm köhnəlmiş cavablara, həm də uydurma SKU/rəqəm hallüsinasiyasına səbəb olur. Dinamik faktlar **RAG** və ya **Tool Calling (SQL/API)** üçündür.
+
+      **2. Golden Eval dəstini Fine-Tuning-dən SONRA hazırlamaq**
+      Əgər əvvəlcədən toxunulmaz `golden_eval` dəstin yoxdursa, fine-tuned modelin baza modeldən həqiqətən yaxşı olub-olmadığını, yoxsa sadəcə formatı düzəldib məntiqi pozduğunu (catastrophic forgetting) bilməyəcəksən.
+
+      **3. Keyfiyyətsiz, səs-küylü 100,000 nümunəni təmiz 1,000 nümunədən üstün tutmaq**
+      *LIMA ("Less Is More for Alignment")* tədqiqatı və praktika göstərir ki, SFT zamanı 1,000 ədəd diqqətlə yoxlanmış, ardıcıl formatlı nümunə 50,000 ədəd ziddiyyətli və səhv etiketlənmiş logdan qat-qat yüksək nəticə verir.
+
+      **4. Chat template və special token uyğunsuzluğu**
+      Təlim zamanı `<|im_start|>user...` şablonu ilə öyrədib, serving zamanı adi mətn göndərmək modelin çıxışını tamamilə pozur. Təlim və inferens tokenizer şablonu 100% eyni olmalıdır.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Distillasiya qazancı vs Mühəndislik yükü:** Böyük modeldən (məs. 70B+) kiçik modelə (məs. 8B LoRA) keçid inferens xərcini 5-10 dəfə, latency-ni isə 3-4 dəfə azalda bilər. Amma əvəzində öz GPU serving infrastrukturunu, adapter versiyalarını və data yeniləmə boru xəttini saxlamalısan.
+      - **Rank ($r$) seçimi:** $r=8$ və ya $r=16$ əksər format/üslub/təsnifat tapşırıqları üçün kifayətdir. $r$-i $64$ və ya $128$-ə qaldırmaq kiçik datasetdə **overfitting** riskini və VRAM sərfini artırır.
+      - **QLoRA (4-bit) vs LoRA (16-bit):** QLoRA VRAM-ı ~3 dəfə qənaət edir (məs. tək 24 GB GPU-da 8B–14B modeli öyrətməyə imkan verir), lakin de-kvantizasiya hesablama addımına görə təlim sürəti (throughput) 16-bit LoRA-dan bir qədər yavaş ola bilər.
+      - **Multi-LoRA serving:** vLLM və LoRAX kimi mühərriklər tək bir baza modeli VRAM-da saxlayıb, yüzlərlə müştəri və ya tapşırıq üçün fərqli kiçik LoRA adapterlərini sorğu anında dinamik qoşa bilir.
+mastery_criteria:
+  - Verilmiş biznes ssenarisində Prompting, RAG, SFT/LoRA və ya onların kombinasiyasını əsaslandırılmış şəkildə seçə bilirsən
+  - Verilmiş $d_{\text{in}}$, $d_{\text{out}}$ və $r$ üçün tam və LoRA parametr sayını və azalma faizini dəqiq hesablayırsan
+  - Fine-tuning öncəsi sızmasız dataset hazırlığı və golden evaluation qaydasını tətbiq edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-llmlora-architecture-choice
+      type: mcq
+      title: Hüquqi sənəd sitatı vs JSON çıxış
+      prompt: "Şirkət 40,000 daxili müqavilə üzərindən suallara cavab verən sistem qurur. İki tələb var: (1) hər gün yeni müqavilələr əlavə olunur və cavabda müqavilənin dəqiq bəndi sitat gətirilməlidir; (2) cavab həmişə 12 sahəli ciddi daxili JSON sxemində çıxmalıdır və kiçik 8B modeldə işləməlidir. Ən düzgün arxitektura hansıdır?"
+      skills: [llm-rag, llm-evaluation]
+      category: llm-architecture
+      options:
+        - id: a
+          text: Yalnız 8B modeli bütün 40,000 müqavilə üzərində hər gecə LoRA ilə yenidən fine-tune etmək
+          feedback: Fine-tuning sənəd axtarışı və dəqiq sitat üçün etibarlı deyil, həm də gündəlik yenilənmə üçün çox bahadır.
+        - id: b
+          text: Müqavilə axtarışı və sitat üçün RAG qurmaq, 8B modeli isə yalnız tapılmış kontekstdən tələb olunan 12 sahəli JSON çıxışı dəqiq generasiya etmək üçün LoRA ilə fine-tune etmək
+          feedback: Doğru! RAG dinamik fakt və sitat problemini, LoRA isə kiçik modeldə sabit JSON sxemi və davranış problemini həll edir.
+        - id: c
+          text: Bütün 40,000 müqaviləni hər sorğuda sistem promptuna yerləşdirmək
+          feedback: Kontekst pəncərəsi, latency və token xərci baxımından qeyri-mümkündür.
+      answer: b
+      explanation: RAG və Fine-Tuning bir-birini tamamlayır — RAG aktual məlumatı və sitatı gətirir, LoRA isə kiçik modelə həmin məlumatı ciddi sxem və üslubda emal etməyi öyrədir.
+    - id: q-llmlora-math-params
+      type: numeric
+      title: LoRA parametr sayı hesabı
+      prompt: "Xətti qatın ölçüləri $d_{\\text{in}} = 2048$ və $d_{\\text{out}} = 1024$-dür. Əgər LoRA ranqı $r = 16$ seçilərsə, bu qat üçün öyrənilən (trainable) LoRA parametrlərinin ümumi sayı ($B$ və $A$ matrislərindəki elementlərin cəmi) neçə olar?"
+      skills: [dl-training-loop]
+      category: math
+      answer: 49152
+      tolerance: 0
+      hints:
+        - "Düstur: $N_{\\text{LoRA}} = r \\times (d_{\\text{in}} + d_{\\text{out}})$."
+      explanation: "$N_{\\text{LoRA}} = 16 \\times (2048 + 1024) = 16 \\times 3072 = 49,152$. Müqayisə üçün tam matris $2048 \\times 1024 = 2,097,152$ parametrdir."
+    - id: q-llmlora-init-zero
+      type: mcq
+      title: LoRA-da B matrisinin sıfırla inisializasiyası
+      prompt: "LoRA-da təlim başlayarkən $A$ matrisi təsadüfi Qaus paylanması ilə, $B$ matrisi isə sıfırlarla ($B = 0$) inisializasiya olunur. Bunun mühəndislik səbəbi nədir?"
+      skills: [dl-training-loop]
+      category: concept
+      options:
+        - id: a
+          text: İlk təlim addımında $\Delta W = BA = 0$ olsun və model dondurulmuş baza modelin ($W_0$) çıxışını pozmadan təlimə başlasın
+          feedback: Doğru. Əgər hər iki matris təsadüfi olsaydı, ilk addımda baza çəkilərinə böyük təsadüfi səs-küy əlavə olunardı.
+        - id: b
+          text: Qradiyentlərin həmişə sıfır qalmasını təmin etmək üçün
+          feedback: "$A$ sıfır olmadığı üçün $B$-yə görə qradiyent sıfır olmur və $B$ ilk backward addımından etibarən yenilənir."
+        - id: c
+          text: VRAM-da $B$ matrisinin yer tutmaması üçün
+          feedback: Sıfırlarla dolu sıx (dense) tensor VRAM-da adi tensor qədər yer tutur.
+      answer: a
+      explanation: "$B = 0$ olduqda başlanğıcda $W' = W_0 + \\frac{\\alpha}{r}(0)A = W_0$ olur, yəni adaptasiya hamar şəkildə baza modelin nöqtəsindən başlayır."
+    - id: q-llmlora-data-quality
+      type: multi
+      title: SFT dataset hazırlığında düzgün praktikalar
+      prompt: "LoRA ilə fine-tuning-ə başlamazdan əvvəl hansı addımlar mütləq yerinə yetirilməlidir? Düzgün olanların hamısını seç."
+      skills: [llm-evaluation, dl-training-loop]
+      category: llm-architecture
+      options:
+        - id: a
+          text: Təlimə başlamazdan əvvəl toxunulmaz Golden Evaluation dəstini ayırmaq və baza modelin həmin dəstdəki baseline nəticəsini ölçmək
+          feedback: Bəli — baseline olmadan fine-tuning-in fayda verib-vermədiyini sübut etmək mümkün deyil.
+        - id: b
+          text: Eyni promptların həm train, həm də validation dəstinə düşməməsi üçün normallaşdırılmış prompt üzrə deduplikasiya aparmaq
+          feedback: Bəli — əks halda prompt leakage baş verir və validation metriki aldadıcı olur.
+        - id: c
+          text: Təlim və serving zamanı eyni chat template və special tokenlərdən istifadə olunduğunu yoxlamaq
+          feedback: Bəli — şablon fərqi modelin production-da kəskin keyfiyyət itirməsinə səbəb olur.
+        - id: d
+          text: Golden evaluation dəstindəki bütün nümunələri həm də train dəstinə kopyalamaq ki, model imtahan suallarını yaxşı öyrənsin
+          feedback: Xeyr — bu birbaşa test sızmasıdır (data leakage) və qiymətləndirməni tamamilə etibarsız edir.
+      answers: [a, b, c]
+      explanation: Təmiz deduplikasiya, toxunulmaz golden eval dəsti və eyni chat template uğurlu SFT-nin üç təməl şərtidir.
+exercises:
+  - id: ex-llmlora-param-calculator
+    type: code
+    title: "LoRA parametr və qənaət kalkulyatoru"
+    prompt: |
+      `lora_parameter_stats(d_in: int, d_out: int, rank: int) -> dict[str, int | float]` funksiyasını tamamla.
+
+      **Müqavilə (Contract):**
+      - Əgər `d_in <= 0`, `d_out <= 0` və ya `rank <= 0` olarsa → `ValueError` qaldır.
+      - Əgər `rank >= min(d_in, d_out)` olarsa (aşağı ranq şərti pozulursa) → `ValueError` qaldır.
+      - Tam parametr sayını (`full_params = d_in * d_out`) və LoRA parametr sayını (`lora_params = rank * (d_in + d_out)`) hesabla.
+      - Parametr azalma faizini `reduction_pct = round((1 - lora_params / full_params) * 100, 2)` düsturu ilə hesabla.
+      - `{"full_params": int, "lora_params": int, "reduction_pct": float}` qaytar.
+    skills: [dl-training-loop, llm-evaluation]
+    category: python
+    difficulty: 2
+    hints:
+      - "Əvvəlcə validation yaz: `if d_in <= 0 or d_out <= 0 or rank <= 0 or rank >= min(d_in, d_out): raise ValueError(...)`."
+      - "`full_params = d_in * d_out` və `lora_params = rank * (d_in + d_out)`."
+      - "Azalma faizini `round((1 - lora_params / full_params) * 100, 2)` ilə yuvarlaqlaşdır."
+    starter_code: |
+      def lora_parameter_stats(d_in: int, d_out: int, rank: int) -> dict[str, int | float]:
+          # TODO: input yoxlamalarını və LoRA parametr hesabını yaz
+          return {"full_params": 0, "lora_params": 0, "reduction_pct": 0.0}
+    tests:
+      - name: "4096x4096 qat və rank=8"
+        code: |
+          res = lora_parameter_stats(4096, 4096, 8)
+          assert res == {
+              "full_params": 16777216,
+              "lora_params": 65536,
+              "reduction_pct": 99.61,
+          }, f"Gözlənilməz nəticə: {res}"
+      - name: "Düzbucaqlı matris 4096x11008 (MLP proyeksiya) və rank=16"
+        code: |
+          res = lora_parameter_stats(4096, 11008, 16)
+          assert res["full_params"] == 45088768
+          assert res["lora_params"] == 241664
+          assert res["reduction_pct"] == 99.46, f"Alınan: {res}"
+      - name: "Yanlış ölçülər və rank >= min(d_in, d_out) üçün ValueError"
+        code: |
+          for args in [(0, 1024, 8), (1024, -4, 8), (512, 512, 0), (128, 256, 128), (128, 256, 200)]:
+              raised = False
+              try:
+                  lora_parameter_stats(*args)
+              except ValueError:
+                  raised = True
+              assert raised, f"{args} üçün ValueError qaldırılmalı idi"
+    solution: |
+      def lora_parameter_stats(d_in: int, d_out: int, rank: int) -> dict[str, int | float]:
+          if d_in <= 0 or d_out <= 0 or rank <= 0:
+              raise ValueError("d_in, d_out and rank must be positive.")
+          if rank >= min(d_in, d_out):
+              raise ValueError("rank must be strictly less than min(d_in, d_out).")
+          full_params = d_in * d_out
+          lora_params = rank * (d_in + d_out)
+          reduction_pct = round((1.0 - lora_params / full_params) * 100.0, 2)
+          return {
+              "full_params": full_params,
+              "lora_params": lora_params,
+              "reduction_pct": reduction_pct,
+          }
+    explanation: |
+      LoRA iki böyük ölçünün hasilini ($d_{\text{in}} \times d_{\text{out}}$) onların cəminin $r$ mislinə ($r(d_{\text{in}} + d_{\text{out}})$) çevirir. $r \ll \min(d_{\text{in}}, d_{\text{out}})$ olduqda öyrənilən parametrlərin sayı 99%-dən çox azalır.
+  - id: ex-llmlora-rag-vs-ft-mcq
+    type: mcq
+    title: "Arxitektura qərarı: hər 5 dəqiqədən bir dəyişən anbar qiymətləri"
+    prompt: |
+      E-ticarət şirkəti müştəri dəstəyi üçün AI köməkçi qurur.
+      - Anbardakı 120,000 məhsulun stok sayı və qiyməti **hər 5 dəqiqədən bir** yenilənir.
+      - Hər cavabda məhsulun dəqiq **SKU kodu** və **son yenilənmə vaxtı** göstərilməlidir.
+      - Köhnə qiymət demək birbaşa maliyyə ziyanıdır.
+
+      Hansı arxitektura seçilməlidir?
+    skills: [llm-rag, llm-evaluation]
+    category: llm-architecture
+    difficulty: 1
+    hints:
+      - Hər 5 dəqiqədən bir dəyişən məlumatı modelin çəkilərinə (weights) yazmaq mümkündürmü?
+      - Dəqiq SKU və canlı stok məlumatı üçün model hansı xarici mənbəyə müraciət etməlidir?
+    options:
+      - id: a
+        text: "Hər gecə 120,000 məhsulun qiymət cədvəli üzərində QLoRA ilə modeli fine-tune etmək"
+        feedback: Gündüz saatlarında dəyişən qiymətlər yenə köhnə qalacaq və model çəkilərdən SKU əzbərləyərkən hallüsinasiya edəcək.
+      - id: b
+        text: "Canlı anbar bazasına qoşulmuş RAG / Tool Calling (axtarış API-si) istifadə etmək və modelə yalnız retrieved məlumatdan SKU sitat gətirməyi məcbur etmək"
+        feedback: Doğru! Tez-tez dəyişən strukturlaşdırılmış faktlar və dəqiq SKU sitatı üçün yalnız canlı axtarış (RAG / Tool Calling) etibarlıdır.
+      - id: c
+        text: "Bütün 120,000 məhsulu sistem promptuna JSON kimi yapışdırmaq"
+        feedback: 120,000 məhsul milyonlarla tokendir — həm kontekst limitini aşır, həm də hər sorğuda astronomik xərc və gecikmə yaradır.
+    answer: b
+    explanation: |
+      Fine-tuning modelin bilik bazasını real-vaxtda yeniləmək üçün deyil. Hər 5 dəqiqədən bir dəyişən qiymət və SKU tələbi canlı məlumat axtarışı (RAG və ya deterministik məhsul API tool call) ilə həll olunmalıdır.
+references:
+  - title: "LoRA: Low-Rank Adaptation of Large Language Models (Hu et al., 2021)"
+    url: https://arxiv.org/abs/2106.09685
+    note: Orijinal LoRA məqaləsi
+  - title: "QLoRA: Efficient Finetuning of Quantized LLMs (Dettmers et al., 2023)"
+    url: https://arxiv.org/abs/2305.14314
+    note: 4-bit NormalFloat və Paged Optimizers ilə yaddaş-effektiv fine-tuning
+  - title: Hugging Face PEFT Documentation
+    url: https://huggingface.co/docs/peft/index
+    note: Praktik LoRA və QLoRA konfiqurasiyası

@@ -1,0 +1,439 @@
+id: prod-cicd-versioning-reliability
+track: production
+module: cicd-versioning
+title: "AI üçün CI/CD, Artefakt Versiyalanması, Canary Rollout və Circuit Breaker"
+summary: "Klassik proqram təminatından fərqli olaraq AI sistemlərində Kod + Data + Model/Prompt üçlüyünü (Artifact Triad) versiyalamağı, CI/CD-də avtomatik evaluation gate qurmağı, Canary/Shadow trafiklə təhlükəsiz buraxılışı və Circuit Breaker ilə kaskad çökmələrin qarşısını almağı öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [prod-logging-monitoring]
+next: null
+skills: [prod-cicd, prod-monitoring, prod-model-serving]
+objectives:
+  - AI sistemlərində tam reproduktivlik üçün Artifact Triad (`code_sha` + `data_hash` + `model_or_prompt_version`) izləməsini qurmaq
+  - Commit-dən Docker imicinə və Canary buraxılışına qədər çoxmərhələli AI CI/CD boru xəttini dizayn etmək
+  - Canary və Shadow deployment fərqini bilmək, error rate və $p_{95}$ nisbətinə görə avtomatik promote/rollback qərarı vermək
+  - "Circuit Breaker dövlət maşınını (`CLOSED -> OPEN -> HALF_OPEN`) implementasiya edərək xarici LLM/model kəsintilərində graceful degradation təmin etmək"
+why_it_matters: |
+  Klassik backend-də `git revert` etməklə dünənki işlək versiyaya qayıtmaq olur. Amma AI sistemində **kod heç dəyişmədiyi halda** sistem sına bilər: təlim datası yenilənib, model çəkiləri (`weights.safetensors`) başqa checkpoint-dən götürülüb, yaxud vektor bazasındakı embedding modeli dəyişib.
+
+  Üstəlik, bütün 100% istifadəçi trafikini birbaşa yeni modelə çevirmək (big-bang deploy) və ya xarici LLM provayderi çökəndə hər sorğuda 30 saniyə gözləmək bütün production serverini kilidləyir. **Artifact Triad versiyalanması, Canary rollout və Circuit Breaker** AI mühəndisinin sığorta polisidir.
+terms:
+  - term: Artifact Triad (Artefakt Üçlüyü)
+    definition: "Hər bir AI buraxılışını birmənalı təyin edən üç dəyişməz identifikator: `code_sha` (Git commit), `data_hash` (təlim/eval/indeks datası SHA-256) və `model_version` (çəki və ya prompt şablonu hash-i)."
+  - term: Canary Deployment
+    definition: Canlı istifadəçi trafikinin kiçik hissəsini (məs. 5%) yeni `v2` versiyasına yönləndirib, real vaxtda `v1` ilə müqayisə etmək və sağlamdırsa tədricən 100%-ə qaldırmaq.
+  - term: Shadow (Dark) Deployment
+    definition: Canlı sorğuların kopyasını arxa planda `v2`-yə göndərib nəticəni yalnız loga yazmaq; istifadəçi həmişə `v1`-in cavabını görür (sıfır istifadəçi riski, ikiqat inferens xərci).
+  - term: Automatic Rollback
+    definition: Canary versiyasının xəta faizi və ya $p_{95}$ gecikməsi müəyyən edilmiş SLA həddini aşdıqda trafikin insan müdaxiləsi olmadan dərhal `v1`-ə qaytarılması.
+  - term: Circuit Breaker
+    definition: "Ardıcıl xəta sayı həddi (`threshold`) keçdikdə xarici servisə sorğuları dərhal kəsən (`OPEN`) və sistemə bərpa vaxtı (`cooldown`) verən dayanıqlılıq şablonu."
+  - term: Graceful Degradation
+    definition: Əsas AI modeli əlçatmaz olduqda sistemin tam çökmək əvəzinə ehtiyat kiçik modelə, keşə və ya deterministik qaydalı axına keçməsi.
+sections:
+  - id: artifact-triad-and-cicd
+    kind: explanation
+    title: "Niyə təkcə Git kifayət deyil? Artifact Triad və AI CI/CD"
+    body: |
+      Adi veb servisdə `Nəticə = f(Kod, Konfiqurasiya)`. AI sistemində isə:
+
+      $$\text{Davranış} = f(\text{Kod SHA},\ \text{Data/İndeks Hash},\ \text{Model Çəkiləri və Prompt Versiyası})$$
+
+      Buna görə hər bir model buraxılışı (release manifest) **Artifact Triad** saxlamalıdır:
+      1. **`code_sha`:** Git commit hash (`a4f91c2`) — preprocessing, API və post-processing məntiqi.
+      2. **`data_hash`:** Təlim datasetinin, golden evaluation faylının və ya RAG indeksinin SHA-256 xülasəsi (məs. DVC, LakeFS və ya manifest JSON ilə).
+      3. **`model_version`:** Model çəki faylının (`sha256:8e3b...`) və sistem promptu şablonunun versiyası (`prompt-v14`).
+
+      **Təhlükəsiz AI CI/CD və Rollout Boru Xətti:**
+      1. **Commit & Static Checks:** Type check, linter, Pydantic sxem və konfiqurasiya validasiyası.
+      2. **Unit & Contract Tests:** Preprocessing, post-processing və mock edilmiş model/tool çağırışlarının sürətli pytest testləri.
+      3. **Golden Evaluation Gate:** Sabit golden dataset üzərində keyfiyyət ($\Delta \text{score}$) və latency ($p_{95}$) reqressiya qapısı.
+      4. **Immutable Image & Manifest Build:** `code_sha + data_hash + model_version` etiketli dəyişməz Docker imici.
+      5. **Canary Rollout (5% -> 25% -> 100%):** Canlı trafikdə `v2`-nin sağlamlığını `v1` ilə müqayisə etmək; pozuntu varsa avtomatik **Rollback**.
+  - id: electrical-fuse-analogy
+    kind: analogy
+    title: "Mental model: evdəki avtomat qoruyucu (Circuit Breaker) və su dadımı (Canary)"
+    body: |
+      - **Canary Deployment = Yeni içkini əvvəlcə 20 nəfərlik dequstasiya masasında sınamaq:** Zavod yeni reseptlə 1 milyon şüşə buraxmazdan əvvəl 5% müştəriyə təqdim edir. Əgər şikayət və ya mədə ağrısı siqnalı gələrsə, partiyanı dərhal dayandırır.
+      - **Circuit Breaker = Elektrik lövhəsindəki avtomat açar:** Ütüdə qısaqapanma olanda avtomat açar dövrəni **açır (`OPEN`)** və cərəyanı kəsir. Əgər avtomat açar olmasaydı, naqillər qızıb bütün evi yandırardı (serverdə bütün worker thread-lərin 30 saniyəlik timeout-da ilişib qalması və bütün API-nin çökməsi kimi).
+      - Bir neçə dəqiqə soyuduqdan sonra (`cooldown_elapsed`) usta açarı yarıya qədər qaldırıb **tək bir sınaq lampası (`HALF_OPEN`)** yandırır: lampa normal yanarsa dövrə tam bağlanır (`CLOSED`), yenə qığılcım verərsə dərhal yenidən atır (`OPEN`).
+  - id: circuit-and-canary-diagram
+    kind: diagram
+    title: "Canary trafik bölgüsü və Circuit Breaker dövlət maşını"
+    body: |
+      ```mermaid
+      stateDiagram-v2
+        [*] --> CLOSED
+        CLOSED --> CLOSED: "success (failures = 0)"
+        CLOSED --> OPEN: "failure_count >= threshold"
+        OPEN --> HALF_OPEN: "cooldown_elapsed"
+        HALF_OPEN --> CLOSED: "probe success (failures = 0)"
+        HALF_OPEN --> OPEN: "probe failure"
+      ```
+
+      - **`CLOSED` (Normal iş):** Sorğular LLM/model servisinə gedir. Ardıcıl xətalar sayılır.
+      - **`OPEN` (Qoruma rejimi):** Xarici modelə heç bir şəbəkə sorğusu **göndərilmir** — 1 ms içində birbaşa fallback (keş, kiçik lokal model və ya nəzakətli xəta mesajı) qaytarılır.
+      - **`HALF_OPEN` (Kəşfiyyat rejimi):** Cooldown vaxtı bitdikdə yalnız **tək bir sınaq sorğusu** buraxılır. Uğurlu olarsa `CLOSED`, uğursuz olarsa yenidən `OPEN` vəziyyətinə qayıdır.
+  - id: canary-worked-example
+    kind: worked_example
+    title: "Ədədi nümunə: Canary sağlamlıq qərarı (v1 vs v2)"
+    body: |
+      Hazırda production-da işləyən `v1` (95% trafik) və yeni buraxılmış `v2` canary (5% trafik) üçün son 15 dəqiqənin metrikləri toplanıb:
+      - `v1`: $\text{error\_rate}_1 = 0.004$ ($0.4\%$), $p_{95,1} = 600\text{ ms}$
+      - `v2`: $\text{error\_rate}_2 = 0.008$ ($0.8\%$), $p_{95,2} = 1050\text{ ms}$
+
+      Rollout siyasətimiz (SLA müqaviləsi):
+      1. Maksimum icazəli xəta faizi: $\text{max\_error\_rate} = 0.02$ ($2.0\%$)
+      2. Maksimum $p_{95}$ gecikmə artımı nisbəti: $\text{max\_p95\_ratio} = 1.5$ (yəni $p_{95,2} \le 1.5 \times p_{95,1}$)
+
+      **Yoxlama:**
+      1. Xəta faizi: $0.008 \le 0.02 \implies$ **Keçdi**.
+      2. Gecikmə həddi: $1.5 \times 600\text{ ms} = 900\text{ ms}$. Lakin $p_{95,2} = 1050\text{ ms} > 900\text{ ms} \implies$ **Pozuldu (`p95_latency_degraded`)!**
+
+      Nəticə: `{"action": "rollback", "reasons": ["p95_latency_degraded"]}`. Avtomatik orkestrator 5% trafiki dərhal `v1`-ə qaytarır və on-call mühəndisə xəbərdarlıq göndərir.
+  - id: canary-circuit-code
+    kind: code
+    title: "Kod: Avtomatik Canary Qiymətləndiricisi və Circuit Breaker"
+    body: |
+      ```python
+      def evaluate_canary_health(
+          v1_metrics: dict[str, float],
+          v2_metrics: dict[str, float],
+          max_error_rate: float,
+          max_p95_ratio: float,
+      ) -> dict[str, str | list[str]]:
+          """Decide whether to promote or rollback canary v2 based on error rate and p95 latency."""
+          reasons: list[str] = []
+          if v2_metrics["error_rate"] > max_error_rate:
+              reasons.append("error_rate_exceeded")
+          if v2_metrics["p95_ms"] > v1_metrics["p95_ms"] * max_p95_ratio:
+              reasons.append("p95_latency_degraded")
+
+          action = "promote" if not reasons else "rollback"
+          return {"action": action, "reasons": reasons}
+
+
+      def circuit_breaker_step(
+          state: str,
+          failure_count: int,
+          threshold: int,
+          event: str,
+      ) -> tuple[str, int]:
+          """Execute one deterministic state transition of a Circuit Breaker."""
+          valid_states = {"CLOSED", "OPEN", "HALF_OPEN"}
+          valid_events = {"success", "failure", "cooldown_elapsed"}
+          if state not in valid_states or event not in valid_events or threshold <= 0:
+              raise ValueError("Invalid state, event, or threshold.")
+
+          if state == "CLOSED":
+              if event == "success":
+                  return ("CLOSED", 0)
+              if event == "failure":
+                  new_count = failure_count + 1
+                  if new_count >= threshold:
+                      return ("OPEN", new_count)
+                  return ("CLOSED", new_count)
+              return ("CLOSED", failure_count)
+
+          if state == "OPEN":
+              if event == "cooldown_elapsed":
+                  return ("HALF_OPEN", failure_count)
+              return ("OPEN", failure_count)
+
+          # state == "HALF_OPEN"
+          if event == "success":
+              return ("CLOSED", 0)
+          if event == "failure":
+              return ("OPEN", threshold)
+          return ("HALF_OPEN", failure_count)
+      ```
+
+      Diqqət et ki, hər iki funksiya **pure (saf) funksiyadır**: xarici saatdan və ya şəbəkədən asılı deyil, cari vəziyyəti və hadisəni alıb növbəti vəziyyəti deterministik qaytarır. Bu dizayn sayəsində kritik infrastruktur məntiqini 100% unit testlərlə örtmək olur.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Model çəkilərini və ya `latest` Docker teqini versiyasız işlətmək**
+      Production-da `model:latest` və ya `s3://bucket/current_model.pt` üzərinə yeni fayl yazmaq (overwrite) ən təhlükəli anti-patterndir. Rollback lazım olanda əvvəlki modelin hansı fayl olduğunu tapmaq mümkün olmur. Hər artefakt öz SHA-256 hash-i və ya dəyişməz semantik versiyası ilə saxlanmalıdır.
+
+      **2. Canary-də yalnız HTTP 200 statusuna baxmaq**
+      LLM servisi HTTP `200 OK` qaytarıb, içində *"Üzr istəyirəm, cavab verə bilmirəm"* və ya boş JSON `{}` qaytara bilər. Canary sağlamlığı təkcə HTTP `5xx` ilə deyil, həm də **fallback/abstention faizi** və **schema validation pass rate** ilə ölçülməlidir.
+
+      **3. Circuit Breaker olmadan uzun timeout qoymaq**
+      Xarici LLM API-sinə 60 saniyəlik timeout qoyub Circuit Breaker istifadə etmədikdə, provayderdə problem yaranan kimi bütün uvicorn/gunicorn worker-ləri 60 saniyəlik gözləmədə ilişir və AI ilə əlaqəsi olmayan digər endpoint-lər də cavab verə bilmir.
+
+      **4. Yan təsirli (mutating) alətləri Shadow rejimdə işə salmaq**
+      Shadow deployment zamanı `v2` yalnız oxuma/generasiya etməlidir. Əgər `v2` həqiqi bazaya yazırsa və ya müştəriyə ikiqat SMS/e-poçt göndərirsə, shadow test canlı məlumatları korlayacaq.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Canary vs Shadow deployment:**
+        - **Shadow** istifadəçiyə sıfır risk yaradır (istifadəçi yalnız `v1`-i görür), amma hər sorğu həm `v1`, həm də `v2` tərəfindən emal olunduğu üçün **inferens və GPU/token xərcini 2 dəfə artırır**.
+        - **Canary** əlavə inferens xərci yaratmır (cəmi 100% trafik bölünür), lakin 5% istifadəçi yeni modelin mümkün xətası ilə qarşılaşa bilər.
+      - **Circuit Breaker həssaslığı (`threshold`):** Həddi çox kiçik (`threshold=1`) qoysan, təsadüfi tək bir şəbəkə gecikməsi dövrəni açacaq (false alarm). Həddi çox böyük (`threshold=100`) qoysan, sistem artıq kaskad şəkildə çökəndən sonra dövrə açılacaq. Adətən ardıcıl 3–5 xəta və ya sürüşən pəncərədə >50% xəta nisbəti optimaldır.
+mastery_criteria:
+  - Artifact Triad komponentlərini və onların niyə birlikdə versiyalanmalı olduğunu izah edə bilirsən
+  - Canary metriklərinə görə promote/rollback qərarı verən funksiyanı müstəqil yaza bilirsən
+  - Circuit Breaker dövlət keçidlərini (`CLOSED`, `OPEN`, `HALF_OPEN`) bütün edge case-lərlə implementasiya edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-prodcicd-artifact-triad
+      type: mcq
+      title: Niyə təkcə Git commit SHA kifayət deyil?
+      prompt: "Komanda keçən həftəki dəqiq eyni Git commit-i (`git checkout a1b2c3d`) yenidən build edib deploy edir, amma modelin cavabları keçən həftəkindən tamamilə fərqli çıxır. Ən ehtimal olunan səbəb nədir və bunun qarşısı necə alınır?"
+      skills: [prod-cicd]
+      category: production
+      options:
+        - id: a
+          text: Git hash-ləri hər həftə öz-özünə məzmununu dəyişir
+          feedback: Git commit SHA-sı kriptoqrafik hash-dir; eyni commit-dəki kod dəyişməzdir.
+        - id: b
+          text: Kod dəyişməsə də, yüklənən model çəkiləri, prompt şablonu və ya RAG indeks datası versiyalanmayıb ('latest' istifadə olunub); hər buraxılışda Artifact Triad (code_sha + data_hash + model_version) sabitlənməlidir
+          feedback: Doğru! AI sisteminin davranışı təkcə koddan yox, Kod + Data/İndeks + Model/Prompt üçlüyündən asılıdır.
+        - id: c
+          text: Python versiyası dəyişmədən belə funksiyaların adları təsadüfi işləyir
+          feedback: Problem kodun özündə deyil, versiyalanmamış xarici data və model artefaktlarındadır.
+      answer: b
+      explanation: Reproduktiv AI buraxılışı üçün `code_sha`, `data_hash` və `model_version` dəyişməz manifestdə birlikdə bağlanmalıdır.
+    - id: q-prodcicd-shadow-vs-canary
+      type: mcq
+      title: Shadow Deployment vs Canary Deployment
+      prompt: "Tibbi sənəd xülasəsi edən yeni `v2` modelini canlı sorğularda yoxlamaq istəyirsən, amma həkimlərə heç bir halda təsdiqlənməmiş `v2` cavabı göstərilməməlidir. Büdcə ikiqat token xərcinə icazə verir. Hansı strategiyanı seçirsən?"
+      skills: [prod-cicd, prod-model-serving]
+      category: production
+      options:
+        - id: a
+          text: "Shadow (Dark) Deployment — canlı sorğuların kopyasını arxa planda `v2`-yə göndərib çıxışları yalnız qiymətləndirmə loguna yazmaq, həkimə isə həmişə `v1` cavabını qaytarmaq"
+          feedback: Doğru! Shadow rejimdə istifadəçi riski sıfırdır, eyni zamanda real production sorğu paylanması üzərində `v2` tam test olunur.
+        - id: b
+          text: "50% Canary Deployment — həkimlərin yarısına birbaşa `v2` cavabını göstərmək"
+          feedback: Bu, təsdiqlənməmiş modelin cavabını birbaşa həkimlərə göstərir və şərti pozur.
+        - id: c
+          text: "Birbaşa 100% Blue-Green keçidi etmək və test etməmək"
+          feedback: Yüksək riskli tibbi tətbiqdə yoxlanmamış tam keçid qəbuledilməzdir.
+      answer: a
+      explanation: Shadow deployment ikiqat inferens xərci bahasına sıfır istifadəçi riski ilə canlı trafikdə müqayisə imkanı verir.
+    - id: q-prodcicd-circuit-half-open
+      type: mcq
+      title: Circuit Breaker-də HALF_OPEN vəziyyəti
+      prompt: "Circuit Breaker hazırda `HALF_OPEN` vəziyyətindədir və buraxılan tək sınaq sorğusu (`probe`) xarici LLM servisindən `503 Service Unavailable` (`failure`) alır. Dövrə hansı vəziyyətə keçməlidir?"
+      skills: [prod-model-serving, prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: "`CLOSED` vəziyyətinə keçib bütün trafiki buraxmalıdır"
+          feedback: Xarici servis hələ də xəta qaytarır; dövrəni bağlamaq kaskad çökməni yenidən başladar.
+        - id: b
+          text: "Dərhal yenidən `OPEN` vəziyyətinə qayıtmalı və növbəti cooldown müddətini gözləməlidir"
+          feedback: Doğru! `HALF_OPEN` zamanı sınaq sorğusu uğursuz olarsa, servis hələ sağalmayıb deməkdir və dövrə dərhal yenidən açılır (`OPEN`).
+        - id: c
+          text: "Sonsuz dövrəyə girib proqramı dayandırmalıdır"
+          feedback: Circuit Breaker-in məqsədi proqramı dayandırmaq yox, graceful fallback verməkdir.
+      answer: b
+      explanation: "`HALF_OPEN` vəziyyətində yalnız `success` hadisəsi dövrəni `CLOSED` edir; `failure` hadisəsi onu dərhal yenidən `OPEN` vəziyyətinə qaytarır."
+    - id: q-prodcicd-rollback-signals
+      type: multi
+      title: Canary Rollback siqnalları
+      prompt: "Hansı göstəricilər Canary (`v2`) buraxılışının avtomatik Rollback edilməsi üçün əsaslı siqnaldır? Düzgün olanların hamısını seç."
+      skills: [prod-monitoring, prod-cicd]
+      category: production
+      options:
+        - id: a
+          text: "`v2`-nin HTTP 5xx və ya timeout xəta faizinin SLA həddini (məs. 2%) aşması"
+          feedback: Bəli — birbaşa servis dayanıqlılığı pozuntusudur.
+        - id: b
+          text: "`v2`-nin p95 gecikməsinin `v1`-ə nisbətən 2 dəfə artaraq maksimum nisbət həddini keçməsi"
+          feedback: Bəli — kəskin quyruq gecikməsi istifadəçi təcrübəsini və upstream timeout-ları pozur.
+        - id: c
+          text: "`v2`-də JSON sxem validasiyası uğursuzluğu və ya boş/fallback cavab faizinin kəskin sıçraması"
+          feedback: Bəli — HTTP 200 qayıtsa belə, səssiz keyfiyyət çökməsi rollback tələb edir.
+        - id: d
+          text: "`v2`-nin həm xəta faizinin, həm də gecikməsinin `v1`-dən daha aşağı (daha yaxşı) olması"
+          feedback: Xeyr — bu, rollback yox, `promote` (irəlilətmə) siqnalıdır.
+      answers: [a, b, c]
+      explanation: Avtomatik rollback həm infrastruktur (error rate, $p_{95}$ latency), həm də tətbiq səviyyəli (schema failure, fallback spike) siqnalları izləməlidir.
+exercises:
+  - id: ex-prodcicd-canary-and-circuit
+    type: code
+    title: "Canary Health Evaluator və Circuit Breaker State Machine"
+    prompt: |
+      Production buraxılış orkestratoru üçün iki saf (pure) funksiyanı implementasiya et:
+
+      **1. `evaluate_canary_health(v1_metrics: dict, v2_metrics: dict, max_error_rate: float, max_p95_ratio: float) -> dict`**
+      - `v1_metrics` və `v2_metrics` lüğətlərində `"error_rate"` və `"p95_ms"` açarları var.
+      - `reasons: list[str]` siyahısına bu ardıcıllıqla əlavə et:
+        - Əgər `v2_metrics["error_rate"] > max_error_rate` olarsa → `"error_rate_exceeded"`
+        - Əgər `v2_metrics["p95_ms"] > v1_metrics["p95_ms"] * max_p95_ratio` olarsa → `"p95_latency_degraded"`
+      - Əgər `reasons` boşdursa `"action": "promote"`, əks halda `"action": "rollback"`.
+      - `{"action": action, "reasons": reasons}` qaytar.
+
+      **2. `circuit_breaker_step(state: str, failure_count: int, threshold: int, event: str) -> tuple[str, int]`**
+      - İcazəli `state`: `{"CLOSED", "OPEN", "HALF_OPEN"}`. İcazəli `event`: `{"success", "failure", "cooldown_elapsed"}`.
+      - Əgər `state` və ya `event` icazəli deyilsə və ya `threshold <= 0` olarsa → `ValueError` qaldır.
+      - Keçid qaydaları:
+        - `state == "CLOSED"`:
+          - `"success"` → `("CLOSED", 0)`
+          - `"failure"` → `new_count = failure_count + 1`; əgər `new_count >= threshold` olarsa `("OPEN", new_count)`, əks halda `("CLOSED", new_count)`
+          - `"cooldown_elapsed"` → `("CLOSED", failure_count)`
+        - `state == "OPEN"`:
+          - `"cooldown_elapsed"` → `("HALF_OPEN", failure_count)`
+          - `"success"` və ya `"failure"` → `("OPEN", failure_count)`
+        - `state == "HALF_OPEN"`:
+          - `"success"` → `("CLOSED", 0)`
+          - `"failure"` → `("OPEN", threshold)`
+          - `"cooldown_elapsed"` → `("HALF_OPEN", failure_count)`
+    skills: [prod-cicd, prod-monitoring, prod-model-serving]
+    category: production
+    difficulty: 2
+    hints:
+      - "`evaluate_canary_health` içində hər iki şərti müstəqil `if` ilə yoxla ki, hər iki problem varsa hər ikisi `reasons` siyahısına düşsün."
+      - "`circuit_breaker_step` başlanğıcında `state`, `event` və `threshold <= 0` yoxlamasını edib `ValueError` qaldır."
+      - "`HALF_OPEN` vəziyyətində `'success'` gəldikdə `('CLOSED', 0)`, `'failure'` gəldikdə isə `('OPEN', threshold)` qaytar."
+    starter_code: |
+      def evaluate_canary_health(
+          v1_metrics: dict,
+          v2_metrics: dict,
+          max_error_rate: float,
+          max_p95_ratio: float,
+      ) -> dict:
+          # TODO: canary sağlamlıq yoxlamasını yaz
+          return {"action": "rollback", "reasons": []}
+
+
+      def circuit_breaker_step(
+          state: str,
+          failure_count: int,
+          threshold: int,
+          event: str,
+      ) -> tuple[str, int]:
+          # TODO: circuit breaker dövlət keçidlərini yaz
+          return (state, failure_count)
+    tests:
+      - name: "Canary promote və rollback qərarları"
+        code: |
+          v1 = {"error_rate": 0.005, "p95_ms": 500.0}
+          v2_ok = {"error_rate": 0.008, "p95_ms": 650.0}
+          assert evaluate_canary_health(v1, v2_ok, max_error_rate=0.02, max_p95_ratio=1.5) == {
+              "action": "promote",
+              "reasons": [],
+          }
+
+          v2_bad = {"error_rate": 0.035, "p95_ms": 900.0}
+          assert evaluate_canary_health(v1, v2_bad, max_error_rate=0.02, max_p95_ratio=1.5) == {
+              "action": "rollback",
+              "reasons": ["error_rate_exceeded", "p95_latency_degraded"],
+          }
+      - name: "Circuit Breaker CLOSED -> OPEN -> HALF_OPEN -> CLOSED tam dövrü"
+        code: |
+          st, cnt = "CLOSED", 0
+          st, cnt = circuit_breaker_step(st, cnt, 3, "failure")
+          assert (st, cnt) == ("CLOSED", 1)
+          st, cnt = circuit_breaker_step(st, cnt, 3, "failure")
+          assert (st, cnt) == ("CLOSED", 2)
+          st, cnt = circuit_breaker_step(st, cnt, 3, "failure")
+          assert (st, cnt) == ("OPEN", 3)
+          # OPEN zamanı adi failure vəziyyəti dəyişmir
+          st, cnt = circuit_breaker_step(st, cnt, 3, "failure")
+          assert (st, cnt) == ("OPEN", 3)
+          # Cooldown bitdikdə HALF_OPEN
+          st, cnt = circuit_breaker_step(st, cnt, 3, "cooldown_elapsed")
+          assert (st, cnt) == ("HALF_OPEN", 3)
+          # Probe uğurlu olduqda CLOSED və 0
+          st, cnt = circuit_breaker_step(st, cnt, 3, "success")
+          assert (st, cnt) == ("CLOSED", 0)
+      - name: "HALF_OPEN zamanı uğursuz sınaq yenidən OPEN edir"
+        code: |
+          assert circuit_breaker_step("HALF_OPEN", 3, 3, "failure") == ("OPEN", 3)
+          assert circuit_breaker_step("CLOSED", 2, 3, "success") == ("CLOSED", 0)
+      - name: "Yanlış state, event və ya threshold üçün ValueError"
+        code: |
+          for args in [("BROKEN", 0, 3, "success"), ("CLOSED", 0, 3, "timeout"), ("CLOSED", 0, 0, "failure")]:
+              raised = False
+              try:
+                  circuit_breaker_step(*args)
+              except ValueError:
+                  raised = True
+              assert raised, f"{args} üçün ValueError gözlənilirdi"
+    solution: |
+      def evaluate_canary_health(
+          v1_metrics: dict,
+          v2_metrics: dict,
+          max_error_rate: float,
+          max_p95_ratio: float,
+      ) -> dict:
+          reasons: list[str] = []
+          if v2_metrics["error_rate"] > max_error_rate:
+              reasons.append("error_rate_exceeded")
+          if v2_metrics["p95_ms"] > v1_metrics["p95_ms"] * max_p95_ratio:
+              reasons.append("p95_latency_degraded")
+          action = "promote" if not reasons else "rollback"
+          return {"action": action, "reasons": reasons}
+
+
+      def circuit_breaker_step(
+          state: str,
+          failure_count: int,
+          threshold: int,
+          event: str,
+      ) -> tuple[str, int]:
+          valid_states = {"CLOSED", "OPEN", "HALF_OPEN"}
+          valid_events = {"success", "failure", "cooldown_elapsed"}
+          if state not in valid_states or event not in valid_events or threshold <= 0:
+              raise ValueError("Invalid state, event, or threshold.")
+
+          if state == "CLOSED":
+              if event == "success":
+                  return ("CLOSED", 0)
+              if event == "failure":
+                  new_count = failure_count + 1
+                  if new_count >= threshold:
+                      return ("OPEN", new_count)
+                  return ("CLOSED", new_count)
+              return ("CLOSED", failure_count)
+
+          if state == "OPEN":
+              if event == "cooldown_elapsed":
+                  return ("HALF_OPEN", failure_count)
+              return ("OPEN", failure_count)
+
+          if event == "success":
+              return ("CLOSED", 0)
+          if event == "failure":
+              return ("OPEN", threshold)
+          return ("HALF_OPEN", failure_count)
+    explanation: |
+      Avtomatik Canary qiymətləndirməsi və Circuit Breaker birlikdə production AI sistemini iki tərəfdən qoruyur: yeni deploy olunan öz modelimizin reqressiyasından (Canary rollback) və asılı olduğumuz xarici model/API-lərin çökməsindən (Circuit Breaker).
+  - id: ex-prodcicd-pipeline-order
+    type: order
+    title: "Təhlükəsiz AI CI/CD və Rollout mərhələlərini sırala"
+    prompt: |
+      Git commit-dən tam 100% production buraxılışına qədər olan **təhlükəsiz AI CI/CD boru xəttinin** mərhələlərini düzgün xronoloji ardıcıllıqla düz.
+    skills: [prod-cicd, prod-model-serving]
+    category: production
+    difficulty: 1
+    hints:
+      - Ən sürətli və ən ucuz yoxlamalar (sxem/unit test) bahalı golden evaluation və Docker build-dən əvvəl işləməlidir.
+      - Canary (5% trafik) yoxlaması imic build olunduqdan sonra, 100% tam rollout-dan əvvəl gəlir.
+    items:
+      - id: s1
+        text: "Git Commit + Statik yoxlamalar (linter, type check, Pydantic sxem və konfiqurasiya validasiyası)"
+      - id: s2
+        text: "Sürətli Unit və Contract testləri (preprocessing, post-processing və mock API testləri)"
+      - id: s3
+        text: "Golden Evaluation Gate (reqressiya dataseti üzərində keyfiyyət və p95 latency həddinin yoxlanması)"
+      - id: s4
+        text: "Artifact Triad manifesti (code_sha + data_hash + model_version) ilə dəyişməz Docker imicinin qurulması"
+      - id: s5
+        text: "5% Canary Rollout, canlı SLA monitorinqi (error rate, p95) və sağlamdırsa 100% trafikə Promote"
+    answer: [s1, s2, s3, s4, s5]
+    explanation: |
+      Düzgün CI/CD sırası "fail-fast" prinsipinə əsaslanır: saniyəlik statik və unit testlər əvvəl, dəqiqəlik golden evaluation ortada, dəyişməz imic build və tədrici Canary rollout isə sonda icra olunur.
+references:
+  - title: "Martin Fowler — Circuit Breaker Pattern"
+    url: https://martinfowler.com/bliki/CircuitBreaker.html
+    note: Circuit Breaker dövlət maşınının klassik arxitektura izahı
+  - title: "Google Cloud Architecture — MLOps: Continuous delivery and automation pipelines in machine learning"
+    url: https://cloud.google.com/architecture/mlops-continuous-delivery-and-automation-pipelines-in-machine-learning
+    note: Kod, data və model artefaktlarının birlikdə versiyalanması və CI/CD

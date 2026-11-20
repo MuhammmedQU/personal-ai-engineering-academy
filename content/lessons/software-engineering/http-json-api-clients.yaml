@@ -1,0 +1,344 @@
+id: http-json-api-clients
+track: software-engineering
+module: http-apis
+title: HTTP, JSON və dayanıqlı API clients — status codes, timeout, retry və backoff
+summary: LLM və ML servisi API-ləri ilə işləyərkən production-da donmayan və müvəqqəti şəbəkə xətalarından özü sağalan (self-healing) HTTP client məntiqini — status kod təsnifatı, timeout və exponential backoff — qurmağı öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [py-testing-pytest]
+next: py-oop-architecture-protocols
+skills: [http-apis, py-errors]
+objectives:
+  - HTTP sorğu/cavab anatomiyasını və əsas status kodlarını (200, 400, 401, 403, 404, 422, 429, 500, 502, 503, 504) ayırd etmək
+  - Hansı status kodlarında yenidən cəhd (retry) etməyin mənalı, hansılarında isə mənasız və zərərli olduğunu müəyyən etmək
+  - Timeout qoyulmayan HTTP çağırışının niyə bütün server işçilərini (workers) dondurduğunu izah etmək
+  - Exponential backoff və cap (tavan) düsturunu Python-da implementasiya etmək
+why_it_matters: |
+  Müasir AI mühəndisliyinin böyük hissəsi şəbəkə üzərindən API-lərlə danışmaqdır: OpenAI/Anthropic/Gemini LLM endpoint-ləri, vector database-lər, embedding servisləri.
+  Real dünyada şəbəkə etibarsızdır: LLM provayderi pik saatda `429 Too Many Requests` və ya `503 Service Unavailable` qaytarır, yaxud TCP bağlantısı cavab vermədən asılı qalır.
+
+  Əgər kodunda **`timeout`** yoxdursa, tək bir asılı qalmış sorğu bütün worker prosesini sonsuza qədər kilidləyir. Əgər **`retry + exponential backoff`** yoxdursa, 1 saniyəlik şəbəkə titrəməsi 2 saatlıq evaluation işini yarıda kəsir. Əksinə, `401 Unauthorized` və ya `400 Bad Request` xətasına kor-koranə retry etsən, həm vaxt, həm də kvota israf edirsən.
+terms:
+  - term: HTTP Status Code
+    definition: "Serverin cavabının 3 rəqəmli nəticə kodu: `2xx` uğurlu, `4xx` müştəri (client) xətası, `5xx` server xətası."
+  - term: Timeout
+    definition: Sorğunun cavab gözləyəcəyi maksimum saniyə həddi; keçildikdə bağlantı dayandırılır və exception qaldırılır.
+  - term: Transient error (müvəqqəti xəta)
+    definition: Bir neçə saniyə sonra təkrar cəhd etdikdə düzələ bilən xəta (`429` rate limit, `502`, `503`, `504` gateway/overload).
+  - term: Terminal error (qəti xəta)
+    definition: Sorğunu dəyişmədən təkrar göndərdikdə yenə eyni xətanı verəcək hal (`400`, `401`, `403`, `404`, `422`).
+  - term: Exponential backoff
+    definition: Hər uğursuz cəhddən sonra gözləmə müddətini $2^k$ qanunu ilə artırmaq ($0.5\text{s}, 1\text{s}, 2\text{s}, 4\text{s}\dots$).
+  - term: Jitter
+    definition: Gözləmə müddətinə kiçik təsadüfi rəqəm əlavə etmək ki, eyni anda yıxılan 1000 müştəri eyni saniyədə serverə yenidən hücum etməsin (thundering herd).
+  - term: Idempotency
+    definition: Eyni əməliyyatın bir dəfə və ya bir neçə dəfə icra edilməsinin sistemdə eyni yekun vəziyyəti yaratması.
+sections:
+  - id: http-status-anatomy
+    kind: explanation
+    title: HTTP status kodları və Retry qərar cədvəli
+    body: |
+      HTTP API çağırışı dörd hissədən ibarətdir: **Method** (`GET`, `POST`), **URL**, **Headers** (`Authorization`, `Content-Type: application/json`) və **Body** (JSON payload).
+      Server cavab olaraq **Status Code** və JSON body qaytarır. AI mühəndisi üçün ən vacib kodlar və onlara qarşı düzgün reaksiya:
+
+      | Kod | Adı | Mənası | Retry etməli? |
+      |---|---|---|---|
+      | `200` | OK | Sorğu uğurla tamamlandı | Xeyr (artıq uğurludur) |
+      | `400` | Bad Request | Göndərdiyin JSON və ya parametr sintaksisi səhvdir | **Xeyr** — kodu düzəltməsən həmişə 400 olacaq |
+      | `401` / `403` | Unauthorized / Forbidden | API açarı səhvdir və ya icazən yoxdur | **Xeyr** — açarı dəyişmədən retry mənasızdır |
+      | `404` | Not Found | Endpoint və ya model adı mövcud deyil | **Xeyr** |
+      | `422` | Unprocessable Entity | FastAPI/Pydantic sxem yoxlaması kəsildi (məs. `temperature: "abc"`) | **Xeyr** |
+      | `429` | Too Many Requests | Rate limit (RPM/TPM) aşılıb | **Bəli** — gözlə və yenidən cəhd et |
+      | `500` | Internal Server Error | Serverdə gözlənilməz xəta (bəzən transient, çox vaxt bug) | Ehtiyatla (və ya yalnız `502/503/504`) |
+      | `502` / `503` / `504` | Bad Gateway / Unavailable / Gateway Timeout | Server və ya GPU klasteri müvəqqəti yüklənib | **Bəli** — klassik müvəqqəti xətadır |
+
+      **Niyə `timeout` məcburidir?**
+      Python-un məşhur `requests.post(url, json=data)` funksiyasında default `timeout=None`-dur — yəni **sonsuzluq**! Qarşı tərəfin serveri TCP paketini qəbul edib cavab vermədən donsa, sənin proqramın heç vaxt növbəti sətirə keçmir. Həmişə açıq `timeout=10.0` (və ya LLM axını üçün `30.0`) təyin et.
+  - id: busy-restaurant-analogy
+    kind: analogy
+    title: "Mental model: məşğul restoran qapısı"
+    body: |
+      API çağırmaq restorana girməyə bənzəyir:
+
+      - **`401 Unauthorized`:** Giriş biletin saxtadır. Qapını ard-arda 10 dəfə döymək (retry) heç nəyi dəyişməyəcək — mühafizəçi yenə buraxmayacaq.
+      - **`429 Too Many Requests` / `503 Unavailable`:** Restoran hazırda doludur, qapıçı *"bir az gözləyin, yer boşalacaq"* deyir. Burada dərhal hər saniyə qapını yumruqlamaq əvəzinə, əvvəlcə 1 dəqiqə, sonra 2 dəqiqə, sonra 4 dəqiqə gözləmək (**exponential backoff**) həm restoranın nəfəs almasına imkan verir, həm də sənin içəri girmə şansını artırır.
+      - **Missing `timeout`:** Telefonla sifariş verirsən, dəstəyi qaldırıb masanın üstünə qoyub gedirlər. Əgər *"30 saniyə səs gəlməsə dəstəyi asacağam"* qaydan (`timeout`) yoxdursa, əlində telefon səhərə qədər donub qalacaqsan.
+  - id: retry-flow-diagram
+    kind: diagram
+    title: Dayanıqlı API Client qərar axını
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Sorğu göndər (attempt = 1, timeout = 10s)"] --> B{"Cavab gəldi?"}
+        B -- "200 OK" --> C["JSON-u parse et və qaytar"]
+        B -- "400 / 401 / 403 / 404 / 422" --> D["Terminal Xəta: Dərhal Exception qaldır (Retry YOX)"]
+        B -- "429 / 502 / 503 / 504 və ya Timeout" --> E{"attempt < max_attempts ?"}
+        E -- "Bəli" --> F["backoff = min(cap, base * 2^(attempt-1)) gözlə"]
+        F --> G["attempt += 1"] --> A
+        E -- "Xeyr" --> H["Maksimum cəhd bitdi: Exception qaldır"]
+      ```
+  - id: worked-backoff-math
+    kind: worked_example
+    title: Kiçik rəqəmlərlə Exponential Backoff hesabı
+    body: |
+      Tavanlı (capped) exponential backoff düsturu:
+
+      $$t_k = \min\left(t_{\text{cap}},\; t_{\text{base}} \cdot 2^{k - 1}\right)$$
+
+      Simvollar:
+      - $k$ (`attempt`) — uğursuz olmuş cəhdin nömrəsi ($k = 1, 2, 3, \dots$)
+      - $t_{\text{base}}$ (`base`) — ilk gözləmə müddəti (məsələn, $0.5$ saniyə)
+      - $t_{\text{cap}}$ (`cap`) — maksimum gözləmə tavanı (məsələn, $4.0$ saniyə)
+      - $t_k$ — $k$-cı uğursuz cəhddən sonra gözləniləcək saniyə
+
+      **Nümunə:** $t_{\text{base}} = 0.5\text{ s}$, $t_{\text{cap}} = 4.0\text{ s}$ olduqda ardıcıl cəhdlər:
+
+      | Uğursuz cəhd ($k$) | $t_{\text{base}} \cdot 2^{k-1}$ | $\min(4.0, \dots)$ nəticəsi ($t_k$) |
+      |---|---|---|
+      | $k = 1$ | $0.5 \cdot 2^0 = 0.5$ | **$0.5\text{ s}$** |
+      | $k = 2$ | $0.5 \cdot 2^1 = 1.0$ | **$1.0\text{ s}$** |
+      | $k = 3$ | $0.5 \cdot 2^2 = 2.0$ | **$2.0\text{ s}$** |
+      | $k = 4$ | $0.5 \cdot 2^3 = 4.0$ | **$4.0\text{ s}$** |
+      | $k = 5$ | $0.5 \cdot 2^4 = 8.0$ | **$4.0\text{ s}$** (`cap` ilə məhdudlaşdı!) |
+
+      Real sistemdə buna kiçik təsadüfi **jitter** (məsələn, $\pm 20\%$ və ya `random.uniform(0, t_k)`) əlavə olunur ki, paralel işləyən worker-lər sinxron şəkildə eyni anda sorğu atmasın.
+  - id: code-walkthrough
+    kind: code
+    title: Kod — retry siyasəti və backoff hesablayıcısı
+    body: |
+      ```python
+      RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
+
+
+      def should_retry(status_code: int, attempt: int, max_attempts: int) -> bool:
+          """Decide whether an HTTP call should be retried.
+
+          `attempt` is 1-indexed (1 = first attempt just finished).
+          We only retry if `attempt < max_attempts` AND the status is transient.
+          """
+          if attempt < 1 or max_attempts < 1:
+              raise ValueError("attempt and max_attempts must be >= 1")
+          if attempt >= max_attempts:
+              return False
+          return status_code in RETRYABLE_STATUS_CODES
+
+
+      def backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
+          """Compute capped exponential backoff: min(cap, base * 2**(attempt - 1))."""
+          if attempt < 1:
+              raise ValueError("attempt must be >= 1")
+          if base <= 0 or cap <= 0:
+              raise ValueError("base and cap must be positive")
+          delay = base * (2 ** (attempt - 1))
+          return float(min(cap, delay))
+      ```
+
+      Diqqət et:
+      - `should_retry` və `backoff_seconds` şəbəkədən və `time.sleep`-dən ayrılmış **pure funksiyalardır**! Bu dizayn ("functional core") sayəsində retry məntiqini internetə qoşulmadan və saniyələrlə `sleep` gözləmədən ani unit testlərlə yoxlaya bilirik.
+      - Əgər `max_attempts = 3` olarsa: 1-ci cəhd uğursuz olanda (`attempt=1 < 3`) retry edirik, 2-ci cəhd uğursuz olanda (`attempt=2 < 3`) retry edirik, 3-cü cəhd uğursuz olanda (`attempt=3 >= 3`) artıq dayanırıq (`False`).
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Bütün status kodlarına (o cümlədən `400`, `401`, `422`) retry etmək**
+      Prompt çox uzundursa (context window aşılıb → `400 Bad Request`), onu 5 dəfə təkrar göndərmək 5 dəfə də `400` alacaq və istifadəçini 15 saniyə əbəs yerə gözlədəcək.
+
+      **2. `timeout` verməmək**
+      `requests.post(url, json=payload)` — `timeout` yazılmayıbsa, şəbəkə kəsiləndə worker sonsuza qədər asılı qalır.
+
+      **3. `time.sleep(1)` ilə sabit (constant) və ya sıfır gözləmə ilə `while True:` retry etmək**
+      Server `503` (overload) verəndə fasiləsiz yenidən sorğu göndərmək yıxılmış serveri bir az da əzir (retry storm) və öz IP-nin bloklanmasına səbəb olur. Həmişə `max_attempts` həddi və artan `backoff` qoy.
+
+      **4. `Retry-After` header-ini nəzərə almamaq**
+      Bir çox LLM API-si `429` qaytaranda cavab header-ində `Retry-After: 12` göndərir. Əgər server açıq şəkildə neçə saniyə gözləməli olduğunu deyirsə, öz hesabladığın backoff əvəzinə həmin dəyərə hörmət et.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **İnteraktiv istifadəçi sorğusu vs Arxa-plan (Background) batch işi:** İstifadəçi çat pəncərəsində cavab gözləyirsə, 6 dəfə retry edib 60 saniyə gözlətmək pis təcrübədir — burada `max_attempts=2` və ya sürətli fallback modelə keçid daha yaxşıdır. Gecə işləyən data etiketləmə job-unda isə `max_attempts=5` və `cap=30.0s` işin yarımçıq qalmaması üçün idealdır.
+      - **Idempotency riski:** `GET` sorğusu və ya LLM completion (`POST /v1/chat/completions`) adətən yan təsirsizdir — retry etmək yalnız əlavə token xərci yarada bilər. Amma *"ödəniş çıx"* və ya *"bazaya yeni sətir əlavə et"* əməliyyatını timeout-dan sonra kor-koranə retry etsən, əməliyyat iki dəfə icra oluna bilər. Belə endpoint-lərdə `Idempotency-Key` header-i istifadə olunur.
+mastery_criteria:
+  - Status koduna və cəhd sayına görə retry qərarını düzgün verə bilirsən
+  - Capped exponential backoff düsturunu kənar kitabxanasız implementasiya və test edə bilirsən
+  - Timeout və idempotency-nin production API müştərilərindəki rolunu izah edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-http-retryable-codes
+      type: multi
+      title: Hansı status kodlarında retry etmək düzgündür?
+      prompt: LLM API-dən gələn aşağıdakı HTTP status kodlarından hansıları **transient** (müvəqqəti) hesab olunur və backoff ilə yenidən cəhd (retry) edilməlidir? Hamısını seç.
+      skills: [http-apis]
+      category: production
+      options:
+        - id: a
+          text: "429 Too Many Requests (Rate limit)"
+          feedback: Bəli — bir qədər gözlədikdən sonra kvota pəncərəsi yenilənir.
+        - id: b
+          text: "401 Unauthorized (Yanlış API açarı)"
+          feedback: Xeyr — açar səhvdirsə, təkrar sorğu da 401 qaytaracaq.
+        - id: c
+          text: "503 Service Unavailable (Server müvəqqəti yüklənib)"
+          feedback: Bəli — müvəqqəti yüklənmə zamanı backoff ilə retry standart praktikadır.
+        - id: d
+          text: "422 Unprocessable Entity (JSON sxem xətası)"
+          feedback: Xeyr — göndərilən payload dəyişmədikcə həmişə 422 alınacaq.
+        - id: e
+          text: "504 Gateway Timeout"
+          feedback: Bəli — upstream zaman aşımı müvəqqəti şəbəkə/yük problemi ola bilər.
+      answers: [a, c, e]
+      explanation: "`429`, `502`, `503` və `504` müvəqqəti yük və ya limit kodlarıdır. `400`, `401`, `403`, `404`, `422` isə sorğunun özündəki qəti xətalardır."
+    - id: q-http-backoff-calc
+      type: numeric
+      title: Exponential backoff hesabı
+      prompt: "$t_{\\text{base}} = 0.5$ saniyə və $t_{\\text{cap}} = 10.0$ saniyə olduqda, $k = 4$-cü uğursuz cəhddən sonra $\\min(t_{\\text{cap}}, t_{\\text{base}} \\cdot 2^{k-1})$ düsturu ilə neçə saniyə gözlənilməlidir?"
+      skills: [http-apis]
+      category: production
+      answer: 4.0
+      tolerance: 0.01
+      unit: s
+      hints:
+        - "$k = 4$ üçün $2^{4-1} = 2^3 = 8$."
+        - "$0.5 \\cdot 8 = 4.0$, və $\\min(10.0, 4.0) = 4.0$."
+      explanation: "$0.5 \\cdot 2^{4-1} = 0.5 \\cdot 8 = 4.0$ saniyə. Bu dəyər $10.0$ tavanından kiçik olduğu üçün cavab $4.0$-dır."
+    - id: q-http-missing-timeout
+      type: mcq
+      title: Timeout qoyulmadıqda nə baş verir?
+      prompt: Production worker-də `requests.post(url, json=payload)` çağırışında `timeout` parametri göstərilməyib. Qarşı server bağlantını qəbul edib cavab göndərmədən donarsa nə baş verər?
+      skills: [http-apis]
+      category: production
+      options:
+        - id: a
+          text: Python 30 saniyə sonra avtomatik TimeoutError qaldırır
+          feedback: "`requests` kitabxanasında default timeout yoxdur (`None`)."
+        - id: b
+          text: Çağırış qeyri-müəyyən müddətə (sonsuza qədər) asılı qalır və həmin worker-i kilidləyir
+          feedback: Doğru. Default `timeout=None` olduğu üçün worker prosesi cavab gələnə və ya OS bağlantını kəsənə qədər bloklanır.
+        - id: c
+          text: "`408 Request Timeout` qaytarır"
+          feedback: Server cavab vermirsə, heç bir HTTP status kodu qayıda bilməz.
+      answer: b
+      explanation: Python `requests` və bir çox HTTP kitabxanasında açıq `timeout` ötürülmədikdə sorğu sonsuza qədər gözləyə bilər.
+    - id: q-http-jitter-reason
+      type: mcq
+      title: Jitter niyə əlavə olunur?
+      prompt: Exponential backoff müddətinə kiçik təsadüfi rəqəm (**jitter**) əlavə etməyin əsas məqsədi nədir?
+      skills: [http-apis]
+      category: concept
+      options:
+        - id: a
+          text: Şifrələmə (encryption) təhlükəsizliyini artırmaq
+          feedback: Jitter təhlükəsizlik deyil, yük paylama mexanizmidir.
+        - id: b
+          text: Eyni anda xəta alan çoxlu müştərinin eyni saniyədə serverə yenidən hücum etməsinin (thundering herd) qarşısını almaq
+          feedback: Doğru. Təsadüfi sürüşmə retry dalğasını zamana yayır və serverin özünə gəlməsinə imkan verir.
+        - id: c
+          text: JSON parse sürətini artırmaq
+          feedback: Jitter yalnız gözləmə müddətinə aiddir.
+      answer: b
+      explanation: Jitter olmadan eyni saniyədə `503` alan 500 worker tam 1.0, 2.0, 4.0 saniyə sonra yenə eyni anda serverə vuracaq (thundering herd).
+exercises:
+  - id: ex-http-retry-and-backoff
+    type: code
+    title: should_retry və backoff_seconds funksiyalarını yaz
+    prompt: |
+      Dayanıqlı LLM API client-i üçün iki pure köməkçi funksiyanı tamamla:
+
+      1. `should_retry(status_code: int, attempt: int, max_attempts: int) -> bool`:
+         - Əgər `attempt < 1` və ya `max_attempts < 1` olarsa → `ValueError` qaldır.
+         - Əgər `attempt >= max_attempts` olarsa → `False` qaytar (limit bitib).
+         - Yalnız status kodu `{429, 502, 503, 504}` içindədirsə `True`, digər bütün kodlarda (`200`, `400`, `401`, `403`, `404`, `422`, `500` və s.) `False` qaytar.
+
+      2. `backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float`:
+         - Əgər `attempt < 1`, `base <= 0` və ya `cap <= 0` olarsa → `ValueError` qaldır.
+         - $\min(\text{cap}, \text{base} \cdot 2^{\text{attempt} - 1})$ dəyərini `float` kimi qaytar.
+    skills: [http-apis, py-errors]
+    category: production
+    difficulty: 2
+    hints:
+      - "`RETRYABLE = {429, 502, 503, 504}` sabit çoxluğundan istifadə et."
+      - "`should_retry` içində əvvəlcə `attempt < 1 or max_attempts < 1` yoxla, sonra `attempt < max_attempts and status_code in RETRYABLE` qaytar."
+      - "`backoff_seconds` içində `min(cap, base * (2 ** (attempt - 1)))` hesabla."
+    starter_code: |
+      def should_retry(status_code: int, attempt: int, max_attempts: int) -> bool:
+          # TODO: retry qərar məntiqini yaz
+          return False
+
+
+      def backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
+          # TODO: tavanlı exponential backoff hesabla
+          return 0.0
+    tests:
+      - name: Transient kodlarda attempt < max_attempts olduqda True qaytarır
+        code: |
+          for code in [429, 502, 503, 504]:
+              assert should_retry(code, 1, 3) is True, f"code={code}, attempt=1 üçün True olmalı idi"
+              assert should_retry(code, 2, 3) is True
+              assert should_retry(code, 3, 3) is False, "attempt == max_attempts olduqda False olmalıdır"
+      - name: Terminal (4xx) və 200 kodlarında həmişə False qaytarır
+        code: |
+          for code in [200, 400, 401, 403, 404, 422, 500]:
+              assert should_retry(code, 1, 5) is False, f"code={code} retry edilməməlidir"
+      - name: Exponential backoff və cap düzgün hesablanır
+        code: |
+          assert backoff_seconds(1, base=0.5, cap=4.0) == 0.5
+          assert backoff_seconds(2, base=0.5, cap=4.0) == 1.0
+          assert backoff_seconds(3, base=0.5, cap=4.0) == 2.0
+          assert backoff_seconds(4, base=0.5, cap=4.0) == 4.0
+          assert backoff_seconds(5, base=0.5, cap=4.0) == 4.0
+      - name: Yanlış parametrlər ValueError qaldırır
+        code: |
+          for fn, args in [
+              (should_retry, (429, 0, 3)),
+              (should_retry, (429, 1, 0)),
+              (backoff_seconds, (0, 0.5, 4.0)),
+              (backoff_seconds, (1, -0.5, 4.0)),
+              (backoff_seconds, (1, 0.5, 0.0)),
+          ]:
+              try:
+                  fn(*args)
+                  assert False, f"{fn.__name__}{args} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      RETRYABLE_CODES = {429, 502, 503, 504}
+
+
+      def should_retry(status_code: int, attempt: int, max_attempts: int) -> bool:
+          if attempt < 1 or max_attempts < 1:
+              raise ValueError("attempt and max_attempts must be >= 1")
+          if attempt >= max_attempts:
+              return False
+          return status_code in RETRYABLE_CODES
+
+
+      def backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
+          if attempt < 1 or base <= 0 or cap <= 0:
+              raise ValueError("invalid backoff parameters")
+          return float(min(cap, base * (2 ** (attempt - 1))))
+    explanation: |
+      Bu iki kiçik funksiya istənilən HTTP və ya LLM SDK çağırışının ətrafında etibarlı retry dövrü qurmaq üçün kifayətdir.
+  - id: ex-http-total-wait-time
+    type: numeric
+    title: Ümumi gözləmə müddətini hesabla
+    prompt: |
+      Bir API müştərisi `max_attempts = 4`, `base = 1.0` s və `cap = 3.0` s ilə konfiqurasiya olunub.
+      Əgər bütün 4 cəhd `503 Service Unavailable` ilə uğursuz olarsa (1-ci, 2-ci və 3-cü cəhddən sonra gözləyir, 4-cü cəhddən sonra isə artıq retry etməyib xəta qaldırır), müştəri cəmi neçə saniyə `backoff` gözləmiş olar?
+    skills: [http-apis]
+    category: production
+    difficulty: 2
+    answer: 6.0
+    tolerance: 0.01
+    unit: s
+    hints:
+      - 4 cəhd arasında yalnız **3 gözləmə** (attempt 1, 2 və 3-dən sonra) baş verir.
+      - "$t_1 = \\min(3.0, 1.0 \\cdot 2^0) = 1.0$, $t_2 = \\min(3.0, 1.0 \\cdot 2^1) = 2.0$, $t_3 = \\min(3.0, 1.0 \\cdot 2^2) = 3.0$."
+    explanation: |
+      1-ci cəhddən sonra $1.0\text{ s}$, 2-ci cəhddən sonra $2.0\text{ s}$, 3-cü cəhddən sonra $\min(3.0, 4.0) = 3.0\text{ s}$ gözlənilir. 4-cü cəhd sonuncu olduğu üçün ondan sonra gözləmə yoxdur. Cəmi: $1.0 + 2.0 + 3.0 = 6.0\text{ s}$.
+references:
+  - title: MDN Web Docs — HTTP response status codes
+    url: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status
+    note: Bütün standart HTTP status kodlarının arayışı
+  - title: AWS Architecture Blog — Exponential Backoff And Jitter
+    url: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+    note: Paylanmış sistemlərdə backoff və jitter strategiyalarının klassik təhlili

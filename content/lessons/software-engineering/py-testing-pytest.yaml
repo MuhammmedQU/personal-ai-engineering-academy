@@ -1,0 +1,416 @@
+id: py-testing-pytest
+track: software-engineering
+module: python-engineering
+title: Testing (pytest) — Arrange-Act-Assert, edge cases və float müqayisəsi
+summary: ML preprocessing və metrik funksiyalarını avtomatik testlərlə qorumağı öyrənəcəksən. Arrange-Act-Assert strukturunu, sərhəd hallarını (empty, None, NaN) və üzən nöqtəli ədədlərin (float) dəqiq müqayisəsini tətbiq edəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [py-data-structures-complexity]
+next: http-json-api-clients
+skills: [py-testing, py-functions, debugging]
+objectives:
+  - Arrange-Act-Assert (AAA) şablonu ilə oxunaqlı və müstəqil unit testlər yazmaq
+  - "`0.1 + 0.2 != 0.3` problemini başa düşmək və `math.isclose` / `pytest.approx` istifadə etmək"
+  - ML data transformasiyaları üçün sərhəd (boundary) və xəta (exception) testləri dizayn etmək
+  - Deterministik funksiya testləri ilə model regressiyasının qarşısını almaq
+why_it_matters: |
+  AI sistemlərində "kod işləyir" demək çox vaxt təhlükəli illüziyadır: tokenizer-də kiçik bir dəyişiklik və ya metrik hesabında sıfıra bölmə xətasının səhv idarə olunması proqramı çökdürməyə bilər, amma modelin dəqiqliyini (accuracy) səssizcə `88%`-dən `62%`-ə salar.
+
+  Modelin özü ehtimallı (stochastic) olsa belə, onun ətrafındakı kodun **90%-i deterministikdir**: mətn təmizləmə, chunking, feature scaling, metrik hesablama, JSON parsing. Bu funksiyaları `pytest` ilə avtomatik test etmək hər kod dəyişikliyində sənə saniyələr içində zəmanət verir.
+terms:
+  - term: Arrange-Act-Assert (AAA)
+    definition: "Testin üç mərhələli strukturu: 1) giriş datasını hazırla (Arrange), 2) funksiyanı çağır (Act), 3) nəticəni `assert` ilə yoxla (Assert)."
+  - term: Edge case (sərhəd halı)
+    definition: İcazəli aralığın ən uc nöqtələri — boş list `[]`, tək element `[x]`, bütün elementləri sıfır olan vektor, `NaN`, çox böyük ədədlər.
+  - term: Floating-point precision
+    definition: İkili (binary) say sistemində `0.1 + 0.2 == 0.30000000000000004` olması; `==` əvəzinə dözümlülük (`abs_tol`, `rel_tol`) ilə müqayisə tələb edir.
+  - term: Regression test
+    definition: Tapılıb düzəldilmiş bir bug-ın gələcəkdə yenidən qayıtmaması üçün yazılan konkret test.
+  - term: Determinism
+    definition: Eyni giriş (və ya sabit random seed) verildikdə hər dəfə tamamilə eyni nəticənin alınması.
+sections:
+  - id: aaa-and-floats
+    kind: explanation
+    title: Arrange-Act-Assert və üzən nöqtəli (float) müqayisə
+    body: |
+      Yaxşı unit test kiçik bir elmi təcrübədir və **Arrange-Act-Assert (AAA)** strukturunu izləyir:
+
+      1. **Arrange (Hazırla):** Test üçün lazım olan kiçik, aydın giriş datasını qur.
+      2. **Act (İcra et):** Test olunan funksiyanı **bir dəfə** çağır və nəticəni dəyişəndə saxla.
+      3. **Assert (Təsdiqlə):** Alınan nəticənin gözlənilən müqaviləyə uyğun olduğunu yoxla.
+
+      **Niyə float-ları `==` ilə müqayisə etmək olmaz?**
+      Kompüter onluq kəsrləri ikili (base-2) formatda saxlayır. Necə ki $1/3 = 0.3333...$ onluq sistemdə sonlu yazılmır, $0.1$ də ikili sistemdə sonlu yazılmır:
+      ```python
+      >>> 0.1 + 0.2 == 0.3
+      False
+      >>> 0.1 + 0.2
+      0.30000000000000004
+      ```
+      ML kodunda ehtimallar, loss dəyərləri, cosine similarity və F1-score həmişə `float`-dır! Onları yoxlamaq üçün iki ədədin fərqinin kiçik bir həddən ($\epsilon$, məsələn $10^{-6}$) az olduğunu yoxlayırıq:
+      - Standart kitabxana: `math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6)`
+      - `pytest` daxilində: `assert actual == pytest.approx(expected, abs=1e-6)`
+  - id: bridge-load-test
+    kind: analogy
+    title: "Mental model: körpünü yalnız günəşli havada yoxlamaq olmaz"
+    body: |
+      Mühəndislər yeni körpünü yoxlayanda onun üstündən yalnız bir minik maşını keçirmirlər ("happy path"). Onlar körpünü **sərhəd şərtlərində** sınayırlar:
+      - Körpü tam boş olanda nə baş verir? (**`[]` boş input**)
+      - Maksimum yük altında — 40 tonluq yük maşınları ilə nə baş verir? (**böyük / ekstremal dəyərlər**)
+      - Qadağan olunmuş yük gələndə şlaqbaum bağlanırmı? (**`ValueError` / `TypeError` testləri**)
+
+      Yalnız "normal" nümunəni (`[1, 2, 3]`) yoxlayan test sənə yalançı arxayınlıq verir. Production-da gecə saat 03:00-da sistemi çökdürən həmişə boş siyahı, `0` məxrəc və ya `NaN` dəyəridir.
+  - id: test-spectrum-diagram
+    kind: diagram
+    title: Bir funksiya üçün 4 vacib test kateqoriyası
+    body: |
+      ```mermaid
+      flowchart TD
+        F["Funksiya Müqaviləsi (Contract)"] --> T1["1. Happy Path (adi kiçik nümunə)"]
+        F --> T2["2. Boundary / Edge Cases (boş list, 0, tək element)"]
+        F --> T3["3. Invariants (input dəyişməyib, çıxış [0,1] aralığındadır)"]
+        F --> T4["4. Error Cases (yanlış input -> ValueError qalxır)"]
+      ```
+
+      Hər mühüm data transformasiyası və ya metrik funksiyası üçün bu 4 qutunun hər birindən ən azı bir test yazmaq standart qaydamızdır.
+  - id: worked-f1-testing
+    kind: worked_example
+    title: Addım-addım F1-score funksiyasının və testlərinin qurulması
+    body: |
+      Klassifikasiya modelini qiymətləndirən $F_1$ düsturuna baxaq:
+
+      $$F_1 = \frac{2 \cdot P \cdot R}{P + R}$$
+
+      Simvollar:
+      - $P$ (`precision`) — $[0, 1]$ aralığında dəqiqlik
+      - $R$ (`recall`) — $[0, 1]$ aralığında tamlıq
+      - $F_1$ — $P$ və $R$-in harmonik ortası
+
+      Kiçik rəqəmlərlə 3 test ssenarisini əl ilə hesablayaq:
+
+      | Ssenari | Giriş ($P, R$) | Hesablama | Gözlənilən nəticə |
+      |---|---|---|---|
+      | Normal hal (Happy path) | $P = 0.8, R = 0.5$ | $\frac{2 \cdot 0.8 \cdot 0.5}{0.8 + 0.5} = \frac{0.8}{1.3}$ | $\approx 0.615385$ (`isclose` ilə!) |
+      | Sərhəd halı (Sıfır məxrəc) | $P = 0.0, R = 0.0$ | $P + R = 0 \rightarrow$ sıfıra bölmə! | Müqaviləyə görə `0.0` |
+      | Xəta halı (Yanlış dəyər) | $P = 1.2, R = 0.5$ | $P > 1.0$ icazəsizdir | `ValueError` qaldırır |
+
+      Diqqət et: birinci ssenaridə $0.8 / 1.3$ sonsuz dövri kəsrdir ($0.615384615...$). Burada `math.isclose(res, 0.8 / 1.3, abs_tol=1e-6)` istifadə etmək mütləqdir.
+  - id: code-walkthrough
+    kind: code
+    title: Kod — funksiya və onun AAA test dəsti
+    body: |
+      ```python
+      import math
+
+
+      def compute_f1(precision: float, recall: float) -> float:
+          """Compute F1 score from precision and recall in [0, 1]."""
+          if not (0.0 <= precision <= 1.0) or not (0.0 <= recall <= 1.0):
+              raise ValueError("precision and recall must be between 0.0 and 1.0")
+          if precision + recall == 0.0:
+              return 0.0
+          return (2.0 * precision * recall) / (precision + recall)
+
+
+      def test_compute_f1_normal_case() -> None:
+          # Arrange
+          p, r = 0.8, 0.5
+          # Act
+          score = compute_f1(p, r)
+          # Assert
+          assert math.isclose(score, 0.8 / 1.3, abs_tol=1e-6)
+
+
+      def test_compute_f1_zero_division_edge_case() -> None:
+          assert compute_f1(0.0, 0.0) == 0.0
+
+
+      def test_compute_f1_rejects_out_of_range() -> None:
+          for bad_p, bad_r in [(-0.1, 0.5), (0.5, 1.1)]:
+              try:
+                  compute_f1(bad_p, bad_r)
+                  assert False, f"({bad_p}, {bad_r}) üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+      ```
+
+      *(Qeyd: `pytest` istifadə etdikdə sonuncu testi `with pytest.raises(ValueError): compute_f1(-0.1, 0.5)` kimi daha qısa yazırıq. Brauzerdəki standart Python mühitində isə `try / assert False / except ValueError` eyni işi görür.)*
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Float nəticəni `==` ilə yoxlamaq**
+      ```python
+      assert cosine_similarity(a, b) == 0.7071   # BUG: 0.70710678... olduğu üçün test kəsiləcək!
+      ```
+      Düzəliş: `assert math.isclose(cosine_similarity(a, b), 0.70710678, abs_tol=1e-5)`.
+
+      **2. `math.isclose`-da sıfır ətrafında yalnız `rel_tol`-a güvənmək**
+      `math.isclose(1e-12, 0.0)` default olaraq **`False`** qaytarır! Çünki default `abs_tol=0.0`-dır və nisbi fərq sıfıra vurulanda sıfır verir. Sıfıra yaxın ədədləri müqayisə edəndə **həmişə `abs_tol=1e-6`** (və ya uyğun hədd) göstər.
+
+      **3. Testin içində funksiyanın öz kodunu kopyalamaq (tautological test)**
+      ```python
+      def test_f1():
+          p, r = 0.8, 0.5
+          assert compute_f1(p, r) == (2 * p * r) / (p + r)   # Səhv düsturu həm koda, həm testə kopyalamısan!
+      ```
+      Düzəliş: Testdə gözlənilən cavabı müstəqil olaraq əl ilə hesablanmış konkret ədədlə (`0.8 / 1.3` və ya `0.6153846`) yoxla.
+
+      **4. Xəta testində `assert False` unutmaq**
+      `try: fn(bad)` yazıb altında `assert False` qoymasan, funksiya heç bir exception qaldırmasa belə `try` bloku sakitcə bitəcək və test **səhvən yaşıl (keçmiş)** görünəcək!
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Unit testlər vs End-to-End (E2E) model testləri:** Kiçik pure funksiyaların unit testləri millisaniyələrə işləyir və hər `git commit`-də qoşula bilər. Bütün LLM və ya neural network pipeline-ını real modellə test etmək isə dəqiqələrlə vaxt və GPU/API büdcəsi aparır. Ona görə piramidanın bünövrəsində sürətli unit testlər (data təmizləmə, chunking, metrik, parser), zirvəsində isə az sayda E2E evaluation testi dayanmalıdır.
+      - **Sərt testlər vs Kövrək (brittle) testlər:** Daxili köməkçi dəyişənləri yox, funksiyanın **ictimai müqaviləsini** (input → output) test et. Əks halda kodu hər refaktor edəndə (davranış dəyişməsə də) testlər qırılacaq.
+mastery_criteria:
+  - Üzən nöqtəli (float) hesablamaları math.isclose və abs_tol ilə təhlükəsiz müqayisə edə bilirsən
+  - Funksiya üçün happy path, edge case (boş/sıfır/NaN) və exception testlərini AAA strukturunda yaza bilirsən
+  - Xəta qaldırmalı olan funksiyanı test edərkən yalançı-yaşıl (false-positive) test tələsindən qaça bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pytest-float-compare
+      type: mcq
+      title: Float müqayisəsində niyə abs_tol vacibdir?
+      prompt: "`math.isclose(1e-10, 0.0)` çağırışı default parametrlərlə nə qaytarır və niyə?"
+      skills: [py-testing, debugging]
+      category: python
+      options:
+        - id: a
+          text: "`True` — çünki `1e-10` sıfıra çox yaxındır"
+          feedback: Default `abs_tol=0.0` olduğu üçün sıfırla müqayisədə `rel_tol * max(|a|, |b|)` düsturu işə düşür və `False` verir.
+        - id: b
+          text: "`False` — çünki default `abs_tol=0.0`-dır; sıfırla müqayisə üçün açıq `abs_tol=1e-6` verilməlidir"
+          feedback: Doğru. `0.0` ilə müqayisə edərkən mütləq `abs_tol` təyin edilməlidir.
+        - id: c
+          text: "`ValueError` qaldırır"
+          feedback: Heç bir xəta qaldırmır, `bool` qaytarır.
+      answer: b
+      explanation: "`math.isclose(a, b)` şərti `|a - b| <= max(rel_tol * max(|a|, |b|), abs_tol)` kimidir. Hədəf `0.0` olduqda `abs_tol > 0` vermək mütləqdir."
+    - id: q-pytest-false-green-test
+      type: mcq
+      title: Bu testdəki təhlükəli bug nədir?
+      prompt: |
+        ```python
+        def test_rejects_negative():
+            try:
+                sqrt_feature(-4)
+            except ValueError:
+                pass
+        ```
+        Əgər `sqrt_feature(-4)` içində bug varsa və o, `ValueError` qaldırmayıb sadəcə `0` qaytarırsa, bu test necə nəticələnər?
+      skills: [py-testing, debugging]
+      category: debug
+      options:
+        - id: a
+          text: Test kəsilər (FAIL), çünki `ValueError` qalxmadı
+          feedback: "`try` blokunda heç bir `assert False` yoxdur! Funksiya `0` qaytarır və test sakitcə bitir."
+        - id: b
+          text: Test səhvən keçər (PASS), çünki `sqrt_feature(-4)` sətirindən sonra `assert False` yazılmayıb
+          feedback: Doğru. Exception qalxmadıqda testi kəsmək üçün `try` blokunun sonunda `assert False` (və ya `pytest.raises`) olmalıdır.
+        - id: c
+          text: SyntaxError verər
+          feedback: Sintaksis düzgündür, məntiq səhvdir.
+      answer: b
+      explanation: Exception testində `try` blokunun sonuna `assert False, "ValueError gözlənilirdi"` qoyulmasa, exception qalxmayanda da test PASS olur.
+    - id: q-pytest-aaa-steps
+      type: order
+      title: Arrange-Act-Assert ardıcıllığı
+      prompt: Unit testin 3 mərhələsini düzgün icra sırası ilə düz.
+      skills: [py-testing]
+      category: concept
+      items:
+        - id: act
+          text: "Act: Test olunan funksiyanı çağır və nəticəni saxla"
+        - id: arrange
+          text: "Arrange: Giriş datasını və gözlənilən şəraiti hazırla"
+        - id: assertstep
+          text: "Assert: Alınan nəticənin gözlənilən dəyərə bərabər olduğunu yoxla"
+      answer: [arrange, act, assertstep]
+      explanation: Əvvəlcə mühit və data hazırlanır (Arrange), sonra funksiya işə salınır (Act), sonda nəticə yoxlanılır (Assert).
+    - id: q-pytest-edge-cases
+      type: multi
+      title: Hansılar vacib edge case testləridir?
+      prompt: "`mean_pooling(embeddings: list[list[float]]) -> list[float]` funksiyasını test edərkən hansı halları mütləq yoxlamalısan? Hamısını seç."
+      skills: [py-testing, py-functions]
+      category: concept
+      options:
+        - id: a
+          text: Boş siyahı `[]` verildikdə müqaviləyə uyğun davranış (məsələn, `ValueError`)
+          feedback: Bəli — boş siyahıda sıfıra bölmə baş verir, açıq test edilməlidir.
+        - id: b
+          text: Tək vektorlu siyahı `[[1.0, 2.0]]` verildikdə həmin vektorun özünün qayıtması
+          feedback: Bəli — `n=1` ən sadə sərhəd halıdır.
+        - id: c
+          text: Müxtəlif uzunluqlu vektorlar `[[1.0, 2.0], [3.0]]` verildikdə `ValueError` qalxması
+          feedback: Bəli — ölçü uyğunsuzluğu (shape mismatch) mütləq yoxlanmalıdır.
+        - id: d
+          text: Input `embeddings` siyahısının funksiya tərəfindən dəyişdirilməməsi (no mutation)
+          feedback: Bəli — pure function müqaviləsinin qorunması.
+      answers: [a, b, c, d]
+      explanation: Boş giriş, `n=1` halı, ölçü uyğunsuzluğu və input-un dəyişməməsi ML funksiya testlərinin 4 sütunudur.
+exercises:
+  - id: ex-pytest-safe-accuracy
+    type: code
+    title: Bütün edge case testlərindən keçən binary_accuracy funksiyası
+    prompt: |
+      Model qiymətləndirmə boru kəməri üçün `binary_accuracy(preds: list[int], labels: list[int]) -> float` funksiyasını elə yaz ki, bütün sərhəd və xəta testlərindən keçsin:
+
+      1. Əgər `preds` və `labels` uzunluqları fərqlidirsə → `ValueError` qaldır.
+      2. Əgər hər ikisi boşdursa (`len == 0`) → `ValueError` qaldır (0-a bölmə olmasın).
+      3. Əgər hər hansı element `0` və ya `1` deyilsə (və ya `bool` tipindədirsə!) → `ValueError` qaldır.
+      4. Uyğun gələn mövqelərin (`preds[i] == labels[i]`) nisbətini `float` kimi (`[0.0, 1.0]` aralığında) qaytar.
+    skills: [py-testing, py-functions, debugging]
+    category: python
+    difficulty: 2
+    hints:
+      - "`if len(preds) != len(labels) or len(preds) == 0: raise ValueError(...)` ilə başla."
+      - Hər `(p, y)` cütü üçün `isinstance(p, bool) or p not in (0, 1)` şərtini həm `p`, həm də `y` üçün yoxla.
+      - "`correct = sum(1 for p, y in zip(preds, labels) if p == y)` və `return correct / len(labels)`."
+    starter_code: |
+      def binary_accuracy(preds: list[int], labels: list[int]) -> float:
+          # TODO: bütün edge-case və müqavilə şərtlərini ödəyən implementasiya yaz
+          return 0.0
+    tests:
+      - name: Normal hesablama və float dəqiqliyi
+        code: |
+          import math
+          acc = binary_accuracy([1, 0, 1], [1, 1, 1])
+          assert math.isclose(acc, 2.0 / 3.0, abs_tol=1e-6), f"alınan: {acc}"
+          assert binary_accuracy([0, 0], [1, 1]) == 0.0
+          assert binary_accuracy([1, 0], [1, 0]) == 1.0
+      - name: Boş siyahılar və ya fərqli uzunluqlar ValueError verir
+        code: |
+          for p, y in [([], []), ([1], [1, 0]), ([1, 0], [1])]:
+              try:
+                  binary_accuracy(p, y)
+                  assert False, f"({p}, {y}) üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+      - name: "{0, 1} xarici dəyərlər və ya bool ValueError verir"
+        code: |
+          for p, y in [([1, 2], [1, 0]), ([1, 0], [1, -1]), ([True, 0], [1, 0])]:
+              try:
+                  binary_accuracy(p, y)
+                  assert False, f"({p}, {y}) üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def binary_accuracy(preds: list[int], labels: list[int]) -> float:
+          if len(preds) != len(labels) or len(preds) == 0:
+              raise ValueError("preds and labels must have the same non-zero length")
+          correct = 0
+          for p, y in zip(preds, labels):
+              if isinstance(p, bool) or isinstance(y, bool) or not isinstance(p, int) or not isinstance(y, int):
+                  raise ValueError("elements must be integers 0 or 1")
+              if p not in (0, 1) or y not in (0, 1):
+                  raise ValueError("elements must be 0 or 1")
+              if p == y:
+                  correct += 1
+          return correct / len(labels)
+    explanation: |
+      Funksiya əvvəlcə uzunluq və boş siyahı sərhəd hallarını, sonra hər elementin həqiqi `0` və ya `1` olduğunu yoxlayır, sonda dəqiqliyi hesablayır.
+  - id: ex-pytest-write-test-suite
+    type: code
+    title: Bug-lı z_score funksiyasını tutan test funksiyası yaz
+    prompt: |
+      Təsəvvür et ki, sən `z_score(values: list[float]) -> list[float]` funksiyasını yoxlayan `verify_z_score_fn(fn)` adlı **test-harness** yazırsan.
+      Düzgün `z_score` funksiyası bu müqaviləni ödəməlidir:
+      1. Boş siyahı `[]` üçün `[]` qaytarır.
+      2. Input siyahını dəyişdirmir (mutate etmir).
+      3. Bütün elementlər bərabər olduqda (standart meyl `std == 0`) sıfıra bölmə vermir, `[0.0, ...]` qaytarır.
+      4. `[1.0, 2.0, 3.0]` üçün çıxışın ortalaması `0.0`-a yaxın (`abs_tol=1e-6`), ilk elementi mənfi, son elementi müsbət olur: `[-1.22474487, 0.0, 1.22474487]`.
+
+      `verify_z_score_fn(fn) -> bool` funksiyasını yaz: verilmiş `fn` bütün bu 4 şərti ödəyirsə `True`, hər hansı şərti pozursa (və ya `ZeroDivisionError`/`Exception` qaldırırsa) `False` qaytarsın!
+    skills: [py-testing, debugging]
+    category: debug
+    difficulty: 2
+    hints:
+      - "Bütün yoxlamaları `try: ... except Exception: return False` içində yaz ki, sıfıra bölən bug-lı `fn` gələndə `False` qayıtsın."
+      - Input mutasiyasını yoxlamaq üçün `inp = [1.0, 2.0, 3.0]`, `out = fn(inp)` çağır və `inp == [1.0, 2.0, 3.0]` və `out is not inp` olduğunu yoxla.
+      - "`fn([5.0, 5.0]) == [0.0, 0.0]` şərtini yoxla."
+    starter_code: |
+      import math
+
+      def verify_z_score_fn(fn) -> bool:
+          # TODO: fn-i 4 müqavilə şərti üzrə test et; hamısından keçsə True, əks halda False qaytar
+          return True
+    tests:
+      - name: Düzgün implementasiya üçün True qaytarır
+        code: |
+          def good_z(xs):
+              if not xs:
+                  return []
+              m = sum(xs) / len(xs)
+              var = sum((x - m) ** 2 for x in xs) / len(xs)
+              if var == 0:
+                  return [0.0 for _ in xs]
+              s = var ** 0.5
+              return [(x - m) / s for x in xs]
+
+          assert verify_z_score_fn(good_z) is True
+      - name: Sıfıra bölən, boş siyahıda çökən və ya input-u dəyişən funksiyaları tutur (False)
+        code: |
+          def buggy_zero_div(xs):
+              if not xs:
+                  return []
+              m = sum(xs) / len(xs)
+              s = (sum((x - m) ** 2 for x in xs) / len(xs)) ** 0.5
+              return [(x - m) / s for x in xs]
+
+          def buggy_mutates(xs):
+              if not xs:
+                  return []
+              m = sum(xs) / len(xs)
+              var = sum((x - m) ** 2 for x in xs) / len(xs)
+              s = var ** 0.5 if var > 0 else 1.0
+              for i in range(len(xs)):
+                  xs[i] = (xs[i] - m) / s if var > 0 else 0.0
+              return xs
+
+          def buggy_wrong_math(xs):
+              return [0.0 for _ in xs]
+
+          assert verify_z_score_fn(buggy_zero_div) is False, "sıfıra bölmə bug-ı tutulmadı"
+          assert verify_z_score_fn(buggy_mutates) is False, "input mutasiyası tutulmadı"
+          assert verify_z_score_fn(buggy_wrong_math) is False, "yanlış hesablama tutulmadı"
+      - name: Boş siyahıda çökən və ya yanlış uzunluq qaytaran funksiyanı tutur
+        code: |
+          def buggy_empty_crash(xs):
+              m = sum(xs) / len(xs)
+              return [x - m for x in xs]
+
+          assert verify_z_score_fn(buggy_empty_crash) is False
+    solution: |
+      import math
+
+      def verify_z_score_fn(fn) -> bool:
+          try:
+              if fn([]) != []:
+                  return False
+              if fn([5.0, 5.0]) != [0.0, 0.0]:
+                  return False
+              inp = [1.0, 2.0, 3.0]
+              out = fn(inp)
+              if inp != [1.0, 2.0, 3.0] or out is inp:
+                  return False
+              if len(out) != 3:
+                  return False
+              if not (out[0] < 0.0 and math.isclose(out[1], 0.0, abs_tol=1e-6) and out[2] > 0.0):
+                  return False
+              if not math.isclose(sum(out) / 3.0, 0.0, abs_tol=1e-6):
+                  return False
+              return True
+          except Exception:
+              return False
+    explanation: |
+      Test dəstinin gücü onun nə qədər bug-lı implementasiyanı rədd edə bilməsi ilə ölçülür. `verify_z_score_fn` həm boş siyahını, həm sıfır dispersiyanı (`[5.0, 5.0]`), həm input mutasiyasını, həm də riyazi nəticəni yoxlayır.
+references:
+  - title: pytest Documentation — Get Started
+    url: https://docs.pytest.org/en/stable/getting-started.html
+    note: Rəsmi pytest başlanğıc bələdçisi
+  - title: Python math.isclose Documentation
+    url: https://docs.python.org/3/library/math.html#math.isclose
+    note: Üzən nöqtəli ədədlərin rel_tol və abs_tol ilə müqayisəsi

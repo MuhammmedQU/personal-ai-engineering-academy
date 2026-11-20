@@ -1,0 +1,429 @@
+id: prod-fastapi-model-serving
+track: production
+module: serving-deployment
+title: "FastAPI ilə Model Serving: Lifespan, Pydantic Doğrulaması, Health Checks və Testlər"
+summary: "ML modelini və ya LLM boru kəmərini FastAPI xidməti arxasında paketləməyi, modeli hər sorğuda deyil, yalnız başlanğıcda (lifespan) yaddaşa yükləməyi, Pydantic ilə sərt giriş/çıxış müqaviləsi qurmağı və TestClient ilə yoxlamağı öyrənəcəksən."
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [py-errors-validation, http-json-api-clients]
+next: prod-docker-config-secrets
+skills: [prod-model-serving, py-errors]
+objectives:
+  - "Model artefaktını hər HTTP sorğusunda deyil, tətbiq işə düşərkən (lifespan) bir dəfə yaddaşa yükləmək"
+  - "Giriş və çıxış datasını Pydantic sxemləri və açıq sərhəd yoxlamaları ilə doğrulamaq"
+  - "Liveness (/health) və Readiness (/ready) endpoint-lərini düzgün ayırmaq və cavaba model_version ilə request_id əlavə etmək"
+  - "Xidmətin həm normal axınını (happy path), həm də xəta hallarını TestClient ilə avtomatik test etmək"
+why_it_matters: |
+  Jupyter Notebook-da `model.predict(X)` yazmaq yalnız işin başlanğıcıdır. Başqa komandaların və ya mobil tətbiqin sənin modelindən istifadə etməsi üçün o, aydın HTTP müqaviləsi olan etibarlı bir API arxasında işləməlidir.
+
+  Təcrübəsiz mühəndislərin etdiyi iki klassik səhv production-u dərhal çökdürür:
+  1. Modeli (`joblib.load("model.pkl")`) endpoint funksiyasının **içində** yükləmək — hər sorğuda diskdən yüzlərlə meqabayt oxunur və gecikmə saniyələrə qalxır.
+  2. `NaN`, `Infinity` və ya səhv tipli sahələri yoxlamadan modelə ötürmək — müştəriyə aydın `422/400` xətası əvəzinə anlaşılmaz `500 Internal Server Error` qayıdır.
+terms:
+  - term: Model Serving
+    definition: "Öyrədilmiş ML modelinin və ya LLM zəncirinin şəbəkə sorğularını (HTTP/gRPC) qəbul edib real vaxtda proqnoz qaytaran xidmət kimi işlədilməsi."
+  - term: Lifespan (Startup / Shutdown lifecycle)
+    definition: "FastAPI tətbiqi işə düşərkən (sorğular qəbul edilməzdən əvvəl) model və resursları bir dəfə yükləyib, dayanarkən təmizləyən kontekst mexanizmi."
+  - term: Liveness (/health) vs Readiness (/ready)
+    definition: "Liveness prosesin sağ olduğunu, Readiness isə modelin yaddaşa tam yükləndiyini və trafik qəbul etməyə hazır olduğunu bildirən yoxlama nöqtələri."
+  - term: Request ID & Model Version
+    definition: "Hər proqnoz cavabına əlavə edilən unikal sorğu identifikatoru və cavabı hansı model versiyasının (məs. 'fraud-xgb-v1.4') verdiyini göstərən izləmə sahələri."
+  - term: Pydantic Schema Validation
+    definition: "HTTP JSON gövdəsinin tiplərini, məcburi sahələrini və dəyər aralıqlarını avtomatik doğrulayan, səhv olduqda 422 Unprocessable Entity qaytaran qat."
+  - term: TestClient
+    definition: "FastAPI tətbiqini ayrıca port açmadan birbaşa yaddaş daxilində HTTP sorğuları ilə test etməyə imkan verən sınaq aləti."
+sections:
+  - id: serving-architecture
+    kind: explanation
+    title: "Model Serving Arxitekturası: Lifespan, Müqavilə və Sağlamlıq Yoxlamaları"
+    body: |
+      ### 1. Model nə vaxt yüklənməlidir? (Startup Lifespan vs Per-Request)
+      ML modeli və ya embedding indeksi adətən 50 MB-dan bir neçə giqabayta qədər yer tutur.
+      - **Yanlış yanaşma (Per-request load):** `@app.post("/predict")` funksiyasının içində `model = load_model("model.bin")` yazmaq. Saniyədə 50 sorğu gələndə server eyni anda 50 dəfə diski oxuyur, RAM partlayır (`OutOfMemory`) və gecikmə 10 ms əvəzinə 3000 ms olur.
+      - **Doğru yanaşma (Lifespan / Startup load):** Model tətbiq işə düşəndə **yalnız bir dəfə** RAM/GPU yaddaşına yüklənir (`app.state.model`) və bütün sorğular həmin hazır obyekti paylaşır (inference zamanı model read-only olduğu üçün bu tam təhlükəsizdir).
+
+      ### 2. `/health` və `/ready` niyə fərqlidir?
+      Konteyner orkestratorları (Kubernetes, Cloud Run, ECS) iki fərqli sual verir:
+      - **`GET /health` (Liveness):** *"Python prosesi sağdırmı, yoxsa donub?"* Əgər bu endpoint cavab vermirsə, orkestrator konteyneri yenidən başladır (restart).
+      - **`GET /ready` (Readiness):** *"Model yaddaşa tam yüklənibmi və sorğu qəbul edə bilərmi?"* Böyük modelin yüklənməsi 15 saniyə çəkə bilər. Bu 15 saniyə ərzində `/health` `200 OK`, `/ready` isə `503 Service Unavailable` qaytarır ki, load balancer hələ hazır olmayan konteynerə müştəri trafiki göndərməsin.
+
+      ### 3. Giriş və Çıxış Müqaviləsi (`request_id` və `model_version`)
+      Production-da heç vaxt təkcə `{"prediction": 1}` qaytarma! Müştəri şikayət edəndə ki, *"Dünən saat 14:02-də sistem səhv qərar verdi"*, bunu araşdırmaq üçün cavabda mütləq bu sahələr olmalıdır:
+      - `request_id`: Sorğunu loglarda tapmaq üçün unikal ID.
+      - `model_version`: Qərarı `v1.2` yoxsa yeni deploy olunmuş `v1.3` modelinin verdiyini bilmək üçün.
+      - `score` və `prediction`: Həm xam ehtimal balı (`0.8421`), həm də qərar həddinə (`threshold`) görə sinif (`1`).
+  - id: restaurant-kitchen-analogy
+    kind: analogy
+    title: "Mental model: restoran mətbəxinin açılış hazırlığı"
+    body: |
+      - **Per-request model loading = Hər müştəri sifariş verəndə sobanı sıfırdan quraşdırmaq:** Müştəri qəhvə istəyir, barista qəhvə aparatını qutudan çıxarıb quraşdırır, 20 dəqiqə qızmasını gözləyir, qəhvəni verir və aparatı yenidən söküb qutuya qoyur.
+      - **Lifespan startup loading = Səhər açılış hazırlığı:** Restoran qapını müştərilərə açmazdan əvvəl (`startup`) sobanı və qəhvə aparatını bir dəfə qızdırır.
+      - **`/health` vs `/ready`:** Restoranın işıqları yanırsa `/health = OK`. Amma soba hələ qızmayıbsa, qapıda *"Hazırlaşırıq"* lövhəsi asılır (`/ready = 503`). Soba hazır olan kimi lövhə *"Açıqdır"* olur (`/ready = 200`) və sifarişlər saniyələr içində verilir.
+  - id: serving-lifecycle-diagram
+    kind: diagram
+    title: "FastAPI Model Serving dövrü"
+    body: |
+      ```mermaid
+      sequenceDiagram
+        participant O as Orkestrator / Client
+        participant A as FastAPI Service
+        participant M as Yaddaşdakı Model
+
+        Note over A,M: Startup (Lifespan)
+        A->>M: load_model() — BİR DƏFƏ
+        O->>A: GET /ready
+        A-->>O: 200 OK (model_loaded: true)
+        O->>A: POST /predict (JSON payload)
+        A->>A: Pydantic Schema Validation
+        A->>M: model.predict(features)
+        M-->>A: score = 0.87
+        A-->>O: 200 OK {request_id, prediction, score, model_version}
+      ```
+
+      Model yalnız `Startup` blokunda yüklənir; `POST /predict` zamanı yalnız sürətli validation və yaddaşdaxili hesablama gedir.
+  - id: worked-request-response
+    kind: worked_example
+    title: "Giriş doğrulaması və versiyalı çıxış nümunəsi"
+    body: |
+      Tutaq ki, saxtakarlıq (fraud) aşkarlayan modelimiz 3 ədədi əlamət (`features`) gözləyir və qərar həddi `threshold = 0.70`-dir.
+
+      **Nümunə 1 — Düzgün sorğu:**
+      - Giriş: `{"request_id": "req-101", "features": [120.5, 0.0, 3.0]}`
+      - Doğrulama: `request_id` boş deyil, `features` 3 sonlu (finite) ədəddən ibarətdir.
+      - Model balı: `score = 0.82456`
+      - Qərar: $0.82456 \ge 0.70 \implies \text{prediction} = 1$
+      - Çıxış (`200 OK`):
+        ```json
+        {
+          "request_id": "req-101",
+          "prediction": 1,
+          "score": 0.8246,
+          "model_version": "fraud-v2.1"
+        }
+        ```
+
+      **Nümunə 2 — Səhv sorğu (`NaN` və ya `bool`):**
+      - Giriş: `{"request_id": "req-102", "features": [10.0, true, 5.0]}`
+      - Doğrulama: `true` həqiqi ölçü ədədi deyil (`bool`). Modelə çatmadan `ValueError` / `HTTP 422` ilə rədd edilir!
+  - id: code-fastapi-pattern
+    kind: code
+    title: "Kod: Lifespan, Doğrulama və FastAPI Endpoint Şablonu"
+    body: |
+      ```python
+      import math
+      from typing import Any
+
+      MODEL_VERSION = "credit-risk-v1.2"
+
+
+      def validate_prediction_request(payload: dict[str, Any]) -> dict[str, Any]:
+          """Giriş sorğusunu modelə ötürməzdən əvvəl sərt müqavilə ilə doğrulayır."""
+          if not isinstance(payload, dict):
+              raise ValueError("Payload must be a JSON object")
+
+          req_id = payload.get("request_id")
+          if not isinstance(req_id, str) or not req_id.strip():
+              raise ValueError("request_id must be a non-empty string")
+
+          features = payload.get("features")
+          if not isinstance(features, list) or len(features) == 0:
+              raise ValueError("features must be a non-empty list of numbers")
+
+          clean_features: list[float] = []
+          for idx, val in enumerate(features):
+              if isinstance(val, bool) or not isinstance(val, (int, float)):
+                  raise ValueError(f"Feature at index {idx} is not a number: {val!r}")
+              fval = float(val)
+              if math.isnan(fval) or math.isinf(fval):
+                  raise ValueError(f"Feature at index {idx} must be finite")
+              clean_features.append(fval)
+
+          return {"request_id": req_id.strip(), "features": clean_features}
+
+
+      def format_prediction_response(
+          request_id: str,
+          score: float,
+          threshold: float = 0.5,
+          model_version: str = MODEL_VERSION,
+      ) -> dict[str, Any]:
+          """Standart versiyalı proqnoz cavabını hazırlayır."""
+          if not (0.0 <= threshold <= 1.0):
+              raise ValueError("threshold must be between 0 and 1")
+          return {
+              "request_id": request_id,
+              "prediction": 1 if score >= threshold else 0,
+              "score": round(float(score), 4),
+              "model_version": model_version,
+          }
+      ```
+
+      FastAPI tətbiqində bu funksiyalar `lifespan` ilə belə birləşir:
+      ```python
+      from contextlib import asynccontextmanager
+      from fastapi import FastAPI, HTTPException
+
+      @asynccontextmanager
+      async def lifespan(app: FastAPI):
+          app.state.model = load_heavy_model()   # <-- YALNIZ BİR DƏFƏ!
+          yield
+          app.state.model = None
+
+      app = FastAPI(lifespan=lifespan)
+
+      @app.get("/health")
+      def health():
+          return {"status": "ok"}
+
+      @app.get("/ready")
+      def ready():
+          if getattr(app.state, "model", None) is None:
+              raise HTTPException(status_code=503, detail="Model not ready")
+          return {"status": "ready", "model_version": MODEL_VERSION}
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Endpoint-in içində model və ya tokenizer yükləmək**
+      Hər HTTP sorğusunda diskdən çəki faylı oxumaq xidməti yük altında dərhal çökdürür. Model, tokenizer və konfiqurasiya həmişə `lifespan` zamanı yüklənməlidir.
+
+      **2. `NaN` və `Infinity` dəyərlərini buraxmaq**
+      Standart float yoxlaması `float("nan")` və `float("inf")` dəyərlərini `float` kimi qəbul edir, lakin bu dəyərlər modelin içində `NaN` proqnoz yaradır və JSON serializasiyasını pozur. Həmişə `math.isfinite()` (və ya `not math.isnan(x) and not math.isinf(x)`) yoxla.
+
+      **3. `async def` endpoint içində ağır bloklayıcı CPU kodu işlətmək**
+      FastAPI-də `async def predict()` yazıb içəridə 200 ms çəkən sinxron CPU hesablaması (`model.predict`) aparsan, bütün event loop bloklanır və digər sorğular (hətta `/health`) növbədə donur. Sinxron CPU-bound model çağırışları üçün adi `def predict()` istifadə et ki, FastAPI onu avtomatik threadpool-da işlətsin.
+
+      **4. Cavabda `model_version` qaytarmamaq**
+      Yeni model deploy edildikdən sonra xəta baş verdikdə, loglarda və müştəri cavabında `model_version` yoxdursa, hansı modelin xəta verdiyini sübut etmək mümkün olmur.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri və məhdudiyyətlər"
+    body: |
+      - **Real-time HTTP Inference vs Batch / Queue Inference:** Əgər istifadəçi cavabı ekranda gözləyirsə (< 500 ms), sinxron FastAPI endpoint uyğundur. Amma 10 dəqiqəlik video transkripsiyası və ya 100,000 sətirlik hesabat üçün HTTP sorğusunu açıq saxlamaq timeout verəcək — belə işlər növbəyə (`202 Accepted` + job ID + background worker) atılmalıdır.
+      - **Tək sorğu vs Dynamic Batching:** GPU üzərində dərin neyron şəbəkələr tək-tək sorğularda GPU-nu tam yükləmir. Yüksək trafikdə sorğuları 5–20 ms ərzində qruplaşdırıb (dynamic batching — məs. Triton, vLLM) birlikdə emal etmək keçiriciliyi (throughput) dəfələrlə artırır.
+      - **Modelin konteyner içində paketlənməsi vs Xarici Storage-dan yüklənməsi:** Kiçik modellər (< 100 MB) birbaşa imicə daxil edilə bilər; giqabaytlıq modellər isə startup/init zamanı obyekt yaddaşından (S3/GCS) çəkilir.
+mastery_criteria:
+  - "Modeli hər sorğuda deyil, startup/lifespan zamanı yükləməyin səbəbini və /health ilə /ready fərqini izah edə bilirsən"
+  - "NaN, Inf, bool və boş siyahıları rədd edən giriş doğrulama funksiyasını və versiyalı çıxış formatlayıcısını yaza bilirsən"
+  - "FastAPI endpoint-də sinxron CPU-bound model çağırışı üçün niyə bloklayan async def əvəzinə def və ya threadpool lazım olduğunu bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-prodfast-load-once
+      type: mcq
+      title: "Modelin yaddaşa yüklənmə yeri"
+      prompt: "300 MB-lıq ML modelini FastAPI xidmətində harada yükləmək düzgün mühəndislik praktikasıdır?"
+      skills: [prod-model-serving]
+      category: production
+      options:
+        - id: a
+          text: "POST /predict funksiyasının ilk sətrində, hər sorğu gələndə yenidən diskdən oxumaqla"
+          feedback: "Xeyr — hər sorğuda 300 MB disk I/O etmək gecikməni saniyələrə qaldırır və yaddaşı doldurur."
+        - id: b
+          text: "Tətbiqin startup / lifespan mərhələsində bir dəfə yaddaşa yükləyib bütün sorğularda həmin hazır obyektdən istifadə etməklə"
+          feedback: "Doğrudur. Startup zamanı bir dəfə yükləmə sorğu gecikməsini millisaniyələr səviyyəsində saxlayır."
+        - id: c
+          text: "Müştərinin brauzerindən hər sorğuda model faylını upload etməsini istəməklə"
+          feedback: "Müştəri yalnız giriş əlamətlərini (features) göndərir, model serverdə saxlanılır."
+      answer: b
+      explanation: "Ağır model artefaktları startup (lifespan) zamanı bir dəfə yüklənməli və sorğular arasında read-only olaraq paylaşılmalıdır."
+    - id: q-prodfast-health-vs-ready
+      type: mcq
+      title: "/health və /ready fərqi"
+      prompt: "Yeni qaldırılmış konteynerdə FastAPI prosesi artıq işə düşüb, lakin 2 GB-lıq model hələ S3-dən RAM-a yüklənir. Bu anda `/health` (liveness) və `/ready` (readiness) hansı HTTP statuslarını qaytarmalıdır?"
+      skills: [prod-model-serving]
+      category: production
+      options:
+        - id: a
+          text: "/health -> 200 OK, /ready -> 503 Service Unavailable"
+          feedback: "Doğrudur. Proses sağdır (restart lazım deyil), amma model hələ yüklənmədiyi üçün trafik qəbul etməyə hazır deyil."
+        - id: b
+          text: "/health -> 500 Error, /ready -> 200 OK"
+          feedback: "Əksinə! /health 500 qaytarsa orkestrator konteyneri öldürüb yenidən başladacaq və model heç vaxt yüklənib bitməyəcək."
+        - id: c
+          text: "Hər ikisi 200 OK qaytarmalıdır"
+          feedback: "/ready 200 qaytarsa, load balancer hələ modeli olmayan konteynerə real müştəri sorğuları göndərəcək və sorğular xəta verəcək."
+      answer: a
+      explanation: "Liveness (/health) prosesin sağ olduğunu bildirir ki, konteyner öldürülməsin; Readiness (/ready) isə model tam hazır olana qədər 503 qaytararaq trafiki qoruyur."
+    - id: q-prodfast-response-fields
+      type: multi
+      title: "Production proqnoz cavabının müqaviləsi"
+      prompt: "Production-da işləyən `/predict` endpoint-inin cavabında proqnoz (`prediction`) ilə yanaşı hansı sahələrin qaytarılması izlənilə bilənlik (traceability) və debugging üçün vacibdir? Doğru olanları seç."
+      skills: [prod-model-serving]
+      category: production
+      options:
+        - id: a
+          text: "request_id — müştəri sorğusunu server logları ilə əlaqələndirmək üçün"
+          feedback: "Bəli — xəta və ya şikayət zamanı konkret sorğunu tapmaq üçün əvəzsizdir."
+        - id: b
+          text: "model_version — qərarı hansı model versiyasının verdiyini dəqiq bilmək üçün"
+          feedback: "Bəli — model yenilənmələrindən sonra reqressiyanı aşkar etmək üçün şərtdir."
+        - id: c
+          text: "score / probability — qərar həddindən (threshold) əvvəlki xam əminlik balı"
+          feedback: "Bəli — paylanma sürüşməsini (drift) və sərhəddəki qərarları təhlil etməyə kömək edir."
+        - id: d
+          text: "Serverin gizli database parolu və API açarları"
+          feedback: "Xeyr — gizli açarlar heç vaxt API cavabında və ya loglarda qaytarılmamalıdır!"
+      answers: [a, b, c]
+      explanation: "`request_id`, `model_version` və `score` production-da hər bir proqnozun audit və debug edilməsini təmin edir."
+exercises:
+  - id: ex-prodfast-validate-predict
+    type: code
+    title: "validate_prediction_request və format_prediction_response yaz"
+    prompt: |
+      Model serving endpoint-i üçün giriş doğrulayıcı və çıxış formatlayıcı iki funksiya yaz:
+
+      1. `validate_prediction_request(payload: dict) -> dict`
+         - `payload` bir `dict` olmalıdır.
+         - `"request_id"` boş olmayan `str` olmalıdır (`.strip()` edildikdən sonra ən azı 1 simvol).
+         - `"features"` boş olmayan `list` olmalıdır. Siyahıdakı hər bir element sonlu (`finite`) ədəd (`int` və ya `float`, lakin **`bool` deyil** və `NaN` / `inf` deyil) olmalıdır.
+         - Hər hansı şərt pozularsa `ValueError` qaldır.
+         - Doğrudursa `{"request_id": req_id.strip(), "features": [float(x) for x in features]}` qaytar.
+
+      2. `format_prediction_response(request_id: str, score: float, threshold: float, model_version: str) -> dict`
+         - `threshold` `0.0 <= threshold <= 1.0` aralığında deyilsə `ValueError` qaldır.
+         - Bu lüğəti qaytar:
+           `{"request_id": request_id, "prediction": 1 if score >= threshold else 0, "score": round(float(score), 4), "model_version": model_version}`
+    skills: [prod-model-serving, py-errors]
+    category: python
+    difficulty: 2
+    hints:
+      - "`isinstance(val, bool) or not isinstance(val, (int, float))` ilə həm qeyri-ədədləri, həm də `True`/`False`-u rədd et."
+      - "`math.isnan(fval) or math.isinf(fval)` yoxlaması ilə `NaN` və sonsuzluqları tut."
+      - "`round(float(score), 4)` ilə balı 4 onluq rəqəmə yuvarlaqlaşdır."
+    starter_code: |
+      import math
+      from typing import Any
+
+      def validate_prediction_request(payload: dict[str, Any]) -> dict[str, Any]:
+          # TODO: request_id və features siyahısını doğrula
+          pass
+
+
+      def format_prediction_response(
+          request_id: str,
+          score: float,
+          threshold: float,
+          model_version: str,
+      ) -> dict[str, Any]:
+          # TODO: versiyalı proqnoz cavabını formatla
+          pass
+    tests:
+      - name: "Düzgün sorğu doğrulanır və cavab formatlanır"
+        code: |
+          clean = validate_prediction_request({"request_id": " req-42 ", "features": [1, 2.5, -0.3]})
+          assert clean == {"request_id": "req-42", "features": [1.0, 2.5, -0.3]}
+
+          resp = format_prediction_response("req-42", score=0.785432, threshold=0.7, model_version="v1.0")
+          assert resp == {
+              "request_id": "req-42",
+              "prediction": 1,
+              "score": 0.7854,
+              "model_version": "v1.0",
+          }
+      - name: "NaN, Inf, bool və boş features rədd edilir"
+        code: |
+          for bad in [
+              {"request_id": "", "features": [1.0]},
+              {"request_id": "r1", "features": []},
+              {"request_id": "r1", "features": [1.0, True]},
+              {"request_id": "r1", "features": [float("nan")]},
+              {"request_id": "r1", "features": [float("inf")]},
+              {"request_id": "r1", "features": ["1.0"]},
+          ]:
+              try:
+                  validate_prediction_request(bad)
+                  assert False, f"Rədd edilməli idi: {bad}"
+              except ValueError:
+                  pass
+      - name: "Yanlış threshold rədd edilir"
+        code: |
+          for bad_t in [-0.1, 1.2]:
+              try:
+                  format_prediction_response("r1", 0.5, bad_t, "v1")
+                  assert False, "Yanlış threshold üçün ValueError qaldırılmalı idi"
+              except ValueError:
+                  pass
+    solution: |
+      import math
+      from typing import Any
+
+      def validate_prediction_request(payload: dict[str, Any]) -> dict[str, Any]:
+          if not isinstance(payload, dict):
+              raise ValueError("payload must be a dict")
+          req_id = payload.get("request_id")
+          if not isinstance(req_id, str) or not req_id.strip():
+              raise ValueError("request_id must be a non-empty string")
+          features = payload.get("features")
+          if not isinstance(features, list) or len(features) == 0:
+              raise ValueError("features must be a non-empty list")
+
+          clean_features: list[float] = []
+          for x in features:
+              if isinstance(x, bool) or not isinstance(x, (int, float)):
+                  raise ValueError("each feature must be a number")
+              fx = float(x)
+              if math.isnan(fx) or math.isinf(fx):
+                  raise ValueError("features must be finite")
+              clean_features.append(fx)
+
+          return {"request_id": req_id.strip(), "features": clean_features}
+
+
+      def format_prediction_response(
+          request_id: str,
+          score: float,
+          threshold: float,
+          model_version: str,
+      ) -> dict[str, Any]:
+          if not (0.0 <= threshold <= 1.0):
+              raise ValueError("threshold must be in [0, 1]")
+          return {
+              "request_id": request_id,
+              "prediction": 1 if score >= threshold else 0,
+              "score": round(float(score), 4),
+              "model_version": model_version,
+          }
+    explanation: |
+      Giriş funksiyası modelə çatmazdan əvvəl bütün təhlükəli halları (`bool`, `NaN`, `Inf`, boş siyahı) tutur. Çıxış funksiyası isə proqnozu `request_id` və `model_version` ilə standart müqaviləyə salır.
+  - id: ex-prodfast-model-lifecycle
+    type: mcq
+    title: "Debug: Yük altında kəskin artan latency"
+    prompt: |
+      Komanda yoldaşın FastAPI endpoint-ini belə yazıb:
+
+      ```python
+      @app.post("/predict")
+      def predict(req: PredictRequest):
+          model = joblib.load("artifacts/random_forest_400mb.joblib")
+          pred = model.predict([req.features])[0]
+          return {"prediction": int(pred)}
+      ```
+
+      Lokal testdə tək sorğu 1.2 saniyəyə cavab verir, amma 20 paralel istifadəçi sorğu göndərəndə server `OutOfMemory` ilə çökür. Əsas səbəb və düzgün həll nədir?
+    skills: [prod-model-serving]
+    category: debug
+    difficulty: 1
+    hints:
+      - "`@app.post(\"/predict\")` funksiyasının içindəki hər sətir HƏR HTTP sorğusunda yenidən icra olunur."
+      - "400 MB-lıq faylı hər sorğuda diskdən oxumaq əvəzinə onu tətbiq işə düşəndə (`lifespan` / startup) yalnız bir dəfə yaddaşa yükləmək lazımdır."
+    options:
+      - id: a
+        text: "Model hər sorğuda diskdən yenidən yüklənir (20 * 400 MB = 8 GB RAM); `joblib.load` tətbiqin startup/lifespan mərhələsinə köçürülməlidir"
+        feedback: "Doğrudur. Lifespan-da bir dəfə yükləndikdə RAM sərfi 400 MB qalır və sorğu gecikməsi bir neçə millisaniyəyə düşür."
+      - id: b
+        text: "Python list əvəzinə tuple istifadə edilməlidir"
+        feedback: "Problem `[req.features]` siyahısında deyil, 400 MB-lıq modelin hər sorğuda diskdən oxunmasındadır."
+      - id: c
+        text: "POST əvəzinə GET metodu işlədilməlidir"
+        feedback: "HTTP metodunu dəyişmək modelin hər sorğuda diskdən yüklənməsini dayandırmır."
+    answer: a
+    explanation: "Endpoint içində `joblib.load` çağırmaq həm diski, həm də yaddaşı hər sorğuda yükləyir. Model lifespan kontekstində yalnız bir dəfə yüklənməlidir."
+references:
+  - title: "FastAPI — Lifespan Events"
+    url: https://fastapi.tiangolo.com/advanced/events/
+    note: "ML modellərini startup zamanı yükləmək üçün rəsmi FastAPI nümunəsi"
+  - title: "FastAPI — Testing with TestClient"
+    url: https://fastapi.tiangolo.com/tutorial/testing/
+    note: "Endpoint-ləri avtomatik testlərlə yoxlamaq qaydası"

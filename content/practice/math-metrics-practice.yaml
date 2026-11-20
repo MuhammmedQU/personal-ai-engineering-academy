@@ -1,0 +1,300 @@
+topic: math-and-ml-metrics-lab
+title: "Math, Statistics & ML Metrics Practice Lab"
+exercises:
+  - id: prac-math-linear-layer-shape
+    title: "Matris Vurması və Linear Layer Çıxış Elementlərinin Sayı"
+    type: numeric
+    category: math
+    difficulty: 1
+    skills:
+      - matrices-shapes
+      - dl-forward-pass
+    prompt: |
+      Bir mini-batch giriş matrisi $X$-in ölçüsü `(16, 64)`-dür (16 nümunə, hər birində 64 feature).
+      Bu giriş ardıcıl olaraq iki xətti qatdan keçir:
+      - Birinci qatın çəki matrisi $W_1$: `(64, 32)`
+      - İkinci qatın çəki matrisi $W_2$: `(32, 5)`
+
+      Yekun çıxış matrisi $Y = (X W_1) W_2$-nin içində cəmi neçə skalyar ədəd (element) var? (`satır_sayı * sütun_sayı`)
+    answer: 80
+    tolerance: 0
+    unit: "element"
+    hints:
+      - "$(16, 64) \\times (64, 32)$ vurmasının nəticəsi $(16, 32)$ ölçülü matrisdir."
+      - "$(16, 32) \\times (32, 5)$ vurmasının nəticəsi isə $(16, 5)$ ölçülü matrisdir."
+    explanation: "$Y$ matrisinin ölçüsü `(16, 5)` olduğu üçün ümumi elementlərin sayı $16 \\times 5 = 80$ olur."
+
+  - id: prac-math-cosine-top-match
+    title: "Pure Python ilə Ən Yaxın Embedding Vektorunun Tapılması"
+    type: code
+    category: math
+    difficulty: 2
+    skills:
+      - vectors-dot-product
+      - llm-embeddings
+      - py-errors
+    prompt: |
+      Sorğu vektoru `query` ilə sənəd vektorları siyahısı `docs` arasında **cosine similarity** hesablayıb ən yüksək oxşarlığa malik sənədin indeksini və skorunu `(best_index, round(best_score, 4))` kimi qaytaran `most_similar_vector(query: list[float], docs: list[list[float]]) -> tuple[int, float]` funksiyasını yazın.
+
+      **Tələblər:**
+      - Əgər `docs` boşdursa, və ya hər hansı vektorun uzunluğu `query` ilə eyni deyilsə, və ya `query` / sənəd vektorunun L2 norması `0`-a bərabərdirsə, `ValueError` qaldırın.
+    starter_code: |
+      import math
+
+      def most_similar_vector(
+          query: list[float], docs: list[list[float]]
+      ) -> tuple[int, float]:
+          # TODO: cosine similarity ilə ən yaxın sənədin (index, score) cütünü qaytarın
+          return (0, 0.0)
+    tests:
+      - name: "Ən yüksək istiqamət oxşarlığı olan vektoru seçir (miqyasdan asılı olmayaraq)"
+        code: |
+          q = [1.0, 1.0]
+          candidates = [
+              [1.0, 0.0],
+              [5.0, 5.0],
+              [-1.0, -1.0],
+          ]
+          idx, score = most_similar_vector(q, candidates)
+          assert idx == 1
+          assert score == 1.0
+      - name: "Ölçü uyğunsuzluğu və ya sıfır vektoru olduqda ValueError qaldırır"
+        code: |
+          for bad_docs in [[[0.0, 0.0]], [[1.0, 2.0, 3.0]], []]:
+              raised = False
+              try:
+                  most_similar_vector([1.0, 2.0], bad_docs)
+              except ValueError:
+                  raised = True
+              assert raised is True
+      - name: "Ortoqonal (0.0) və əks (-1.0) vektorları düzgün fərqləndirir"
+        code: |
+          idx, score = most_similar_vector([1.0, 0.0], [[-3.0, 0.0], [0.0, 5.0]])
+          assert idx == 1 and score == 0.0
+    solution: |
+      import math
+
+      def most_similar_vector(
+          query: list[float], docs: list[list[float]]
+      ) -> tuple[int, float]:
+          if not query or not docs:
+              raise ValueError("query and docs must be non-empty")
+          q_norm = math.sqrt(sum(x * x for x in query))
+          if q_norm == 0:
+              raise ValueError("query vector cannot have zero norm")
+          best_idx = -1
+          best_score = -2.0
+          for idx, doc in enumerate(docs):
+              if len(doc) != len(query):
+                  raise ValueError("dimension mismatch")
+              d_norm = math.sqrt(sum(y * y for y in doc))
+              if d_norm == 0:
+                  raise ValueError("document vector cannot have zero norm")
+              dot = sum(x * y for x, y in zip(query, doc))
+              cos = dot / (q_norm * d_norm)
+              if cos > best_score:
+                  best_score = cos
+                  best_idx = idx
+          return (best_idx, round(best_score, 4))
+    hints:
+      - "Cosine similarity düsturu: `dot(a, b) / (norm(a) * norm(b))`."
+      - "L2 norma `math.sqrt(sum(x * x for x in vec))` ilə hesablanır; sıfır olub-olmadığını bölmədən əvvəl yoxlayın."
+    explanation: "`[5.0, 5.0]` vektoru `[1.0, 1.0]` sorğusu ilə eyni istiqamətdə olduğu üçün onların cosine similarity dəyəri dəqiq `1.0` olur."
+
+  - id: prac-ml-specificity-numeric
+    title: "Confusion Matrix-dən Specificity və False Positive Rate Hesabı"
+    type: numeric
+    category: ml-metric
+    difficulty: 1
+    skills:
+      - ml-classification-metrics
+    prompt: |
+      200 nümunəlik validation dəstində saxtakarlıq (fraud) detektorunun nəticələri belədir:
+      - `TP = 45`
+      - `FP = 15`
+      - `FN = 5`
+      - `TN = 135`
+
+      Modelin **Specificity** (True Negative Rate = $\frac{TN}{TN + FP}$) göstəricisini onluq kəsrlə tapın.
+    answer: 0.9
+    tolerance: 0.001
+    hints:
+      - "Həqiqi neqativlərin ümumi sayı `TN + FP = 135 + 15 = 150`-dir."
+      - "`Specificity = TN / (TN + FP) = 135 / 150`."
+    explanation: "150 həqiqi neqativ əməliyyatın 135-i düzgün olaraq neqativ təsnif edildiyi üçün Specificity $135 / 150 = 0.90$ (90%) bərabərdir."
+
+  - id: prac-ml-confusion-metrics-code
+    title: "Threshold Əsaslı Precision, Recall və F1 Hesablayıcısı"
+    type: code
+    category: ml-metric
+    difficulty: 2
+    skills:
+      - ml-classification-metrics
+      - py-functions
+    prompt: |
+      Həqiqi etiketlər `y_true` (`0` və ya `1`), model ehtimalları `y_probs` (`0.0..1.0`) və qərar həddi `threshold` qəbul edən `evaluate_threshold(y_true: list[int], y_probs: list[float], threshold: float = 0.5) -> dict` funksiyasını yazın.
+
+      **Qaydalar:**
+      - `prob >= threshold` olduqda proqnoz `1`, əks halda `0` götürülür.
+      - Uzunluqlar fərqlidirsə və ya siyahılar boşdursa `ValueError` qaldırın.
+      - Məxrəc `0` olduqda (`tp + fp == 0` və s.) uyğun metriki `0.0` qaytarın.
+      - Nəticədə `{"tp": int, "fp": int, "tn": int, "fn": int, "precision": float, "recall": float, "f1": float}` qaytarın (float-ları `round(..., 4)` ilə yuvarlaqlaşdırın).
+    starter_code: |
+      def evaluate_threshold(
+          y_true: list[int], y_probs: list[float], threshold: float = 0.5
+      ) -> dict:
+          # TODO: TP, FP, TN, FN, precision, recall və f1 hesablayın
+          return {}
+    tests:
+      - name: "Threshold dəyişdikdə precision və recall düzgün yenilənir"
+        code: |
+          yt = [1, 1, 0, 0]
+          yp = [0.9, 0.4, 0.6, 0.1]
+          res_05 = evaluate_threshold(yt, yp, threshold=0.5)
+          assert res_05 == {
+              "tp": 1, "fp": 1, "tn": 1, "fn": 1,
+              "precision": 0.5, "recall": 0.5, "f1": 0.5,
+          }
+          res_03 = evaluate_threshold(yt, yp, threshold=0.3)
+          assert res_03["tp"] == 2 and res_03["recall"] == 1.0
+      - name: "Yüksək threshold-da heç bir pozitiv proqnoz olmayanda ZeroDivisionError vermir"
+        code: |
+          res = evaluate_threshold([1, 0], [0.4, 0.1], threshold=0.95)
+          assert res["tp"] == 0 and res["fp"] == 0
+          assert res["precision"] == 0.0 and res["recall"] == 0.0 and res["f1"] == 0.0
+      - name: "Boş və ya uzunluğu fərqli siyahılarda ValueError qaldırır"
+        code: |
+          for bad in [([], []), ([1, 0], [0.5])]:
+              try:
+                  evaluate_threshold(bad[0], bad[1])
+                  assert False, "ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def evaluate_threshold(
+          y_true: list[int], y_probs: list[float], threshold: float = 0.5
+      ) -> dict:
+          if not y_true or len(y_true) != len(y_probs):
+              raise ValueError("y_true and y_probs must be non-empty and equal length")
+          tp = fp = tn = fn = 0
+          for actual, prob in zip(y_true, y_probs):
+              pred = 1 if prob >= threshold else 0
+              if actual == 1 and pred == 1:
+                  tp += 1
+              elif actual == 0 and pred == 1:
+                  fp += 1
+              elif actual == 0 and pred == 0:
+                  tn += 1
+              else:
+                  fn += 1
+          precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+          recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+          f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+          return {
+              "tp": tp,
+              "fp": fp,
+              "tn": tn,
+              "fn": fn,
+              "precision": round(precision, 4),
+              "recall": round(recall, 4),
+              "f1": round(f1, 4),
+          }
+    hints:
+      - "`pred = 1 if prob >= threshold else 0` ilə hər nümunənin proqnozunu tapıb `tp, fp, tn, fn` sayğaclarını artırın."
+      - "Həm `precision`, həm `recall`, həm də `f1` hesabında məxrəcin `> 0` olduğunu yoxlayın."
+    explanation: "Threshold-u aşağı saldıqda (`0.3`) daha çox nümunə pozitiv sayıldığı üçün Recall artır, lakin FP də artdığı üçün Precision azalır."
+
+  - id: prac-math-bayes-base-rate
+    title: "Bayes Qaydası və Nadir Hadisələrdə Base Rate Effekti"
+    type: numeric
+    category: math
+    difficulty: 2
+    skills:
+      - probability-bayes
+      - ml-classification-metrics
+    prompt: |
+      Bank əməliyyatlarının yalnız **1%-i** həqiqətən saxtadır ($P(\text{Fraud}) = 0.01$).
+      Yeni ML modelinin göstəriciləri belədir:
+      - Həqiqi saxta əməliyyatları tutma ehtimalı (Sensitivity / Recall): $P(\text{Alert} \mid \text{Fraud}) = 0.90$
+      - Normal əməliyyatda yanlış həyəcan vermə ehtimalı (False Positive Rate): $P(\text{Alert} \mid \text{Normal}) = 0.09$
+
+      Model bir əməliyyat üçün **Alert** verdikdə, həmin əməliyyatın həqiqətən saxta olma ehtimalı $P(\text{Fraud} \mid \text{Alert})$ neçə faizdir? (Cavabı `0..100` arasında faiz ədədi kimi yazın, məsələn `25.5`).
+    answer: 9.17
+    tolerance: 0.15
+    unit: "%"
+    hints:
+      - "10,000 əməliyyat təsəvvür edin: 100-ü Fraud, 9,900-ü Normaldır."
+      - "100 Fraud-dan $100 \\times 0.90 = 90$ Alert (`TP`), 9,900 Normal-dan isə $9900 \\times 0.09 = 891$ Alert (`FP`) gəlir."
+      - "Cəmi Alert sayı $90 + 891 = 981$-dir. İndi $90 / 981 \\times 100$ hesablayın."
+    explanation: "10,000 əməliyyatda 90 həqiqi müsbət (`TP`) və 891 yanlış müsbət (`FP`) yaranır. $P(\\text{Fraud} \\mid \\text{Alert}) = \\frac{90}{90 + 891} \\approx 0.09174$, yəni təxminən **9.17%**."
+
+  - id: prac-data-outlier-skew-analyzer
+    title: "Kiçik Datasetdə Skew və Outlier Analizi (Winsorized Summary)"
+    type: code
+    category: data
+    difficulty: 2
+    skills:
+      - statistics-basics
+      - ml-problem-framing
+      - py-functions
+    prompt: |
+      API cavab müddətləri və ya gəlir datası kimi sağa meyilli (right-skewed) siyahılarda tək bir ekstremal outlier ortalamanı (`mean`) kəskin təhrif edir.
+
+      `analyze_distribution(values: list[float], upper_cap: float) -> dict` funksiyasını yazın:
+      1. `values` boşdursa `ValueError` qaldırın.
+      2. Sıralanmış siyahı üzərində adi ortalamanı (`raw_mean`) və **medianı** (`median`: tək sayda element varsa ortadakı, cüt saydadırsa ortadakı ikisinin ortalaması) hesablayın.
+      3. `upper_cap`-dən böyük olan elementlərin sayını (`outlier_count`) tapın və həmin elementləri `upper_cap` ilə əvəzləyərək kəsilmiş ortalamanı (`clipped_mean`) hesablayın.
+      4. `{"raw_mean": float, "median": float, "clipped_mean": float, "outlier_count": int}` qaytarın (bütün float dəyərləri `round(..., 2)` ilə yuvarlaqlaşdırın).
+    starter_code: |
+      def analyze_distribution(values: list[float], upper_cap: float) -> dict:
+          # TODO: raw_mean, median, clipped_mean və outlier_count hesablayın
+          return {}
+    tests:
+      - name: "Ekstremal outlier olduqda median və clipped_mean sabit qalır"
+        code: |
+          data = [10.0, 12.0, 14.0, 16.0, 1000.0]
+          res = analyze_distribution(data, upper_cap=50.0)
+          assert res == {
+              "raw_mean": 210.4,
+              "median": 14.0,
+              "clipped_mean": 20.4,
+              "outlier_count": 1,
+          }
+      - name: "Cüt sayda element üçün median ortadakı iki ədədin ortalamasıdır"
+        code: |
+          res = analyze_distribution([10.0, 20.0, 30.0, 40.0], upper_cap=100.0)
+          assert res["median"] == 25.0
+          assert res["outlier_count"] == 0
+      - name: "Boş siyahı verildikdə ValueError qaldırır"
+        code: |
+          raised = False
+          try:
+              analyze_distribution([], upper_cap=10.0)
+          except ValueError:
+              raised = True
+          assert raised is True
+    solution: |
+      def analyze_distribution(values: list[float], upper_cap: float) -> dict:
+          if not values:
+              raise ValueError("values cannot be empty")
+          s = sorted(float(x) for x in values)
+          n = len(s)
+          mid = n // 2
+          if n % 2 == 1:
+              median = s[mid]
+          else:
+              median = (s[mid - 1] + s[mid]) / 2.0
+          raw_mean = sum(s) / n
+          outlier_count = sum(1 for x in s if x > upper_cap)
+          clipped = [min(x, float(upper_cap)) for x in s]
+          clipped_mean = sum(clipped) / n
+          return {
+              "raw_mean": round(raw_mean, 2),
+              "median": round(median, 2),
+              "clipped_mean": round(clipped_mean, 2),
+              "outlier_count": outlier_count,
+          }
+    hints:
+      - "Median üçün əvvəlcə `s = sorted(values)` yaradın; `n % 2 == 1` olduqda `s[n // 2]`, əks halda `(s[n // 2 - 1] + s[n // 2]) / 2` götürün."
+      - "Clipping üçün `[min(x, upper_cap) for x in s]` siyahısının ortalamasını tapın."
+    explanation: "`[10, 12, 14, 16, 1000]` siyahısında tək bir `1000` dəyəri ortalamanı `210.4`-ə qaldırır, halbuki median (`14.0`) və kəsilmiş ortalama (`20.4`) paylanmanın mərkəzini daha doğru əks etdirir."

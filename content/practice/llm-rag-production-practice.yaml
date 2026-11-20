@@ -1,0 +1,206 @@
+topic: llm-rag-production-lab
+title: "LLM, RAG & Production AI Practice Lab"
+exercises:
+  - id: prac-llm-rag-triage-mcq
+    title: "RAG Diaqnostikası: Retrieval yoxsa Generation Problemi?"
+    type: mcq
+    category: llm-architecture
+    difficulty: 2
+    skills:
+      - llm-rag
+      - llm-evaluation
+    prompt: |
+      25 suallıq RAG benchmark-ını işə saldıqdan sonra aşağıdakı metrik cədvəlini görürsünüz:
+      - `Recall@5 = 0.92` (25 sualın 23-də düzgün sənəd parçası `top-5` daxilində tapılıb)
+      - `Citation Faithfulness = 0.48` (model tez-tez kontekstdə olmayan rəqəm və şərtləri əlavə edir)
+      - `Abstention Accuracy = 0.20` (cavabı sənəddə olmayan 5 sualın 4-də model özündən cavab uydurub)
+
+      Bu diaqnostikaya əsasən **ilk və ən yüksək təsirli** mühəndislik addımı hansı olmalıdır?
+    options:
+      - id: a
+        text: "Embedding modelini daha böyük ölçülü (3072-dim) modellə əvəz etmək və vector indeksini yenidən qurmaq."
+        feedback: "`Recall@5` artıq 0.92-dir; problem düzgün chunk-ın tapılmamasında deyil, modelin tapılan kontekstə sadiq qalmamasındadır."
+      - id: b
+        text: "Generator promptuna sərt groundedness qaydası, məcburi `[source: chunk_id]` sitat sxemi, `abstained` bayrağı və post-generation sitat doğrulayıcısı (verifier) əlavə etmək."
+        feedback: "Tamamilə doğrudur! Yüksək `Recall@5` və aşağı `Faithfulness / Abstention` açıq şəkildə generation və grounding qatının zəif olduğunu göstərir."
+      - id: c
+        text: "`top-k` dəyərini 5-dən 40-a qaldırmaq ki, modelə daha çox mətn göndərilsin."
+        feedback: "`k=40` kontekstə çoxlu səs-küy əlavə edib həm xərci artıracaq, həm də modelin diqqətini yayındıraraq hallucination-u daha da pisləşdirəcək."
+      - id: d
+        text: "Bütün korpus üzərində sıfırdan LLM pretraining aparmaq."
+        feedback: "Bu həm həddən artıq bahalıdır, həm də abstention və sitat intizamı pretraining ilə deyil, grounded prompting və schema validation ilə həll olunur."
+    answer: b
+    hints:
+      - "`Recall@5 = 0.92` o deməkdir ki, retriever öz işini əla görür və düzgün məlumatı prompt-a gətirir."
+      - "Aşağı `Faithfulness` və aşağı `Abstention` birbaşa generator/prompt/validation qatının problemidir."
+    explanation: "Retrieval metriki yüksək (`0.92`), generation/faithfulness metriki aşağı (`0.48`) olduqda embedding-i dəyişmək vaxt itkisidir; diqqət grounded prompt spesifikasiyasına, structured citation yoxlamasına və abstention qaydasına yönəlməlidir."
+
+  - id: prac-llm-rag-hybrid-explain
+    title: "Arxitektura Müqayisəsi: Niyə Yalnız Dense Embedding Kifayət Etmir?"
+    type: explain
+    category: llm-architecture
+    difficulty: 2
+    skills:
+      - llm-rag
+      - llm-embeddings
+      - llm-evaluation
+    prompt: |
+      Hüquqi və texniki sənədlər üzərində qurulmuş RAG sistemində istifadəçilər həm `"Məzuniyyət pulu necə hesablanır?"` kimi ümumi məna sualları, həm də `"Maddə 14.2-B üzrə cərimə kodu AZ-908 nədir?"` kimi dəqiq identifikator sualları verirlər.
+
+      **İzah edin:**
+      1. Yalnız dense vector (embedding) axtarışı ikinci tip suallarda niyə tez-tez səhv chunk gətirir?
+      2. **Hybrid Retrieval** (Lexical/BM25 + Dense Vector) və **Chunk Metadata** (`doc_id`, `section`) bu problemi necə həll edir?
+    rubric:
+      - "Dense embedding modellərinin mətni ümumi semantik fəzaya sıxdığı üçün nadir kodları, maddə nömrələrini (`14.2-B`, `AZ-908`) və dəqiq abreviaturaları itirə bildiyini izah edir."
+      - "BM25 / lexical axtarışın dəqiq token/kəlmə üst-üstə düşməsini (exact term match) tapdığını, dense axtarışın isə sinonim və parafrazları tutduğunu qeyd edir."
+      - "Metadata saxlanmasının həm sitat dəqiqliyi (`[source: doc_id#section]`), həm də bölmə/sənəd üzrə pre-filtering üçün vacib olduğunu vurğulayır."
+    model_answer: |
+      1. Dense embedding modelləri cümlənin ümumi semantik mənasını sabit ölçülü vektora sıxır. Buna görə `"cərimə"` və `"sanksiya"` kimi sinonimləri yaxşı tapır, lakin `"AZ-908"` və ya `"Maddə 14.2-B"` kimi nadir identifikatorlarda ümumi mövzusu cərimə olan başqa maddələri daha yaxın hesab edə bilir.
+      2. Hybrid Retrieval həm BM25 (dəqiq açar söz və nadir identifikator uyğunluğu), həm də Dense Vector (semantik oxşarlıq) skorlarını birləşdirir (məsələn, Reciprocal Rank Fusion ilə). Chunk metadata-sı (`doc_id`, `section`) isə tapılan parçanın hansı maddəyə aid olduğunu itirməməyə, filtr tətbiq etməyə və dəqiq yoxlanıla bilən sitat qaytarmağa imkan verir.
+    hints:
+      - "Embedding-in sinonimlərdə güclü, nadir seriya/maddə nömrələrində isə zəif olduğunu düşünün."
+      - "BM25 ilə vector search-ün bir-birini necə tamamladığını yazın."
+    explanation: "İstehsalat RAG sistemlərində semantic + lexical hybrid axtarış həm parafraz sorğularını, həm də dəqiq kod/maddə sorğularını etibarlı şəkildə əhatə edir."
+
+  - id: prac-llm-tool-security-multi
+    title: "Tool-Using Agent Təhlükəsizliyi: Zəiflikləri və Qoruyucu Qatları Seç"
+    type: multi
+    category: llm-architecture
+    difficulty: 2
+    skills:
+      - llm-tool-calling
+      - llm-security
+    prompt: |
+      Müştəri e-poçtlarını oxuyub bazada əməliyyat aparan bir AI workflow dizayn edirsiniz. Aşağıdakı arxitektura qərarlarından hansılar **düzgün və təhlükəsiz mühəndislik praktikasıdır**? (Bütün düzgün variantları seçin.)
+    options:
+      - id: a
+        text: "Alətləri `read-only` və `write` olaraq ayırmaq; `write` (məsələn, `issue_refund`, `delete_user`) alətləri qarşısında məcburi insan təsdiqi (human approval gate) və məbləğ limiti qoymaq."
+        feedback: "Doğrudur. Yan təsirli əməliyyatlar heç vaxt təkbaşına model qərarı ilə birbaşa icra olunmamalıdır."
+      - id: b
+        text: "Çeviklik üçün modelə `run_raw_sql(query: str)` adlı tək universal alət vermək və sistem promptunda 'DELETE işlətmə' yazmaq."
+        feedback: "Yanlış və çox təhlükəlidir! Prompt təlimatı təhlükəsizlik sərhədi deyil; indirect prompt injection ilə baza silinə və ya sızdırıla bilər."
+      - id: c
+        text: "Hər alət çağırışının arqumentlərini icradan əvvəl ciddi Pydantic sxemi və allowlist ilə kod səviyyəsində yoxlamaq."
+        feedback: "Doğrudur. Kod səviyyəli schema və policy validasiyası deterministik qoruyucu qatdır."
+      - id: d
+        text: "Hər bir alət təklifini, arqumentləri, təsdiq edən operatoru və nəticəni dəyişməz audit jurnalına (`audit_log.jsonl`) yazmaq."
+        feedback: "Doğrudur. İzlənilə bilənlik (auditability) və insident təhlili üçün hər alət addımı qeydə alınmalıdır."
+    answers:
+      - a
+      - c
+      - d
+    hints:
+      - "Sistem promptunda 'bunu etmə' yazmaq təhlükəsizlik baryeri sayılmır."
+      - "Least privilege, deterministic schema validation, human-in-the-loop və audit logging əsas 4 sütundur."
+    explanation: "Təhlükəsiz tool-using sistemlər universal `run_raw_sql` əvəzinə dar icazəli alətlər, Pydantic validasiyası, write əməliyyatları üçün insan təsdiqi və tam audit logu üzərində qurulur."
+
+  - id: prac-llm-context-packer-code
+    title: "Token Büdcəsinə Uyğun Context Packing Funksiyası"
+    type: code
+    category: llm-architecture
+    difficulty: 2
+    skills:
+      - llm-tokens-context
+      - llm-rag
+      - py-functions
+    prompt: |
+      RAG sistemində retriever-dən qayıdan chunk-ları modelin kontekst büdcəsini (`max_tokens`) aşmadan prompt-a yerləşdirən `pack_context_chunks(chunks: list[dict], max_tokens: int) -> dict` funksiyasını yazın.
+
+      **Qaydalar:**
+      1. `max_tokens <= 0` olduqda `ValueError("max_tokens must be positive")` qaldırın.
+      2. `chunks` siyahısındakı hər element `{"id": str, "score": float, "tokens": int}` formatındadır.
+      3. Əvvəlcə chunk-ları `score` dəyərinə görə **azalan** sıra ilə düzün (bərabər skorlarda ilkin ardıcıllığı qoruyun).
+      4. Sıralanmış siyahı üzrə ardıcıl keçin: əgər `used_tokens + chunk["tokens"] <= max_tokens` şərti ödənirsə (və `chunk["tokens"] > 0`), həmin chunk-ı seçin; büdcəni aşan chunk-ı ötürüb növbəti daha kiçik chunk-ların yerləşib-yerləşmədiyini yoxlamağa davam edin.
+      5. `{"selected_ids": list[str], "used_tokens": int, "remaining_tokens": int}` qaytarın.
+    starter_code: |
+      def pack_context_chunks(chunks: list[dict], max_tokens: int) -> dict:
+          # TODO: score-a görə sıralayıb max_tokens büdcəsinə sığan chunk-ları seçin
+          return {"selected_ids": [], "used_tokens": 0, "remaining_tokens": max_tokens}
+    tests:
+      - name: "Skora görə sıralayır və büdcəni aşan böyük chunk-ı ötürüb növbəti uyğun chunk-ı seçir"
+        code: |
+          items = [
+              {"id": "c1", "score": 0.75, "tokens": 120},
+              {"id": "c2", "score": 0.95, "tokens": 200},
+              {"id": "c3", "score": 0.85, "tokens": 250},
+          ]
+          out = pack_context_chunks(items, max_tokens=350)
+          assert out == {
+              "selected_ids": ["c2", "c1"],
+              "used_tokens": 320,
+              "remaining_tokens": 30,
+          }
+      - name: "Mənfi və ya sıfır max_tokens üçün ValueError qaldırır"
+        code: |
+          raised = False
+          try:
+              pack_context_chunks([{"id": "c1", "score": 0.9, "tokens": 50}], max_tokens=0)
+          except ValueError:
+              raised = True
+          assert raised is True
+      - name: "Boş siyahı üçün sıfır istifadə və tam büdcə qaytarır"
+        code: |
+          assert pack_context_chunks([], max_tokens=500) == {
+              "selected_ids": [],
+              "used_tokens": 0,
+              "remaining_tokens": 500,
+          }
+    solution: |
+      def pack_context_chunks(chunks: list[dict], max_tokens: int) -> dict:
+          if max_tokens <= 0:
+              raise ValueError("max_tokens must be positive")
+          ordered = sorted(chunks, key=lambda c: c["score"], reverse=True)
+          selected_ids: list[str] = []
+          used_tokens = 0
+          for ch in ordered:
+              tok = int(ch.get("tokens", 0))
+              if tok <= 0:
+                  continue
+              if used_tokens + tok <= max_tokens:
+                  selected_ids.append(str(ch["id"]))
+                  used_tokens += tok
+          return {
+              "selected_ids": selected_ids,
+              "used_tokens": used_tokens,
+              "remaining_tokens": max_tokens - used_tokens,
+          }
+    hints:
+      - "`sorted(chunks, key=lambda c: c['score'], reverse=True)` Python-da sabit (stable) sıralama aparır."
+      - "Hər addımda `if used_tokens + tok <= max_tokens:` yoxlayın və uyğun gəldikdə `selected_ids`-ə əlavə edin."
+    explanation: "Token büdcəsini idarə etmək həm context window daşmasının qarşısını alır, həm də hər sorğunun maksimum xərc və latency həddini proqnozlaşdırılan edir."
+
+  - id: prac-prod-p95-canary-mcq
+    title: "Production Incident: Ortalama Latency Normaldır, Amma İstifadəçilər Şikayət Edir"
+    type: mcq
+    category: production
+    difficulty: 2
+    skills:
+      - prod-monitoring
+      - prod-model-serving
+      - prod-docker-config
+    prompt: |
+      Model Serving API-nin yeni versiyasını (`v2.1`) deploy etdikdən sonra dashboard-da aşağıdakı mənzərə yaranıb:
+      - Ortalama (`mean`) latency: `240 ms` (SLA həddi `< 500 ms` olduğu üçün yaşıl görünür)
+      - `p50` latency: `110 ms`
+      - `p95` latency: `3,800 ms` (deploy-dan əvvəl `420 ms` idi)
+      - HTTP `422` dərəcəsi sabitdir (`1.2%`), amma `504 Gateway Timeout` xətaları 8 dəfə artıb.
+
+      Bu vəziyyəti ən düzgün izah edən diaqnoz hansıdır?
+    options:
+      - id: a
+        text: "Ortalama latency 240 ms olduğu üçün xidmətdə heç bir problem yoxdur; şikayətlər müştərilərin öz internet sürəti ilə bağlıdır."
+        feedback: "Yanlışdır. `p95`-in 420 ms-dən 3,800 ms-ə qalxması və `504` artımı hər 20 sorğudan 1-nin kəskin yavaşladığını göstərir."
+      - id: b
+        text: "Sorğuların əksəriyyəti sürətli (`p50 = 110 ms`) olduğu üçün `mean` aşağı qalır, lakin quyruq hissədə (tail latency — `p95/p99`) ağır inputlar, soyuq yükləmə və ya xarici bloklanma səbəbindən ciddi darboğaz yaranıb."
+        feedback: "Doğrudur! Ortalama (`mean`) sürətli sorğuların çoxluğu səbəbindən quyruq gecikməsini gizlədir; SLA və alert-lər həmişə `p95/p99` və error rate üzərində qurulmalıdır."
+      - id: c
+        text: "Pydantic input validasiyası (`422`) söndürülməlidir ki, `504` timeout-lar azalsın."
+        feedback: "422 validasiyası mikrosaniyələr çəkir və serveri sınmış inputlardan qoruyur; onu söndürmək təhlükəlidir."
+      - id: d
+        text: "Bütün structured logları tamamilə silmək lazımdır, çünki JSON formatı `p50`-ni aşağı salır."
+        feedback: "Structured log olmadan hansı sorğu tipinin `p95`-də 3.8 saniyə çəkdiyini tapmaq mümkün olmaz."
+    answer: b
+    hints:
+      - "90 sorğu 100 ms, 10 sorğu isə 1,500 ms çəkəndə ortalama cəmi 240 ms olur, amma istifadəçilərin 10%-i ciddi gecikmə yaşayır."
+      - "`p95` və `504 Gateway Timeout` birbaşa quyruq (tail) gecikməsinin göstəricisidir."
+    explanation: "İstehsalat sistemlərində yalnız `mean` latency-ni izləmək təhlükəli kor nöqtə yaradır. `p95` və `p99` persentilləri ən yavaş 5% və 1% sorğuların davranışını göstərərək tail-latency problemlərini dərhal üzə çıxarır."

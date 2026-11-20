@@ -1,0 +1,116 @@
+id: cv-robotics-explorer
+title: "CV & Robotics Explorer: Perception → State Estimation → Control Loop"
+summary: "Fiziki aparat tələb etmədən (simulyasiya və ya video axını üzərində) obyekt aşkarlama, kadrlararası state estimation, PID/qayda əsaslı idarəetmə dövrü, FPS/latency benchmark-ı və sensor səs-küyü altında dayanıqlıq analizi."
+optional: true
+level: advanced
+estimated_hours: [16, 28]
+recommended_lessons:
+  - dl-neuron-forward-backprop
+  - dl-pytorch-training-loop
+  - math-vectors-dot-product
+  - math-matrices-shapes
+  - ml-classification-metrics
+  - prod-logging-monitoring
+problem_statement: |
+  Statik şəkillər üzərində 90% accuracy göstərən Computer Vision modeli real-vaxt robotika və ya dron idarəetmə dövrünə qoşulduqda fərqli problemlər üzə çıxır: 150 ms inference gecikməsi idarəetmə dövrünü (control loop) qeyri-sabit edir, kölgə və ya motion blur səbəbindən obyekt 3 kadr itdikdə nəzarətçi kəskin manevr edir, tək kadrdakı səs-küylü bounding box isə titrəməyə (oscillation) səbəb olur. Bu seçmə (optional) ixtisaslaşma layihəsində fiziki aparat olmadan — 2D/3D simulyatorda və ya qeydə alınmış dron/kamera video axınında — `Perception → State Estimation (Smoothing/Tracking) → Control Command` boru kəmərini quracaq, dəqiqlik vs latency (FPS) trade-off-unu ölçəcək və sensor səs-küyü / işıqlanma dəyişikliyi altında failure mode analizi aparacaqsan.
+intended_user: "Avtonom sistemlər, dron naviqasiyası, mobil robotika və ya real-vaxt video analitikası sahəsində ixtisaslaşmaq istəyən AI mühəndisi."
+requirements:
+  - "Simulyasiya mühiti (məsələn, 2D kinematik hədəf izləmə simulyatoru, PyBullet/Gymnasium) və ya ardıcıl video kadrları oxuyan deterministik giriş axını qurmaq."
+  - "Perception mərhələsində kadrdan hədəfin vəziyyətini (bounding box mərkəzi `[cx, cy]`, IoU və confidence skoru) çıxaran detector/tracker modulu yazmaq."
+  - "Tək kadr səs-küyünü azaltmaq və hədəf qısa müddətə (1-5 kadr) itdikdə vəziyyəti proqnozlaşdırmaq üçün State Estimation (Exponential Moving Average, alpha-beta və ya Kalman filtri) tətbiq etmək."
+  - "Təxmin edilən hədəf mövqeyi ilə kadr mərkəzi arasındakı xətanı (`error = target - center`) idarəetmə əmrinə (`steering / yaw_rate`, `velocity`) çevirən PID və ya PD controller yazmaq və çıxışı təhlükəsizlik hədləri ilə (`clamp`) məhdudlaşdırmaq."
+  - "Ən azı 2 fərqli konfiqurasiya (məsələn, yüksək dəqiqlikli/aşağı sürətli vs aşağı ölçülü/yüksək FPS) üçün orta IoU, tracking error və p50/p95 frame latency (ms) benchmark cədvəli çıxarmaq."
+  - "Süni sensor pozuntuları (Gaussian noise, 50% parlaqlıq düşməsi, motion blur, 3 kadrlıq frame drop) altında sistemin necə davrandığını test etmək və təhlükəsiz dayanma (`failsafe hover / stop`) rejimini yoxlamaq."
+non_goals:
+  - "Bahalı fiziki dron, LiDAR və ya GPU server satın almaq (bütün layihə CPU/standart noutbuk üzərində simulyasiya və ya video ilə tam icra edilə bilməlidir)."
+  - "Milyonlarla şəkildən ibarət yeni foundation vision modelini sıfırdan öyrətmək."
+  - "Təhlükəsizlik məhdudiyyəti olmayan fiziki mühitdə avtonom uçuş sınağı keçirmək."
+architecture: |
+  Sistem hər zaman addımında (`dt`) kadrı qəbul edir, koordinatları filtrləyir və təhlükəsizlik sərhədləri daxilində idarəetmə siqnalı hesablayır:
+
+  ```mermaid
+  flowchart LR
+    Sim["Video Stream / 2D Kinematic Simulator"] -->|"Frame t"| Perc["Perception (Detector + Confidence)"]
+    Perc -->|"Raw [cx, cy, conf]"| Est["State Estimator (Kalman / EMA + Coasting)"]
+    Est -->|"Filtered State & Lost Counter"| Safe{"Target Lost > N Frames?"}
+    Safe -->|"No"| Ctrl["PD / PID Controller + Command Clamp"]
+    Safe -->|"Yes"| Fail["Failsafe Mode (Hover / Zero Velocity)"]
+    Ctrl -->|"Control Signal u(t)"| Sim
+    Fail -->|"Safe Stop"| Sim
+    Ctrl --> Bench["Telemetry: IoU, Tracking RMSE, Frame Latency (ms)"]
+  ```
+
+  - `src/perception.py`: Kadr emalı, obyekt/hədəf aşkarlama və IoU hesablama funksiyaları.
+  - `src/estimator.py`: Səs-küy filtri (EMA / 1D-2D Kalman) və qısa kadr itkisində proqnoz (coasting).
+  - `src/controller.py`: `P`, `I`, `D` əmsallı nəzarətçi, actuator saturation (`clamp`) və failsafe məntiqi.
+  - `src/benchmark.py`: Normal və korlanmış (noise, dim lighting, dropped frames) ssenarilər üzrə latency və sabitlik ölçümü.
+milestones:
+  - id: m1-perception-and-iou
+    title: "Simulyasiya/Video Axını və Perception (IoU & Confidence)"
+    goal: "Ardıcıl kadrlardan hədəf koordinatlarını çıxarmaq və ground-truth ilə IoU dəqiqliyini ölçmək."
+    tasks:
+      - "Hərəkət edən hədəfi olan 2D simulyator və ya etiketlənmiş video kadr oxuyucusu hazırla; `compute_iou(box_a, box_b)` funksiyasını yaz."
+      - "Hər kadrda hədəfin `[x1, y1, x2, y2]` qutusunu və `confidence` dəyərini qaytaran perception modulu qur."
+    evidence_required: "`src/perception.py` kodu, IoU unit testləri və təmiz kadrlar üzrə orta IoU ilə kadr başına latency nəticəsi."
+    skills:
+      - spec-computer-vision
+      - matrices-shapes
+      - ml-classification-metrics
+  - id: m2-state-estimation-filtering
+    title: "State Estimation və Kadr İtkisinə Davamlılıq"
+    goal: "Tək kadrdakı səs-küyü yumşaltmaq və hədəf qısa müddətə görünmədikdə vəziyyəti təxmin etmək."
+    tasks:
+      - "Perception-dan gələn səs-küylü `[cx, cy]` ölçülərini hamarlayan state estimator (EMA və ya sabit sürətli Kalman filtri) yaz."
+      - "`confidence < threshold` olduqda son məlum sürətlə maksimum `K` kadr irəli proqnoz verən (coasting), `K` kadrdan çox itdikdə isə `TARGET_LOST` siqnalı qaldıran məntiq əlavə et."
+    evidence_required: "`src/estimator.py` kodu və xam vs filtrlənmiş trayektoriyanın RMSE müqayisəsi."
+    skills:
+      - spec-robotics
+      - vectors-dot-product
+      - py-control-flow
+  - id: m3-control-loop-and-failsafe
+    title: "PD/PID Control Loop və Təhlükəsizlik Məhdudiyyətləri"
+    goal: "Təxmin edilən vəziyyət xətasını sabit, aşırısız (low overshoot) və təhlükəsiz idarəetmə əmrinə çevirmək."
+    tasks:
+      - "Mövqe xətasından idarəetmə əmri (`u = Kp*e + Ki*integral + Kd*derivative`) hesablayan və çıxışı `[-max_cmd, +max_cmd]` aralığında sıxan (`clamp`) controller yaz."
+      - "`TARGET_LOST` və ya sensor timeout baş verdikdə idarəetmə əmrini dərhal təhlükəsiz sıfır/hover vəziyyətinə keçirən failsafe rejimini qur."
+    evidence_required: "`src/controller.py` kodu, müxtəlif `Kp/Kd` qiymətlərində tracking error cədvəli və failsafe unit testləri."
+    skills:
+      - spec-robotics
+      - py-testing
+  - id: m4-latency-vs-accuracy-and-noise-benchmark
+    title: "Latency vs Accuracy Benchmark və Deqradasiya Analizi"
+    goal: "Sistemin real-vaxt büdcəsinə uyğunluğunu və çətin mühit şəraitində necə sındığını rəqəmlərlə göstərmək."
+    tasks:
+      - "Ən azı 2 fərqli kadr ölçüsü və ya model konfiqurasiyası üçün p50/p95 latency (ms), FPS, orta IoU və son tracking RMSE cədvəlini çıxar."
+      - "4 pozuntu ssenarisini (Gaussian sensor noise, 50% qaralma/lighting shift, motion blur, ardıcıl 4 dropped frame) simulyasiya edib sistemin sabitlik həddini sənədləşdir."
+    evidence_required: "`src/benchmark.py` çıxışı, Latency vs Accuracy cədvəli və 4 pozuntu ssenarisi üzrə failure mode hesabatı."
+    skills:
+      - spec-computer-vision
+      - spec-robotics
+      - prod-monitoring
+test_plan:
+  - "IoU geometry test: Tam üst-üstə düşən qutular üçün `IoU == 1.0`, kəsişməyən qutular üçün `IoU == 0.0` və qismən kəsişən məlum qutular üçün dəqiq kəsr qaytarılır."
+  - "Controller saturation & failsafe test: Çox böyük mövqe xətası verildikdə belə controller çıxışı `max_cmd` həddini aşmır; hədəf ardıcıl `max_lost_frames + 1` kadr itdikdə çıxış `0.0` (failsafe) olur."
+  - "Filter noise reduction test: Sabit sürətlə hərəkət edən hədəfə sıfır ortalamalı səs-küy əlavə edildikdə, estimator-un RMSE xətası xam ölçünün RMSE xətasından kiçikdir."
+  - "Latency budget test: Standart test axınında kadr başına p95 emal müddəti hədəf dövr büdcəsindən (məsələn, 33 ms / 30 FPS və ya 50 ms / 20 FPS) aşağıdır."
+failure_cases:
+  - "Control Loop Oscillation from Latency: Yüksək dəqiqlikli, lakin yavaş (200 ms) detector istifadə edildikdə controller-in köhnə mövqeyə reaksiya verib hədəfin ətrafında sağa-sola yellənməsi."
+  - "Lighting Shift False Negatives: Kölgəyə və ya parlaq işığa keçiddə confidence skorunun kəskin düşməsi və filtrləmə olmadan kəskin əyləc/titrəmə yaranması."
+  - "Integral Windup: Hədəf uzun müddət kadrın kənarında qaldıqda PID-dəki integral həddin yığılıb hədəf mərkəzə çatanda belə güclü overshoot yaratması."
+  - "Ghost Track Lock: Hədəf arxa plandakı oxşar rəngli/formalı obyektin yanından keçdikdə tracker-in səhv obyektə kilidlənməsi."
+privacy_security:
+  - "Video axınları üzərində işləyərkən insanların üzləri, avtomobil nömrə nişanları və ya şəxsi ərazilər icazəsiz dərc edilməməli; açıq sintetik/simulyasiya datası və ya anonimləşdirilmiş kadrlar istifadə olunmalıdır."
+  - "İdarəetmə çıxışı (`velocity`, `steering`, `yaw_rate`) həmişə sərt proqram sərhədləri (`hard clamp`) və `failsafe timeout` ilə qorunmalıdır ki, model xətası təhlükəli sürətlənməyə səbəb olmasın."
+definition_of_done:
+  - "Perception, State Estimator, PD/PID Controller və Benchmark modulları tam işləkdir və `pytest` testlərindən keçir."
+  - "Latency (p50/p95 ms, FPS) vs Accuracy (IoU, Tracking RMSE) müqayisə cədvəli README-də təqdim olunub."
+  - "Sensor səs-küyü, işıqlanma dəyişikliyi və kadr itkisi altında failure mode və failsafe davranışı sənədləşdirilib."
+readme_outline:
+  - "1. Sistem Arxitekturası: Perception → State Estimation → Control Dövrü"
+  - "2. Perception və State Estimator Dizaynı (IoU və Noise Filtering)"
+  - "3. Controller Tənzimlənməsi (PD/PID), Clamp Hədləri və Failsafe Məntiqi"
+  - "4. Benchmark: Latency (FPS / p95 ms) vs Accuracy Trade-off Cədvəli"
+  - "5. Sensor Səs-küyü, İşıqlanma Dəyişikliyi və Kadr İtkisi üzrə Failure Analysis"
+stretch_goals:
+  - "Simulyasiyada süni gecikmə (`delay_frames = 0, 1, 2, 4`) əlavə edərək hansı gecikmə həddində PID dövrünün qeyri-sabit (unstable) olduğunu qrafiklə göstərmək."
+  - "Modeli ONNX və ya INT8 quantize rejiminə keçirib CPU-da FPS artımını və IoU fərqini ölçmək."

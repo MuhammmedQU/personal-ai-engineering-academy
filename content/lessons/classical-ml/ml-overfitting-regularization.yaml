@@ -1,0 +1,349 @@
+id: ml-overfitting-regularization
+track: classical-ml
+module: ml-generalization
+title: Overfitting, bias-variance, regularization (L1/L2) və cross-validation
+summary: Modelin niyə əzbərlədiyini (overfitting) və ya heç nə öyrənə bilmədiyini (underfitting) learning curve-lərlə diaqnoz etməyi, L1 (Lasso) və L2 (Ridge) requlyarizasiya cəzalarını və k-fold cross-validation-u öyrənəcəksən.
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [ml-regression-metrics]
+next: ml-trees-gradient-boosting
+skills: [ml-generalization, ml-algorithms]
+objectives:
+  - Train və validation xətalarını müqayisə edərək modelin underfitting (high bias) yoxsa overfitting (high variance) rejimində olduğunu diaqnoz etmək
+  - "$L_2$ (Ridge) və $L_1$ (Lasso) requlyarizasiya düsturlarını ($L_{\\text{reg}} = L_{\\text{data}} + \\lambda \\sum w_j^2$) izah etmək və Python-da hesablamaq"
+  - "$\\lambda$ (və ya ağaclarda `max_depth`) hiperparametrinin bias-variance balansını necə dəyişdiyini proqnozlaşdırmaq"
+  - "$k$-fold cross-validation-un tək train/val bölgüsünə nisbətən niyə daha etibarlı qiymətləndirmə verdiyini əsaslandırmaq"
+why_it_matters: |
+  Training datasında **0.00% xəta** almaq çox asandır: dərinliyi məhdudlaşdırılmamış bir `DecisionTreeClassifier(max_depth=None)` və ya kifayət qədər yüksək dərəcəli polinom bütün training nöqtələrini adbaad əzbərləyəcək. Amma həmin modeli sabah yeni müştərilərin üzərinə buraxanda nəticə fəlakət olacaq.
+
+  Maşın öyrənməsinin əsas məqsədi keçmişi əzbərləmək yox, **görmədiyi yeni datada ümumiləşdirmə (generalization)** etməkdir. Mühəndis hər gün bir tərəfdə həddindən artıq sadə model (**underfitting / high bias**), digər tərəfdə isə datadakı təsadüfi səs-küyü əzbərləyən həddindən artıq mürəkkəb model (**overfitting / high variance**) arasında qızıl ortanı axtarır.
+terms:
+  - term: Underfitting (High Bias)
+    definition: Modelin həddindən artıq sadə olması səbəbindən datadakı əsas qanunauyğunluğu tuta bilməməsi — həm Train, həm də Validation xətası yüksək olur.
+  - term: Overfitting (High Variance)
+    definition: Modelin həddindən artıq mürəkkəb olub training datasındakı səs-küyü (noise) əzbərləməsi — Train xətası çox kiçik, Validation xətası isə yüksək olur (aralarında böyük uçurum yaranır).
+  - term: Generalization gap
+    definition: "Validation xətası ilə Train xətası arasındakı fərq: $L_{val} - L_{train}$. Bu fərqin böyüməsi overfitting-in əsas siqnalıdır."
+  - term: Regularization (Requlyarizasiya)
+    definition: Modelin çəkilərinin ($w_j$) həddindən artıq böyüməsinə görə loss funksiyasına əlavə edilən cəza həddi; modeli daha sadə və hamar həllərə məcbur edir.
+  - term: L2 Regularization (Ridge / Weight Decay)
+    definition: "Loss funksiyasına çəkilərin kvadratları cəmini əlavə edir: $\\lambda \\sum_{j=1}^d w_j^2$. Böyük çəkiləri kiçildir, amma tam sıfıra çevirmir."
+  - term: L1 Regularization (Lasso)
+    definition: "Loss funksiyasına çəkilərin mütləq qiymətləri cəmini əlavə edir: $\\lambda \\sum_{j=1}^d |w_j|$. Əhəmiyyətsiz əlamətlərin çəkisini tam $0$-a bərabər edərək avtomatik feature selection aparır."
+  - term: k-Fold Cross-Validation
+    definition: Train datasını $k$ bərabər hissəyə (fold) bölüb modeli $k$ dəfə öyrətmək (hər dəfə $k-1$ hissədə train, 1 hissədə validation) və validation nəticələrinin ortalamasını götürmək.
+sections:
+  - id: bias-variance-and-regularization
+    kind: explanation
+    title: Underfitting vs Overfitting, L1/L2 Regularization və Cross-Validation
+    body: |
+      Modeli öyrətdikdən sonra ilk baxacağın cədvəl **Train Error vs Validation Error** müqayisəsidir:
+
+      | Rejim | Train Xətası ($L_{train}$) | Validation Xətası ($L_{val}$) | Diaqnoz və Həll |
+      |---|---|---|---|
+      | **Underfitting (High Bias)** | Yüksək | Yüksək ($L_{train} \approx L_{val}$) | Model çox sadədir $\rightarrow$ Daha güclü model/əlamət seç, $\lambda$-nı azalt |
+      | **Just Right (Balanslı)** | Aşağı | Aşağı ($L_{val}$ minimumdur) | İdeal zona $\rightarrow$ Bu modeli saxla |
+      | **Overfitting (High Variance)** | Çox aşağı ($\approx 0$) | Yüksək ($L_{val} \gg L_{train}$) | Model əzbərləyib $\rightarrow$ Requlyarizasiyanı ($\lambda$) artır, modeli sadələşdir, daha çox data topla |
+
+      ### Regularization: Mürəkkəbliyə vergi qoymaq
+      Xətti modelin $\hat{y} = w_1 x_1 + \dots + w_d x_d + b$ training nöqtələrini əzbərləməsinin klassik yolu bəzi $w_j$ çəkilərini nəhəng müsbət və mənfi ədədlərə (məsələn, $w_1 = +5000, w_2 = -4998$) çevirməkdir. Bunun qarşısını almaq üçün loss funksiyasına **cəza həddi (penalty)** əlavə edirik:
+
+      $$L_{\text{reg}}(\mathbf{w}, b) = \underbrace{\frac{1}{n}\sum_{i=1}^{n} (y_i - \hat{y}_i)^2}_{L_{\text{data}} \text{ (MSE)}} + \underbrace{\lambda \sum_{j=1}^{d} w_j^2}_{L_2 \text{ penalty}}$$
+
+      Simvollar:
+      - $L_{\text{data}}$ — datadakı adi xəta (məsələn, MSE və ya Cross-Entropy)
+      - $w_j$ — modelin $j$-ci əlamətə verdiyi çəki (*diqqət: sürüşmə həddi $b$ (bias/intercept) adətən cəzalandırılmır!*)
+      - $\lambda \ge 0$ (`lambda` və ya kodda `alpha`) — requlyarizasiya gücü (hiperparametr):
+        - $\lambda = 0 \implies$ cəza yoxdur (adi model, overfitting riski)
+        - $\lambda \to \infty \implies$ bütün $w_j \to 0$ (model sabit $\hat{y} = b$ xəttinə çevrilir, underfitting)
+
+      **$L_2$ (Ridge) vs $L_1$ (Lasso):**
+      - **$L_2$ ($\lambda \sum w_j^2$):** Çəkiləri bərabər şəkildə sıfıra yaxınlaşdırır, bir-biri ilə korrelyasiyalı əlamətlərdə daha stabildir.
+      - **$L_1$ ($\lambda \sum |w_j|$):** Lazımsız əlamətlərin çəkisini **tam sıfır** ($w_j = 0$) edir — seyrək (sparse) model yaradır.
+
+      ### $k$-Fold Cross-Validation
+      Kiçik və orta ölçülü datada tək bir validation split bəxtə bağlı ola bilər. **$5$-fold CV**-də training datası 5 bərabər hissəyə bölünür: 5 dəfə təlim keçirilir (hər dəfə 4 hissə train, 1 hissə validation) və 5 validation xətasının ortalaması ($\mu_{cv} \pm \sigma_{cv}$) hesablanır.
+  - id: tailoring-suit-analogy
+    kind: analogy
+    title: "Mental model: Kostyum tikən dərzi — kisə, ideal kəsim və zireh"
+    body: |
+      Təsəvvür et ki, dərziyə kostyum sifariş verirsən:
+
+      - **Underfitting (High Bias) — kartof kisəsi:** Dərzi sənin ölçülərinə heç baxmır, hamıya eyni düzbucaqlı kisəni tikir. Nə sənə oturur (yüksək Train xətası), nə də başqasına (yüksək Validation xətası).
+      - **Overfitting (High Variance) — bədən qəlibi:** Dərzi kostyumu o qədər dar və sərt tikir ki, həmin saniyədə cibində olan açar dəstinin və dərin nəfəs almağının formasını belə parçaya həkk edir. Həmin an güzgüdə 100% bədəninə yapışır (Train xətası = 0). Amma sabah cibindən açarı çıxaran kimi və ya bir stəkan su içən kimi kostyum cırılır (Validation xətası fəlakətdir).
+      - **Regularization ($\lambda$) — dərziyə qoyulan qayda:** *"Parçada kəskin qatlar və çıxıntılar qadağandır, xətlər hamar olmalıdır."* Bu qayda kostyumun cibdəki təsadüfi açarı (səs-küyü) kopyalamasının qarşısını alır.
+  - id: model-complexity-diagram
+    kind: diagram
+    title: Model mürəkkəbliyi, Train/Validation əyriləri və 5-Fold CV
+    body: |
+      ```mermaid
+      flowchart LR
+        subgraph COMPLEXITY["Model Mürəkkəbliyi və Requlyarizasiya"]
+          A["Çox sadə model / Çox böyük lambda"] --> B["Underfitting: Train Error YÜKSƏK, Val Error YÜKSƏK"]
+          C["Optimal mürəkkəblik / Optimal lambda*"] --> D["Sweet Spot: Val Error MİNİMUM"]
+          E["Çox mürəkkəb model / lambda = 0"] --> F["Overfitting: Train Error ~ 0, Val Error YÜKSƏK"]
+        end
+      ```
+
+      Optimal $\lambda^*$ hiperparametrini seçmək üçün Test dəstinə toxunmadan Train dəsti üzərində **$k$-fold Cross-Validation** işlədirik.
+  - id: worked-l2-penalty
+    kind: worked_example
+    title: "Rəqəmlərlə müqayisə: L2 cəzası vəhşi çəkiləri necə cilovlayır?"
+    body: |
+      Tutaq ki, iki fərqli model eyni 2 nöqtəli datada ($y = [3.0, 5.0]$) proqnoz verir:
+
+      - **Model A (Nəhəng çəkili, əzbərləmiş model):**
+        - Çəkiləri: $\mathbf{w}_A = [10.0, -9.0]$
+        - Proqnozları: $\hat{y}_A = [3.0, 5.0]$ (Train datasında 0 xəta!)
+        - $\text{MSE}_A = \frac{(3-3)^2 + (5-5)^2}{2} = 0.0$
+      - **Model B (Kiçik, hamar çəkili model):**
+        - Çəkiləri: $\mathbf{w}_B = [0.8, 0.2]$
+        - Proqnozları: $\hat{y}_B = [2.6, 5.4]$ (kiçik xəta var)
+        - $\text{MSE}_B = \frac{(3-2.6)^2 + (5-5.4)^2}{2} = \frac{0.16 + 0.16}{2} = 0.16$
+
+      Adi MSE-yə baxsaq, Model A ($\text{MSE}=0.0$) qalib görünür. İndi $\lambda = 0.1$ ilə **$L_2$ requlyarizasiyalı loss** ($L_{\text{reg}} = \text{MSE} + \lambda \sum w_j^2$) hesablayaq:
+
+      1. **Model A üçün:**
+         $$\sum w_j^2 = 10.0^2 + (-9.0)^2 = 100 + 81 = 181.0$$
+         $$L_{\text{reg}}(A) = 0.0 + 0.1 \times 181.0 = 18.10$$
+
+      2. **Model B üçün:**
+         $$\sum w_j^2 = 0.8^2 + 0.2^2 = 0.64 + 0.04 = 0.68$$
+         $$L_{\text{reg}}(B) = 0.16 + 0.1 \times 0.68 = 0.16 + 0.068 = 0.228$$
+
+      Nəticə: $0.228 \ll 18.10$! $L_2$ requlyarizasiyası nəhəng çəkilərə malik Model A-nı ağır cəzalandırdı və daha yaxşı ümumiləşdirmə edəcək Model B-ni seçdi.
+  - id: code-l2-and-kfold
+    kind: code
+    title: "Kod: L2-cəzalı MSE və k-fold indeks bölgüsü"
+    body: |
+      ```python
+      def l2_penalized_mse(
+          y_true: list[float],
+          y_pred: list[float],
+          weights: list[float],
+          lam: float,
+      ) -> float:
+          """Compute MSE + lam * sum(w_j^2).
+
+          Note: bias (intercept) is NOT passed in `weights` and is not penalized.
+          """
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+          if lam < 0:
+              raise ValueError("lam must be non-negative")
+
+          n = len(y_true)
+          mse = sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred)) / n
+          l2_penalty = lam * sum(w * w for w in weights)
+          return mse + l2_penalty
+
+
+      def kfold_indices(n_samples: int, k: int) -> list[tuple[list[int], list[int]]]:
+          """Generate (train_idx, val_idx) pairs for k-fold cross-validation."""
+          if k < 2 or k > n_samples:
+              raise ValueError("k must be between 2 and n_samples")
+          fold_size = n_samples // k
+          folds = []
+          for i in range(k):
+              start = i * fold_size
+              end = n_samples if i == k - 1 else (i + 1) * fold_size
+              val_idx = list(range(start, end))
+              train_idx = list(range(0, start)) + list(range(end, n_samples))
+              folds.append((train_idx, val_idx))
+          return folds
+
+
+      print(l2_penalized_mse([3.0, 5.0], [2.6, 5.4], [0.8, 0.2], lam=0.1))  # 0.228
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Əlamətləri standartlaşdırmadan ($StandardScaler$ olmadan) L1/L2 tətbiq etmək**
+      Tutaq ki, $x_1$ otaq sayıdır ($1\dots 5$), $x_2$ isə mənzilin kvadratmetrlə yox, kvadratmillimetrlə sahəsidir ($10^7\dots 10^8$). Ölçü vahidi kiçik olan əlamətin çəkisi ($w_1$) təbii olaraq böyük, böyük vahidli əlamətin çəkisi ($w_2$) isə çox kiçik olacaq. $\lambda \sum w_j^2$ cəzası eyni $\lambda$-nı hər ikisinə tətbiq etdiyi üçün şkaladan asılı olaraq ədalətsiz cəza verəcək! **Qayda:** Ridge, Lasso, LogisticRegression və neyron şəbəkələrindən əvvəl ədədi əlamətləri həmişə standartlaşdır.
+
+      **2. Underfitting olan modelə daha çox requlyarizasiya ($\lambda \uparrow$) və ya Dropout əlavə etmək**
+      Əgər model artıq Train dəstində zəif nəticə göstərirsə (underfitting), requlyarizasiyanı artırmaq vəziyyəti daha da pisləşdirəcək. Əvvəlcə modelin tutumunu (capacity) artır ki, train datasında yaxşı öyrənsin, yalnız bundan sonra overfitting-i requlyarizasiya ilə cilovla.
+
+      **3. `scikit-learn`-də `C` ilə `alpha` ($\lambda$) parametrini qarışdırmaq**
+      `Ridge(alpha=...)` və `Lasso(alpha=...)` siniflərində `alpha` bizim $\lambda$-dır (`alpha` böyüdükcə requlyarizasiya güclənir). Amma `LogisticRegression(C=...)` və `SVC(C=...)` siniflərində $C = \frac{1}{\lambda}$ tərs kəmiyyətdir — orada **$C$ kiçildikcə** requlyarizasiya güclənir!
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **L1 (Lasso) vs L2 (Ridge) vs ElasticNet:** $L_1$ yüzlərlə əlamətdən yalnız 10-15-ni saxlayıb qalanlarını sıfırladığı üçün modeli izah etmək və production-da az sütun saxlamaq üçün əladır. Lakin əlamətlər bir-biri ilə güclü korrelyasiyalıdırsa, $L_1$ onlardan təsadüfi birini seçib qeyri-stabil davranır; bu halda $L_2$ və ya hər ikisinin kombinasiyası olan **ElasticNet** üstündür.
+      - **Ağac modellərində requlyarizasiya:** Decision Tree, Random Forest və Gradient Boosting (XGBoost/LightGBM) modellərində yalnız $w_j$ çəkiləri yox, ağacın quruluşu requlyarizasiya edilir: `max_depth` (maksimum dərinlik $\downarrow$), `min_samples_leaf` (yarpaqdakı minimum sətir sayı $\uparrow$) və `subsample` (< 1.0).
+      - **Daha çox data toplamaq ən yaxşı requlyarizasiyadır:** Sabit model mürəkkəbliyində yüksək keyfiyyətli training nümunələrinin sayını ($n$) artırmaq overfitting-i azaldan ən təbii üsuldur, amma etiketləmə (labeling) büdcəsi və vaxt tələb edir.
+mastery_criteria:
+  - Train və validation əyrilərinə baxaraq modelin underfitting yoxsa overfitting etdiyini müəyyən edir və növbəti mühəndislik addımını seçirsən
+  - "$L_2$-cəzalı loss funksiyasını əllə və Python kodu ilə hesablayırsan"
+  - Xətti modellərdə ($\lambda, C$) və ağac modellərində (`max_depth`, `min_samples_leaf`) requlyarizasiya hiperparametrlərinin hansı istiqamətdə dəyişdirilməli olduğunu bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlor-diagnose-overfit
+      type: mcq
+      title: Train vs Validation diaqnozu
+      prompt: "Bir qərar ağacı (Decision Tree) modelinin Train dəqiqliyi **99.8%**, Validation dəqiqliyi isə **64.0%** çıxıb (baseline 60%-dir). Modeldə hansı problem var və onu necə azaltmaq olar?"
+      skills: [ml-generalization, ml-algorithms]
+      category: concept
+      options:
+        - id: a
+          text: Underfitting (High Bias) var; ağacın maksimum dərinliyini (`max_depth`) artırmaq lazımdır
+          feedback: Train dəqiqliyi 99.8% olan model underfitting etmir — o, train datasını tam əzbərləyib!
+        - id: b
+          text: Overfitting (High Variance) var; ağacın dərinliyini (`max_depth`) məhdudlaşdırmaq, `min_samples_leaf`-i artırmaq və ya Random Forest/requlyarizasiya işlətmək lazımdır
+          feedback: Doğru! Train və Validation arasındakı 35.8%-lik uçurum klassik overfitting-dir.
+        - id: c
+          text: Validation dəstini Train dəstinə qatıb yalnız Train dəqiqliyinə baxmaq lazımdır
+          feedback: Validation dəstini ləğv etmək problemi gizlədir, həll etmir.
+      answer: b
+      explanation: Çox aşağı train xətası və yüksək validation xətası modelin səs-küyü əzbərlədiyini (high variance / overfitting) göstərir; modeli sadələşdirmək və requlyarizasiya tətbiq etmək lazımdır.
+    - id: q-mlor-l1-vs-l2
+      type: mcq
+      title: L1 (Lasso) və L2 (Ridge) arasındakı əsas fərq
+      prompt: "100 əlaməti olan xətti reqressiya modelində əhəmiyyətsiz əlamətlərin çəkilərinin **tam sıfıra** ($w_j = 0$) çevrilərək avtomatik əlamət seçimi (feature selection) aparılmasını istəyirsən. Hansı requlyarizasiyanı seçməlisən?"
+      skills: [ml-generalization, ml-algorithms]
+      category: concept
+      options:
+        - id: a
+          text: L1 Regularization (Lasso) — $\lambda \sum |w_j|$
+          feedback: Doğru! L1 cəzasının törəməsi sabit ($\pm \lambda$) olduğu üçün zəif əlamətlərin çəkisini tam 0 nöqtəsinə sıxır.
+        - id: b
+          text: L2 Regularization (Ridge) — $\lambda \sum w_j^2$
+          feedback: L2 çəkiləri çox kiçildir (məs. 0.0004), lakin sıfıra yaxınlaşdıqca törəməsi ($2\lambda w_j$) kiçildiyi üçün onları tam 0 etmir.
+        - id: c
+          text: Requlyarizasiyanı tamamilə söndürmək ($\lambda = 0$)
+          feedback: $\lambda = 0$ olduqda heç bir çəki sıxılmır.
+      answer: a
+      explanation: $L_1$ (Lasso) seyrək (sparse) çəki vektoru yaradır və lazımsız əlamətləri modeldən tam çıxarır.
+    - id: q-mlor-lambda-extreme
+      type: mcq
+      title: Lambda həddindən artıq böyük seçildikdə nə baş verir?
+      prompt: "$L_{\\text{reg}} = L_{\\text{data}} + \\lambda \\sum w_j^2$ funksiyasında $\\lambda = 10^9$ kimi nəhəng bir ədəd seçsək nə baş verər?"
+      skills: [ml-generalization]
+      category: concept
+      options:
+        - id: a
+          text: Model training datasını 100% dəqiqliklə əzbərləyər (overfitting)
+          feedback: Əksinə! Nəhəng $\lambda$ hər hansı sıfırdan fərqli çəkini astronomik cəzalandırır.
+        - id: b
+          text: Bütün $w_j$ çəkiləri sıfıra yaxınlaşar, model düz üfüqi xəttə ($\hat{y} \approx b$) çevrilər və güclü underfitting (high bias) baş verər
+          feedback: Doğru! Cəza həddi data xətasını üstələdiyi üçün model heç bir əlamətdən istifadə edə bilmir.
+        - id: c
+          text: $\lambda$ yalnız təlim sürətinə təsir edir, çəkilərə təsir etmir
+          feedback: $\lambda$ birbaşa optimal çəkilərin böyüklüyünü təyin edir.
+      answer: b
+      explanation: Həddindən artıq güclü requlyarizasiya modelin əlini-qolunu bağlayır ($w_j \to 0$) və underfitting yaradır.
+    - id: q-mlor-numeric-l2
+      type: numeric
+      title: L2-cəzalı loss-u hesabla
+      prompt: |
+        Modelin data üzrə orta kvadratik xətası $\text{MSE} = 2.0$-dır. Modelin iki əlamət çəkisi var: $w_1 = 3.0$ və $w_2 = -4.0$.
+        Əgər requlyarizasiya əmsalı $\lambda = 0.1$ olarsa, ümumi $L_{\text{reg}} = \text{MSE} + \lambda (w_1^2 + w_2^2)$ dəyəri neçə olar?
+      skills: [ml-generalization]
+      category: math
+      answer: 4.5
+      tolerance: 0.001
+      explanation: "$w_1^2 + w_2^2 = 3^2 + (-4)^2 = 9 + 16 = 25$. Cəza: $\\lambda \\times 25 = 0.1 \\times 25 = 2.5$. Ümumi loss: $2.0 + 2.5 = 4.5$."
+exercises:
+  - id: ex-mlor-l2-penalized-mse
+    type: code
+    title: l2_penalized_mse funksiyasını yaz
+    prompt: |
+      Ridge reqressiyasının hədəf funksiyasını hesablayan `l2_penalized_mse(y_true, y_pred, weights, lam)` funksiyasını pure Python-da yaz:
+
+      $$L_{\text{reg}} = \frac{1}{n}\sum_{i=1}^{n} (y_i - \hat{y}_i)^2 + \lambda \sum_{j=1}^{d} w_j^2$$
+
+      Müqavilə:
+      - `y_true` və `y_pred` boşdursa və ya uzunluqları fərqlidirsə, `ValueError` qaldır.
+      - `lam < 0` olarsa, `ValueError` qaldır.
+      - `weights` boş list (`[]`) ola bilər (bu halda cəza `0.0` olur).
+    skills: [ml-generalization, ml-algorithms]
+    category: python
+    difficulty: 1
+    hints:
+      - "Əvvəlcə `mse = sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred)) / len(y_true)` hesabla."
+      - "Sonra `penalty = lam * sum(w * w for w in weights)` əlavə et."
+    starter_code: |
+      def l2_penalized_mse(
+          y_true: list[float],
+          y_pred: list[float],
+          weights: list[float],
+          lam: float,
+      ) -> float:
+          # TODO: MSE + lam * sum(w^2) hesabla
+          pass
+    tests:
+      - name: Dərsdəki Model A və Model B müqayisəsi
+        code: |
+          loss_a = l2_penalized_mse([3.0, 5.0], [3.0, 5.0], [10.0, -9.0], 0.1)
+          loss_b = l2_penalized_mse([3.0, 5.0], [2.6, 5.4], [0.8, 0.2], 0.1)
+          assert abs(loss_a - 18.10) < 1e-9, f"Model A loss səhvdir: {loss_a}"
+          assert abs(loss_b - 0.228) < 1e-9, f"Model B loss səhvdir: {loss_b}"
+          assert loss_b < loss_a
+      - name: lam == 0 olduqda adi MSE qaytarır
+        code: |
+          res = l2_penalized_mse([1.0, 3.0], [2.0, 1.0], [100.0, -50.0], 0.0)
+          assert abs(res - 2.5) < 1e-9
+      - name: Yanlış inputlarda ValueError qaldırır
+        code: |
+          for args in [([], [], [1.0], 0.1), ([1.0], [1.0, 2.0], [1.0], 0.1), ([1.0], [1.0], [1.0], -0.5)]:
+              try:
+                  l2_penalized_mse(*args)
+                  assert False, f"{args} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def l2_penalized_mse(
+          y_true: list[float],
+          y_pred: list[float],
+          weights: list[float],
+          lam: float,
+      ) -> float:
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+          if lam < 0:
+              raise ValueError("lam must be non-negative")
+          n = len(y_true)
+          mse = sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred)) / n
+          penalty = lam * sum(w * w for w in weights)
+          return mse + penalty
+    explanation: |
+      $L_2$ requlyarizasiyası data xətası (MSE) ilə çəkilərin kvadratik normasının ($\sum w_j^2$) balansını qurur.
+  - id: ex-mlor-learning-curve-mcq
+    type: mcq
+    title: "Diaqnoz: Underfitting yoxsa Overfitting?"
+    prompt: |
+      Mənzil qiymətlərini proqnozlaşdırmaq üçün yalnız 1 əlamətdən (`otaq_sayı`) istifadə edən sadə xətti model ($\hat{y} = w_1 x_1 + b$) öyrətdin.
+      Nəticələr:
+      - Train RMSE: **$42,000\text{ AZN}$**
+      - Validation RMSE: **$43,500\text{ AZN}$**
+      - Hədəf biznes tələbi: RMSE $< 10,000\text{ AZN}$ olmalıdır.
+
+      Bu vəziyyətdə ən düzgün mühəndislik addımı hansıdır?
+    skills: [ml-generalization, ml-algorithms]
+    category: concept
+    difficulty: 2
+    hints:
+      - "Əvvəlcə Train RMSE (42,000) ilə Hədəf RMSE (<10,000) arasındakı fərqə bax: model hətta öyrəndiyi datada belə çox pis nəticə verir."
+      - "Train xətası yüksəkdirsə bu High Bias (Underfitting) deməkdir — requlyarizasiya modeli daha da sadələşdirib xətanı artırar."
+    options:
+      - id: a
+        text: Modeldə güclü overfitting var; L2 requlyarizasiya əmsalını ($\lambda$) 100 dəfə artırmaq lazımdır
+        feedback: Train və Validation xətaları bir-birinə çox yaxındır (42k vs 43.5k) və hər ikisi pisdir — bu overfitting deyil, underfitting-dir!
+      - id: b
+        text: Modeldə underfitting (high bias) var; yeni informativ əlamətlər (sahə, rayon, mərtəbə, təmir) əlavə etmək və ya daha ifadəli model ailəsinə (məs. Gradient Boosting) keçmək lazımdır
+        feedback: Doğru! Model hətta train datasını belə öyrənə bilməyib; ona daha zəngin əlamətlər və daha yüksək tutum lazımdır.
+      - id: c
+        text: Mövcud 1 əlamətli xətti model üçün 10 milyon sətir əlavə data toplamaq kifayətdir
+        feedback: Yalnız otaq sayına baxan düz xəttə 10 milyon sətir də versən, 3 otaqlı köhnə evlə 3 otaqlı lüks villanı ayırd edə bilməz (high bias yalnız data artırmaqla həll olunmur).
+    answer: b
+    explanation: Həm train, həm də validation xətasının yüksək və bir-birinə yaxın olması **High Bias (Underfitting)** əlamətidir. Həlli requlyarizasiya və ya sadəcə sətir sayını artırmaq deyil, yeni əlamətlər (features) və daha güclü model arxitekturası əlavə etməkdir.
+references:
+  - title: scikit-learn — Tuning the hyper-parameters of an estimator & Cross-validation
+    url: https://scikit-learn.org/stable/modules/grid_search.html
+    note: Cross-validation ilə requlyarizasiya hiperparametrlərinin seçilməsi
+  - title: scikit-learn — Linear Models (Ridge, Lasso, Elastic-Net)
+    url: https://scikit-learn.org/stable/modules/linear_model.html
+    note: L1 və L2 requlyarizasiyalı xətti modellərin riyazi təsviri

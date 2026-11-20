@@ -1,0 +1,119 @@
+id: tabular-ml-prediction
+title: "Tabular ML Prediction: Leakage-siz Pipeline və Error Analysis"
+summary: "Cədvəl (tabular) datası üzərində biznes problemini düzgün ML məsələsinə çevirmək, baseline qurmaq, scikit-learn Pipeline ilə data leakage-in qarşısını almaq və slice-based error analysis aparmaq."
+optional: false
+level: foundation
+estimated_hours: [10, 16]
+recommended_lessons:
+  - ml-framing-baselines-splits
+  - ml-data-leakage
+  - ml-classification-metrics
+  - ml-regression-metrics
+  - ml-overfitting-regularization
+  - py-testing-pytest
+problem_statement: |
+  Bir çox başlanğıc ML layihəsi notebook-da 98% accuracy göstərir, lakin real mühitdə tamamilə uğursuz olur. Bunun əsas səbəbləri səhv metrik seçimi, train/test bölgüsündən əvvəl edilən preprocessing (data leakage), zəif baseline müqayisəsi və yalnız ümumi orta skora baxıb alt-qruplardakı (slice) kritik səhvləri görməməkdir. Bu layihədə real və ya açıq bir tabular dataset (məsələn, müştəri churn-u, kredit riski və ya çatdırılma müddəti proqnozu) seçərək, istehsalat standartlarına yaxın, təkrarlana bilən (reproducible) və leakage-siz ML pipeline quracaqsan.
+intended_user: "Qərar qəbul edən əməliyyat komandası və ya analitik — məsələn, hansı müştəriyə saxlama (retention) kampaniyası göndəriləcəyini və ya hansı sifarişin gecikmə riski daşıdığını əvvəlcədən bilmək istəyən məhsul meneceri."
+requirements:
+  - "Biznes məsələsini aydın target, prediction time (proqnoz anında hansı sütunlar məlumdur) və əsas/ikinci dərəcəli metriklərlə rəsmiləşdirmək."
+  - "Məsələnin təbiətinə uyğun (zamana görə chronological və ya sinif balansına görə stratified) train/validation/test bölgüsü aparmaq."
+  - "Heç bir ML istifadə etməyən sadə baseline (məsələn, DummyClassifier/DummyRegressor və ya 1-2 qaydalı heuristic) qurmaq və metrikini ölçmək."
+  - "Bütün preprocessing addımlarını (imputation, scaling, encoding) yalnız scikit-learn Pipeline və ColumnTransformer daxilində yazmaq."
+  - "Ən azı iki fərqli model ailəsini (məsələn, LogisticRegression/Ridge və GradientBoosting/RandomForest) eyni validation sxemi ilə müqayisə etmək."
+  - "Classification üçün qərar threshold-unu biznes xərcinə görə tənzimləmək və ən azı 3 data slice-ı üzrə error analysis hesabatı hazırlamaq."
+non_goals:
+  - "Deep learning və ya mürəkkəb neural network arxitekturalarından istifadə etmək (tabular məsələlərdə klassik ML və fokuslanmış feature engineering əsas hədəfdir)."
+  - "Avtomatik hyperparameter axtarışı (AutoML) ilə yüzlərlə kombinasiya yoxlayıb 0.1% skor artımı qovmaq."
+  - "Modeli real-time web API kimi deploy etmək (bu, növbəti Model Serving API layihəsinin mövzusudur)."
+architecture: |
+  Layihə tək bir qarışıq notebook əvəzinə, aydın modullara bölünmüş Python strukturu və təkrarlana bilən evaluasiya axınından ibarətdir:
+
+  ```mermaid
+  flowchart LR
+    Raw["Raw Tabular CSV/Parquet"] --> Audit["Schema & Leakage Audit"]
+    Audit --> Split["Chronological / Stratified Split"]
+    Split --> Base["Heuristic / Dummy Baseline"]
+    Split --> Pipe["sklearn Pipeline (ColumnTransformer + Model)"]
+    Base --> Eval["Validation & Threshold Tuning"]
+    Pipe --> Eval
+    Eval --> Slice["Slice-based Error Analysis"]
+    Slice --> Report["Final Test Evaluation & Model Card"]
+  ```
+
+  - `src/data.py`: Data yükləmə, schema yoxlaması və train/val/test split funksiyaları.
+  - `src/pipeline.py`: `ColumnTransformer` və `Pipeline` quran fabrik funksiyası.
+  - `src/evaluate.py`: Metriklər, threshold cədvəli və slice-based error analysis.
+  - `tests/test_pipeline.py`: Leakage-in olmadığını və pipeline-ın kənar hallarda (missing values, unseen categories) çökmədiyini yoxlayan pytest testləri.
+milestones:
+  - id: m1-framing-audit
+    title: "Problem Framing, Data Audit və Split"
+    goal: "Proqnoz hədəfini, prediction time-da mövcud olan sütunları və düzgün data bölgüsünü müəyyən etmək."
+    tasks:
+      - "Dataset-in hər bir sütununu nəzərdən keçirib target leakage (gələcəkdən gələn məlumat) yarada biləcək sütunları siyahıla və çıxar."
+      - "Əsas biznes metrikini (məsələn, PR-AUC, F1@threshold, MAE) seç və niyə sadə accuracy və ya R²-nin kifayət etmədiyini yazılı əsaslandır."
+      - "Train/validation/test split funksiyasını yaz və sinif paylanmasını (və ya tarix intervallarını) yoxla."
+    evidence_required: "README-də problem tərifi bölməsi, çıxarılan sütunların səbəbləri və split statistikasını çap edən skript nəticəsi."
+    skills:
+      - ml-problem-framing
+      - ml-data-splitting
+      - statistics-basics
+  - id: m2-baseline-leakage-free-pipeline
+    title: "Baseline və Leakage-siz scikit-learn Pipeline"
+    goal: "Müqayisə nöqtəsi (baseline) yaratmaq və bütün transformasiyaları yalnız train datasında fit olunan Pipeline içində birləşdirmək."
+    tasks:
+      - "Sadə heuristic və ya Dummy model ilə baseline skorunu hesabla və qeyd et."
+      - "Numerical və categorical sütunlar üçün `ColumnTransformer` (`SimpleImputer`, `StandardScaler`, `OneHotEncoder(handle_unknown='ignore')`) qur."
+      - "Pipeline-ın train/val split-dən sonra yalnız `X_train` üzərində `.fit()` olunduğunu təsdiqləyən unit test yaz."
+    evidence_required: "`src/pipeline.py` kodu, keçən pytest testləri və baseline vs ilk model validation müqayisə cədvəli."
+    skills:
+      - ml-data-leakage
+      - py-functions
+      - py-testing
+  - id: m3-model-comparison-regularization
+    title: "Model Müqayisəsi və Generalization"
+    goal: "Xətti model ilə ağac əsaslı modeli müqayisə etmək, overfitting-i ölçmək və regularization tətbiq etmək."
+    tasks:
+      - "Ən azı 2 fərqli alqoritmi (məsələn, regularized linear model və tree ensemble) eyni cross-validation və ya validation split üzərində qiymətləndir."
+      - "Train və validation skorları arasındakı fərqi (generalization gap) hesabla və hyperparameter-lərlə (`max_depth`, `C`, `min_samples_leaf`) overfitting-i azalt."
+    evidence_required: "Model müqayisə cədvəli (train score, val score, inference latency) və seçilmiş modelin əsaslandırılması."
+    skills:
+      - ml-generalization
+      - ml-algorithms
+  - id: m4-threshold-error-analysis
+    title: "Threshold Tuning, Slice Analysis və Final Hesabat"
+    goal: "Default 0.5 threshold-dan kənara çıxmaq və modelin hansı alt-qruplarda zəif işlədiyini aşkar etmək."
+    tasks:
+      - "Validation set üzərində müxtəlif threshold-lar (məsələn, 0.2-dən 0.8-ə) üçün Precision, Recall, F1 və gözlənilən biznes xərcini cədvələ sal."
+      - "Datanı ən azı 3 mənalı kateqoriya və ya intervala (slice) bölərək modelin harada daha çox səhv etdiyini analiz et və 10 konkret səhv nümunəni əl ilə araşdır."
+      - "Yalnız ən sonda toxunulmamış `test` set üzərində yekun metriki hesabla və məhdudiyyətləri sənədləşdir."
+    evidence_required: "Threshold qərar cədvəli, slice-based error analysis hesabatı və final test set nəticəsi."
+    skills:
+      - ml-classification-metrics
+      - ml-regression-metrics
+      - debugging
+test_plan:
+  - "Unit test: `build_pipeline()` funksiyası həm `NaN` dəyərlər, həm də validation zamanı ilk dəfə görünən yeni kateqoriya (`unseen_category`) qəbul etdikdə xəta vermədən proqnoz qaytarır."
+  - "Leakage test: `X_val` sətirlərini dəyişdirdikdə `pipeline.fit(X_train, y_train)` nəticəsində öyrənilən imputer medianı və scaler ortalaması zərrə qədər dəyişmir."
+  - "Split test: Train, validation və test dəstlərinin indeks və ya `entity_id` kəsişməsi boş çoxluqdur (0 ortaq sətir)."
+  - "Sanity test: Təlim keçmiş modelin validation skoru sadə baseline skorundan statistik olaraq mənalı dərəcədə yüksəkdir."
+failure_cases:
+  - "Unseen categories & Missing spikes: İstehsalatda əvvəl görünməmiş kateqoriya və ya gözlənilməz `NULL` axını gəldikdə `OneHotEncoder` və ya imputer-in çökməsi."
+  - "Target leakage: Hadisə baş verdikdən sonra yenilənən sütunun (məsələn, `cancellation_reason` və ya `last_payment_delay_after_churn`) təsadüfən feature kimi qalması."
+  - "Temporal drift: Keçmiş ayların datası ilə öyrədilmiş modelin mövsümi dəyişiklik və ya qiymət artımından sonra kalibrasiyasını itirməsi."
+  - "Silent slice failure: Ümumi F1=0.82 olduğu halda, yeni istifadəçilər və ya kiçik regionlar üzrə F1-in 0.35-ə düşməsi."
+privacy_security:
+  - "Birbaşa identifikatorlar (ad, soyad, telefon, e-poçt, tam ünvan, kart nömrəsi) feature dəstindən və repo-dakı nümunə fayllardan tamamilə silinməlidir."
+  - "Slice analysis zamanı həssas demoqrafik qruplar üzrə kəskin false-positive / false-negative disbalansı yoxlanmalı və sənədləşdirilməlidir."
+definition_of_done:
+  - "Bütün kod `pytest` ilə yoxlanılır və ən azı 4 avtomatik test (split, leakage, unseen category, metric) uğurla keçir."
+  - "Baseline, ən azı 2 ML modeli, threshold cədvəli və 3 slice üzrə error analysis nəticələri README-də rəqəmlərlə göstərilib."
+  - "Yeni klonlanmış repo-da tək bir komanda ilə (`python -m src.evaluate`) eyni random seed altında nəticələr təkrarlanır."
+readme_outline:
+  - "1. Problem Tərifi, Prediction Time və Seçilmiş Biznes Metriki"
+  - "2. Dataset Auditi, Çıxarılan Sütunlar (Leakage Analizi) və Split Strategiyası"
+  - "3. Baseline vs Pipeline Modellərinin Müqayisə Cədvəli"
+  - "4. Threshold Seçimi və Slice-Based Error Analysis (Konkret Səhv Nümunələri ilə)"
+  - "5. Məhdudiyyətlər, Drift Riskləri və Quraşdırma/İcra Təlimatı"
+stretch_goals:
+  - "Feature permutation importance hesablayaraq ən az faydalı 30% sütunu silib modelin sadələşdirilməsini sınaqdan keçirmək."
+  - "Ehtimal kalibrasiyası (`CalibratedClassifierCV` və Brier score) əlavə edib proqnoz ehtimallarının real tezliyə uyğunluğunu yoxlamaq."

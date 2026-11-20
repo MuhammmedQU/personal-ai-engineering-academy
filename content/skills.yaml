@@ -1,0 +1,196 @@
+# Skills — the unit of mastery tracking.
+# Every lesson, exercise and quiz question is tagged with one or more skills.
+# Mastery status (Not started / Introduced / Practicing / Demonstrated / Needs review)
+# is computed per skill from real evidence (exercise attempts), never from page views.
+skills:
+  # ---------------- A. Software Engineering for AI ----------------
+  - id: py-functions
+    name: Functions və contracts
+    track: software-engineering
+    description: Funksiyanın input/output müqaviləsini (contract) dizayn etmək, type hints, pure function və side effect fərqi.
+  - id: py-control-flow
+    name: Control flow və proqram məntiqi
+    track: software-engineering
+    description: Şərtlər, dövrlər, erkən return, edge case-ləri düşünmək və kodun icra ardıcıllığını izləmək.
+  - id: py-errors
+    name: Exceptions və input validation
+    track: software-engineering
+    description: Xətaları düzgün qaldırmaq və tutmaq, fail-fast validation, xüsusi exception-lar.
+  - id: py-data-structures
+    name: Data structures və complexity
+    track: software-engineering
+    description: list, dict, set seçimi, Big-O ilə əməliyyat qiymətini qiymətləndirmək.
+  - id: py-testing
+    name: Testing (pytest)
+    track: software-engineering
+    description: Arrange-Act-Assert, edge case testləri, parametrize, deterministik testlər.
+  - id: debugging
+    name: Debugging
+    track: software-engineering
+    description: Traceback oxumaq, fərziyyə qurub yoxlamaq, minimal reproduksiya yaratmaq.
+  - id: http-apis
+    name: HTTP, REST, JSON və API clients
+    track: software-engineering
+    description: Status code-lar, JSON, timeout, retry/backoff, idempotency, API client yazmaq.
+  - id: git-workflow
+    name: Git workflow
+    track: software-engineering
+    description: Commit, branch, pull request, konfliktlərin həlli.
+  - id: sql-basics
+    name: SQL əsasları
+    track: software-engineering
+    description: SELECT/JOIN/GROUP BY, indekslər, relational modelləşdirmə.
+  - id: linux-cli
+    name: Linux, CLI və Server Əməliyyatları
+    track: software-engineering
+    description: POSIX icazələri (chmod), stdin/stdout/stderr pipes, log analizi, proseslər, SSH/tmux və GPU server diaqnostikası.
+
+  # ---------------- B. Math & Statistics ----------------
+  - id: vectors-dot-product
+    name: Vectors, dot product, norms
+    track: math
+    description: Vektor əməliyyatları, dot product, L2 norm, cosine similarity.
+  - id: matrices-shapes
+    name: Matrices və shapes
+    track: math
+    description: Matrix multiplication qaydası, shape uyğunluğu, linear layer kimi matris.
+  - id: derivatives-chain-rule
+    name: Derivatives və chain rule
+    track: math
+    description: Törəmənin mənası, partial derivative, chain rule, gradient.
+  - id: gradient-descent
+    name: Gradient descent və learning rate
+    track: math
+    description: Loss-u addım-addım azaltmaq, learning rate seçimi, divergence.
+  - id: probability-bayes
+    name: Probability və Bayes rule
+    track: math
+    description: Şərti ehtimal, Bayes qaydası, base rate effekti.
+  - id: statistics-basics
+    name: Descriptive statistics və sampling
+    track: math
+    description: Mean, variance, standard deviation, sampling, confidence interval intuisiyası.
+
+  # ---------------- C. Classical ML ----------------
+  - id: ml-problem-framing
+    name: Problem framing və baselines
+    track: classical-ml
+    description: Biznes sualını ML məsələsinə çevirmək, düzgün metrik və baseline seçmək.
+  - id: ml-data-splitting
+    name: Train/validation/test split
+    track: classical-ml
+    description: Datanı düzgün bölmək, stratification, time-based split.
+  - id: ml-data-leakage
+    name: Data leakage
+    track: classical-ml
+    description: Leakage növlərini tanımaq və Pipeline ilə qarşısını almaq.
+  - id: ml-classification-metrics
+    name: Classification metrics
+    track: classical-ml
+    description: Confusion matrix, precision, recall, F1, threshold, ROC-AUC.
+  - id: ml-regression-metrics
+    name: Regression metrics
+    track: classical-ml
+    description: MAE, RMSE, R², residual analysis, linear regression.
+  - id: ml-generalization
+    name: Overfitting, regularization, cross-validation
+    track: classical-ml
+    description: Bias-variance, learning curves, regularization, cross-validation.
+  - id: ml-algorithms
+    name: Classical ML algorithms
+    track: classical-ml
+    description: Linear/logistic regression, trees, random forest, gradient boosting, KMeans, PCA.
+
+  # ---------------- D. Deep Learning ----------------
+  - id: dl-forward-pass
+    name: Neurons və forward pass
+    track: deep-learning
+    description: Neuron, weights, bias, activation, layer və forward pass hesabı.
+  - id: dl-backprop
+    name: Loss və backpropagation
+    track: deep-learning
+    description: Loss funksiyası, chain rule ilə gradient hesabı, autograd.
+  - id: dl-training-loop
+    name: Training loop (PyTorch)
+    track: deep-learning
+    description: Tensor shapes, batch, epoch, optimizer, train/eval mode, validation.
+  - id: dl-architectures
+    name: CNN, attention, Transformers
+    track: deep-learning
+    description: Konvolyusiya, attention mexanizmi, Transformer bloku.
+
+  # ---------------- E. LLM Engineering ----------------
+  - id: llm-tokens-context
+    name: Tokens, context window, limits
+    track: llm-engineering
+    description: Tokenization, context window, xərc və latency-nin tokenlərlə əlaqəsi.
+  - id: llm-structured-output
+    name: Prompt as specification və structured output
+    track: llm-engineering
+    description: Promptu spesifikasiya kimi yazmaq, JSON schema, validation və retry.
+  - id: llm-embeddings
+    name: Embeddings və semantic search
+    track: llm-engineering
+    description: Embedding vektorları, cosine similarity, chunking, vector/hybrid search.
+  - id: llm-rag
+    name: RAG pipeline
+    track: llm-engineering
+    description: Ingestion, chunking, retrieval, reranking, generation, citations.
+  - id: llm-evaluation
+    name: LLM və retrieval evaluation
+    track: llm-engineering
+    description: Recall@k, groundedness, hallucination testləri, regression eval set.
+  - id: llm-tool-calling
+    name: Tool calling və workflows
+    track: llm-engineering
+    description: Function/tool calling, deterministik workflow vs agent, permissions, human approval.
+  - id: llm-security
+    name: LLM security və privacy
+    track: llm-engineering
+    description: Prompt injection, data exfiltration, least privilege, PII.
+
+  # ---------------- F. Production AI / MLOps ----------------
+  - id: prod-model-serving
+    name: Model serving API
+    track: production
+    description: Modeli FastAPI arxasında xidmət etmək, input validation, health check, testlər.
+  - id: prod-docker-config
+    name: Docker, config və secrets
+    track: production
+    description: Reproducible mühit, Dockerfile, environment variables, secrets idarəsi.
+  - id: prod-monitoring
+    name: Logging və monitoring
+    track: production
+    description: Structured logging, latency/error/cost metrikləri, drift monitorinqi.
+  - id: prod-cicd
+    name: CI/CD və versioning
+    track: production
+    description: Avtomatik testlər, deploy pipeline, data/model versioning.
+
+  # ---------------- G. Specializations ----------------
+  - id: spec-computer-vision
+    name: Computer Vision əsasları
+    track: specializations
+    description: Şəkil təsnifatı, object detection, data augmentation, CV metrikləri.
+  - id: spec-robotics
+    name: Robotics və autonomous systems
+    track: specializations
+    description: Sensorlar, perception-planning-control dövrü, simulyasiya.
+  - id: spec-distributed-inference
+    name: Distributed Data və Inference Optimizasiyası
+    track: specializations
+    description: Columnar storage (Parquet/DuckDB), DDP/FSDP, KV-cache yaddaş büdcəsi və continuous batching (vLLM).
+  - id: spec-multimodal-research
+    name: Multimodal AI və Elmi Məqalə Təhlili
+    track: specializations
+    description: Contrastive learning (CLIP/InfoNCE), Vision-Language modellər, 3-keçidli məqalə oxuma və ablasion analizi.
+
+  # ---------------- H. Product & Startup ----------------
+  - id: product-discovery
+    name: Problem discovery və user interviews
+    track: product
+    description: Konkret istifadəçi problemi tapmaq, qərəzsiz müsahibə aparmaq.
+  - id: product-mvp-economics
+    name: MVP scope və unit economics
+    track: product
+    description: MVP-ni ölçülə bilən uğur meyarları ilə daraltmaq, inference xərcini hesablamaq.

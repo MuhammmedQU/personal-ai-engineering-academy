@@ -1,0 +1,380 @@
+id: spec-nlp-speech-wer
+track: specializations
+module: nlp-speech
+title: "NLP, Çoxdilli Tokenizasiya və Nitqin Tanınması (ASR) — Fertility və Word Error Rate (WER)"
+summary: "Aqqlütinativ dillərdə (məsələn, Azərbaycan dilində) subword tokenizasiya səmərəliliyini (fertility), bunun LLM xərcinə və kontekst pəncərəsinə təsirini, eləcə də Automatic Speech Recognition (ASR) sistemlərində Levenshtein məsafəsi ilə Word Error Rate (WER) hesablanmasını öyrənəcəksən."
+level: advanced
+estimated_minutes: [50, 70]
+prerequisites: [llm-tokens-structured-output]
+next: null
+skills: [llm-tokens-context, llm-evaluation]
+objectives:
+  - "Çoxdilli subword tokenizasiyada fertility (söz başına düşən token sayı) metrikini hesablamaq və Azərbaycan dili kimi aqqlütinativ dillərdə niyə yüksək olduğunu izah etmək"
+  - "Yüksək token fertility-nin API xərcinə, gecikməyə (latency) və effektiv kontekst pəncərəsinə təsirini qiymətləndirmək"
+  - "Automatic Speech Recognition (ASR) boru kəmərinin mərhələlərini və Word Error Rate (WER) düsturunu ($S, D, I, N_{\\text{ref}}$) izah etmək"
+  - "Söz səviyyəsində Levenshtein redaktə məsafəsi (dynamic programming) ilə WER hesablayan funksiya yazmaq"
+why_it_matters: |
+  Əksər təməl LLM-lərin və səs modellərinin (məsələn, Whisper, GPT, Llama) tokenizer-ləri əsasən ingilis dili korpusu üzərində öyrədilib. İngilis dilində `"from our engineering"` ifadəsi 3 söz və 3 tokendirsə, Azərbaycan dilində eyni mənanı verən tək bir aqqlütinativ söz — `"mühəndisliyimizdəndir"` — BPE (Byte-Pair Encoding) tokenizer tərəfindən 6–9 ayrı subword tokenə parçalanır!
+
+  Bu fərq sadəcə nəzəri dilçilik məsələsi deyil, birbaşa **mühəndislik və büdcə** məsələsidir:
+  - Eyni məzmun üçün Azərbaycan dilində **2–3 dəfə çox token** ödəyirsən,
+  - Hər token ardıcıl generasiya olunduğu üçün **cavab müddəti (latency) 2–3 dəfə uzanır**,
+  - $128\text{K}$ kontekst pəncərəsinə ingilis dilində $100$ səhifə sığırsa, yüksək fertility olan dildə cəmi $35\text{--}45$ səhifə sığır.
+
+  Digər tərəfdən, səsli köməkçilər və zəng mərkəzi transkripsiya sistemləri (ASR) qurarkən modelin keyfiyyətini adi "accuracy" ilə ölçmək mümkün deyil — çünki model söz buraxa (deletion), artıq söz əlavə edə (insertion) və ya sözü səhv eşidə (substitution) bilər. Bunun dünya standartı **Word Error Rate (WER)** və **Character Error Rate (CER)** metrikləridir.
+terms:
+  - term: Agglutinative Language (Aqqlütinativ / İltisaqi dil)
+    definition: "Kök sözün sonuna ardıcıl şəkilçilər (morfemlər) artırmaqla yeni məna və qrammatik forma yaradan dil (məsələn, Azərbaycan, Türk, Fin, Yapon dilləri)."
+  - term: Tokenizer Fertility
+    definition: "Mətndəki ümumi subword token sayının söz sayına nisbəti ($\\text{Fertility} = N_{\\text{tokens}} / N_{\\text{words}}$); ideal dəyər $1.0$-a yaxındır."
+  - term: ASR (Automatic Speech Recognition)
+    definition: "Səs dalğasını (audio siqnalı) yazılı mətn transkripsiyasına çevirən AI sistemi (məsələn, OpenAI Whisper, Conformer)."
+  - term: Word Error Rate (WER)
+    definition: "ASR çıxışındakı söz səviyyəli əvəzləmə ($S$), silinmə ($D$) və əlavə olunmaların ($I$) cəminin istinad (reference) mətndəki söz sayına ($N_{\\text{ref}}$) nisbəti."
+  - term: Character Error Rate (CER)
+    definition: "Sözlər əvəzinə ayrı-ayrı simvollar (hərflər) üzrə hesablanan Levenshtein xəta nisbəti; şəkilçili (aqqlütinativ) dillərdə WER-i tamamlayan vacib metrik."
+  - term: Levenshtein Edit Distance
+    definition: "Bir ardıcıllığı (hypothesis) digərinə (reference) çevirmək üçün tələb olunan minimum əvəzləmə (substitution), silmə (deletion) və əlavə etmə (insertion) əməliyyatlarının sayı."
+  - term: Text Normalization (ASR-də)
+    definition: "WER hesablamazdan əvvəl hər iki mətni eyni formata gətirmək (kiçik hərflərə çevirmək, durğu işarələrini təmizləmək, rəqəm yazılışlarını standartlaşdırmaq)."
+sections:
+  - id: tokenization-and-wer-theory
+    kind: explanation
+    title: "Çoxdilli Tokenizasiya (Fertility) və ASR Qiymətləndirməsi (WER)"
+    body: |
+      ### 1. Çoxdilli Tokenizasiya və Aqqlütinativ Dillərdə "Token Vergisi"
+      Subword tokenizer-lər (BPE, WordPiece, Unigram) lüğəti qurarkən korpusda ən tez-tez rast gəlinən hərf birləşmələrini tək token kimi saxlayır.
+      - İngilis dilində `"engineering"` tez-tez işləndiyi üçün tək token (`["engineering"]`) olur.
+      - Azərbaycan dili isə **aqqlütinativdir**: kök sözə mənsubiyyət, hal və şəxs şəkilçiləri yapışır:
+        `mühəndis` + `lik` + `imiz` + `dən` + `dir` $\to$ `"mühəndisliyimizdəndir"`.
+      - İngilis-mərkəzli tokenizer bu uzun sözü bütöv tanımır və onu `["müh", "ə", "nd", "is", "liy", "imiz", "d", "ə", "ndir"]` kimi çoxsaylı kiçik parçalara bölür.
+
+      **Tokenizer Fertility** bir sözə orta hesabla neçə token düşdüyünü ölçür:
+
+      $$\text{Fertility} = \frac{N_{\text{tokens}}}{N_{\text{words}}}$$
+
+      Fertility $1.2$-dən $3.6$-ya qalxdıqda:
+      1. **API və Hesablama Xərci:** Eyni cümlə üçün $3\times$ çox giriş/çıxış tokeni sərf olunur.
+      2. **Gecikmə (Latency):** Autoregressive LLM hər addımda 1 token çıxardığı üçün cavab $3\times$ gec tamamlanır.
+      3. **Effektiv Kontekst Pəncərəsi:** Modelin yaddaşına $3\times$ az həqiqi söz və sənəd yerləşir.
+
+      ### 2. ASR Boru Kəməri və Word Error Rate (WER) Düsturu
+      **Automatic Speech Recognition (ASR)** sistemi (məsələn, Whisper):
+      1. Xam audio dalğasını ($16\text{ kHz}$) $25\text{ ms}$-lik pəncərələrə bölüb **Log-Mel Spectrogram** (zaman-tezlik şəkli) çıxarır,
+      2. Encoder (CNN + Transformer) akustik əlamətləri kodlaşdırır,
+      3. Decoder isə token-ba-token mətn transkripsiyasını (**hypothesis**) generasiya edir.
+
+      Modelin çıxardığı **Hypothesis** cümləsini insan tərəfindən yazılmış həqiqi **Reference** cümləsi ilə müqayisə etmək üçün **Word Error Rate (WER)** istifadə olunur:
+
+      $$\text{WER} = \frac{S + D + I}{N_{\text{ref}}}$$
+
+      Simvollar:
+      - $S$ (**Substitutions** / Əvəzləmələr) — başqa sözlə səhv salınmış sözlərin sayı (məsələn, `"dərs"` əvəzinə `"tərs"`),
+      - $D$ (**Deletions** / Silinmələr) — istinad mətndə olub, ASR çıxışında buraxılmış (itmiş) sözlərin sayı,
+      - $I$ (**Insertions** / Əlavələr) — istinad mətndə olmadığı halda ASR-in özündən əlavə etdiyi artıq sözlərin sayı,
+      - $N_{\text{ref}}$ — **reference** (həqiqi) transkripsiyadakı ümumi söz sayı.
+
+      Burada $S + D + I$ cəmi söz ardıcıllıqları arasındakı **Levenshtein redaktə məsafəsinə** (edit distance) bərabərdir.
+      *(Diqqət: Əgər ASR çoxlu artıq söz əlavə edərsə ($I > N_{\text{ref}}$), $\text{WER} > 1.0$ (yəni $100\%$-dən böyük) ola bilər!)*
+  - id: lego-and-proofreader-analogy
+    kind: analogy
+    title: "Mental model: Lego blokları ilə söz yığmaq və diktant yoxlayan müəllim"
+    body: |
+      - **Token Fertility — Hazır Lego fiquru vs Xırda kərpiclər:** İngilis dili üçün tokenizer-in qutusunda bütöv hazır "ev", "maşın", "mühəndis" Lego blokları var — bir sözü qoymaq üçün 1 blok kifayətdir. Azərbaycan dilindəki `"mühəndisliyimizdəndir"` sözü üçünsə qutuda hazır blok yoxdur; model onu 1x1 ölçülü xırda hərf kərpiclərindən tək-tək yığmağa məcbur olur. Nəticədə həm qutuda çox yer tutur (context window), həm də yığmaq uzun çəkir (latency).
+      - **WER — Diktant dəftərini qırmızı qələmlə yoxlayan müəllim:** Müəllim $10$ sözlük cümlə oxuyub ($N_{\text{ref}} = 10$). Şagirdin dəftərini yoxlayanda görür ki:
+        - Şagird 1 sözü səhv eşitdiyi üçün başqa söz yazıb (**Substitution**, $S=1$),
+        - 1 sözü çatdırıb yaza bilməyib, ötürüb (**Deletion**, $D=1$),
+        - Özündən heç bir artıq söz qoşmayıb (**Insertion**, $I=0$).
+        Müəllim cəmi $1 + 1 + 0 = 2$ qırmızı xəta işarəsi qoyur və bunu öz oxuduğu $10$ sözə bölür: $\text{WER} = 2 / 10 = 0.20$ ($20\%$ xəta).
+  - id: asr-wer-diagram
+    kind: diagram
+    title: "Audio Dalğadan ASR Transkripsiyasına və WER Hesablanmasına Axın"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Audio Dalğa (16 kHz)"] --> B["Log-Mel Spectrogram"]
+        B --> C["ASR Model (Encoder-Decoder)"]
+        C --> D["Hypothesis Mətni"]
+        E["Reference (Həqiqi Mətn)"] --> F["Text Normalization (lowercase, split)"]
+        D --> F
+        F --> G["Word-Level Levenshtein (S + D + I)"]
+        G --> H["WER = (S + D + I) / N_ref"]
+      ```
+
+      Normalizasiya mərhələsi (`F`) kritikdir: əgər normalizasiya olmasa, `"Salam"` ilə `"salam."` fərqli sözlər sayılar və süni şəkildə WER-i şişirdər.
+  - id: worked-wer-alignment
+    kind: worked_example
+    title: "Addım-addım hesablama: Söz düzülüşü (Alignment) və WER"
+    body: |
+      İstinad (Reference) və ASR çıxışı (Hypothesis) aşağıdakı kimi verilib:
+      - **Reference ($N_{\text{ref}} = 5$ söz):** `"süni intellekt mühəndisliyi çox maraqlıdır"`
+      - **Hypothesis ($4$ söz):** `"süni intellekt mühəndisi maraqlıdır"`
+
+      Sözləri ardıcıl düzək (alignment):
+
+      | Mövqe | Reference sözü | Hypothesis sözü | Əməliyyat | Xəta sayı |
+      |---|---|---|---|---|
+      | 1 | `süni` | `süni` | Doğru (Match) | $0$ |
+      | 2 | `intellekt` | `intellekt` | Doğru (Match) | $0$ |
+      | 3 | `mühəndisliyi` | `mühəndisi` | **Substitution ($S$)** | $+1$ |
+      | 4 | `çox` | *(yoxdur)* | **Deletion ($D$)** | $+1$ |
+      | 5 | `maraqlıdır` | `maraqlıdır` | Doğru (Match) | $0$ |
+
+      - Əvəzləmə: $S = 1$ (`mühəndisliyi` $\to$ `mühəndisi`)
+      - Silinmə: $D = 1$ (`çox` sözü buraxılıb)
+      - Əlavə: $I = 0$
+      - İstinad uzunluğu: $N_{\text{ref}} = 5$
+
+      $$\text{WER} = \frac{S + D + I}{N_{\text{ref}}} = \frac{1 + 1 + 0}{5} = \frac{2}{5} = 0.40 \quad (40\%)$$
+
+      **Mühüm müşahidə:** 3-cü sözdə ASR cəmi 2 hərfi (`"ly"`) səhv edib (`mühəndisliyi` vs `mühəndisi`). Lakin **WER** bütöv sözə baxdığı üçün bunu tam $1$ səhv sayır! Aqqlütinativ dillərdə şəkilçi fərqlərinə görə WER-lə yanaşı hərf səviyyəli **CER (Character Error Rate)** də izlənir.
+  - id: code-wer-levenshtein
+    kind: code
+    title: "Python ilə Söz Səviyyəsində Levenshtein və WER Hesablayıcısı"
+    body: |
+      ```python
+      def word_edit_distance(ref_words: list[str], hyp_words: list[str]) -> int:
+          """Compute word-level Levenshtein distance (S + D + I) via dynamic programming."""
+          m, n = len(ref_words), len(hyp_words)
+          dp = [[0] * (n + 1) for _ in range(m + 1)]
+
+          for i in range(m + 1):
+              dp[i][0] = i  # i deletions
+          for j in range(n + 1):
+              dp[0][j] = j  # j insertions
+
+          for i in range(1, m + 1):
+              for j in range(1, n + 1):
+                  if ref_words[i - 1] == hyp_words[j - 1]:
+                      dp[i][j] = dp[i - 1][j - 1]
+                  else:
+                      dp[i][j] = 1 + min(
+                          dp[i - 1][j - 1],  # substitution (S)
+                          dp[i - 1][j],      # deletion (D)
+                          dp[i][j - 1],      # insertion (I)
+                      )
+          return dp[m][n]
+
+
+      def compute_wer(reference: str, hypothesis: str) -> float:
+          """Compute Word Error Rate (WER) after lowercase word normalization."""
+          ref_words = reference.lower().split()
+          hyp_words = hypothesis.lower().split()
+
+          if not ref_words:
+              raise ValueError("Reference transcript must contain at least one word.")
+
+          errors = word_edit_distance(ref_words, hyp_words)
+          return errors / len(ref_words)
+
+
+      ref = "Süni intellekt mühəndisliyi çox maraqlıdır"
+      hyp = "süni intellekt mühəndisi maraqlıdır"
+      print("WER:", compute_wer(ref, hyp))  # 0.4
+      ```
+
+      Kodun iş prinsipi:
+      - `dp[i][j]` cədvəli `ref_words[:i]` prefiksini `hyp_words[:j]` prefiksinə çevirmək üçün lazım olan minimum $S + D + I$ əməliyyat sayını saxlayır.
+      - Sözlər bərabərdirsə əlavə xərc yoxdur (`dp[i-1][j-1]`); fərqlidirsə əvəzləmə (`dp[i-1][j-1]`), silmə (`dp[i-1][j]`) və əlavə etmə (`dp[i][j-1]`) variantlarından ən kiçiyinə $+1$ əlavə olunur.
+      - `ref_words` boş olduqda $N_{\text{ref}} = 0$ sıfıra bölmə yaratdığı üçün açıq `ValueError` qaldırılır.
+  - id: common-nlp-asr-mistakes
+    kind: mistakes
+    title: "NLP və ASR qiymətləndirməsində ən çox edilən səhvlər"
+    body: |
+      **1. WER məxrəcində $N_{\text{ref}}$ əvəzinə $N_{\text{hyp}}$ və ya $\max(N_{\text{ref}}, N_{\text{hyp}})$ yazmaq**
+      Düsturun məxrəci **həmişə** həqiqi istinad mətnindəki söz sayıdır ($N_{\text{ref}}$). Əgər məxrəcə $N_{\text{hyp}}$ qoysan, boş və ya 1 sözlük proqnoz qaytaran sınmış model sıfıra bölmə verər və ya metrik müqayisəolunmaz olar.
+
+      **2. Hərf səviyyəli Levenshtein məsafəsini söz sayına bölmək**
+      ```python
+      # YALNIŞ: string-ləri birbaşa simvol-ba-simvol Levenshtein-ə vermək!
+      dist = edit_distance(reference, hypothesis)  # bu simvol məsafəsidir (CER sürəti)
+      ```
+      `dp` matrisi `reference` string-inin hərfləri üzərində yox, `reference.lower().split()` ilə ayrılmış **söz siyahısı** (`list[str]`) üzərində qurulmalıdır.
+
+      **3. Normalizasiya etmədən xam mətn üzərində WER hesablamaq**
+      İstinad mətndə `"Bakı,"` (vergüllə və böyük hərflə), ASR çıxışında isə `"bakı"` yazılıbsa, sadə `.split()` onları fərqli sözlər (`"bakı," != "bakı"`) sayacaq. Production eval boru kəmərində hərf registri, durğu işarələri və rəqəmlər (`"10"` vs `"on"`) mütləq standartlaşdırılır.
+
+      **4. İngilis dili üzrə token qiymətləndirməsini birbaşa Azərbaycan dilinə şamil etmək**
+      RAG sistemində chunk ölçüsünü "500 söz = ~650 token" qaydası ilə hesablamaq ingilis dili üçündür. Azərbaycan dilində 500 söz $1200\text{--}1800$ token tuta bilər və embedding modelinin maksimum token limitini ($512$ və ya $1024$) aşaraq mətnin sonunu səssizcə kəsə (truncation) bilər!
+  - id: nlp-speech-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: WER vs CER, Böyük Lüğət və Domain Adaptation"
+    body: |
+      - **WER vs CER (Character Error Rate):** Aqqlütinativ dillərdə (Azərbaycan, Türk) tək bir hərf və ya şəkilçi səhvi bütöv uzun sözü WER-də $100\%$ səhv çıxarır. Buna görə Azərbaycan dili ASR layihələrində **həm WER, həm də CER** birlikdə izlənir.
+      - **Lüğət ölçüsü (Vocabulary Size) dilemması:** Çoxdilli modeldə lüğəti $32\text{K}$-dan $256\text{K}$-a böyütmək Azərbaycan dilində fertility-ni azaldır və inference-i sürətləndirir, lakin modelin Embedding və çıxış Softmax matrisinin yaddaş həcmini kəskin artırır.
+      - **Whisper ölçüsü vs Streaming Gecikməsi:** `Whisper-large-v3` yüksək dəqiqlik (aşağı WER) verir, lakin $30$ saniyəlik tam pəncərə gözləyir və ağırdır. Canlı zəng mərkəzi agentində isə $<300\text{ ms}$ gecikmə tələb olunduğu üçün streaming Conformer/CTC arxitekturası və ya distillə edilmiş kiçik model + lokal dil modeli (shallow fusion / hotwords) seçilir.
+mastery_criteria:
+  - "Verilmiş mətn və token siyahısı üçün tokenizer fertility metrikini və onun kontekst/xərc təsirini hesablayır"
+  - "Söz səviyyəsində Levenshtein dinamik proqramlaşdırma alqoritmi ilə WER-i kənar hallar (boş hypothesis, tam fərqli cümlələr, boş reference xətası) daxil olmaqla düzgün kodlaşdırır"
+  - "Aqqlütinativ dillərdə WER və CER arasındakı fərqi və normalizasiyanın əhəmiyyətini izah edir"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-specnlp-fertility-impact
+      type: mcq
+      title: "Tokenizer Fertility-nin mühəndislik təsiri"
+      prompt: "Eyni mənalı sənəd İngilis dilində $1000$ token, Azərbaycan dilində isə yüksək fertility səbəbindən $2500$ token tutur. Bu fərq LLM tətbiqinə necə təsir edir?"
+      skills: [llm-tokens-context]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Azərbaycan dilində API token xərci $2.5\\times$ artır, generasiya gecikməsi uzanır və sabit kontekst pəncərəsinə $2.5\\times$ daha az sənəd yerləşir"
+          feedback: "Doğrudur! LLM-lərdə həm qiymət, həm KV-cache yaddaşı, həm də autoregressive addım sayı birbaşa token sayı ilə mütənasibdir."
+        - id: b
+          text: "Token sayı artsa da, söz sayı eyni olduğu üçün kontekst pəncərəsinə və gecikməyə heç bir təsiri olmur"
+          feedback: "Yanlışdır. Transformer modelləri sözləri yox, yalnız tokenləri görür."
+        - id: c
+          text: "Yüksək fertility modelin yaddaşda tutduğu FP32 çəki sayını $2.5\\times$ azaldır"
+          feedback: "Yanlışdır. Modelin parametr sayı sabitdir."
+      answer: a
+      explanation: "Fertility birbaşa token sayını vurduğu üçün həm maliyyət, həm latency, həm də effektiv kontekst tutumu eyni nisbətdə pisləşir."
+    - id: q-specnlp-wer-over-one
+      type: mcq
+      title: "WER 1.0-dan (100%-dən) böyük ola bilərmi?"
+      prompt: "İstinad (reference) transkripsiyası $2$ sözdən ibarətdir (`\"bəli tamam\"`), lakin səs-küylü mühitdə ASR modeli $5$ yanlış söz (`\"xeyr mən sabah işə gələcəyəm\"`) çıxarıb. Bu halda WER necə olar?"
+      skills: [llm-evaluation]
+      category: ml-metric
+      options:
+        - id: a
+          text: "WER = (2 əvəzləmə + 3 əlavə) / 2 = 2.5 (yəni 250%) olar; WER əlavələr (insertions) hesabına 1.0-ı aşa bilər"
+          feedback: "Doğrudur! Məxrəc $N_{\\text{ref}} = 2$ sabit olduğu halda, hipotezdəki artıq sözlər ($I$) surəti istənilən qədər böyüdə bilər."
+        - id: b
+          text: "WER heç vaxt 1.0-dan böyük ola bilməz, maksimum 1.0 qaytarılır"
+          feedback: "Yanlışdır. Standart WER düsturunda yuxarı hədd (clamping) yoxdur."
+        - id: c
+          text: "WER mənfi ədəd olar"
+          feedback: "Redaktə məsafəsi ($S+D+I$) və $N_{\\text{ref}}$ mənfi ola bilməz."
+      answer: a
+      explanation: "$S = 2, D = 0, I = 3$ və $N_{\\text{ref}} = 2$ olduğu üçün $\\text{WER} = (2 + 0 + 3) / 2 = 2.5$."
+    - id: q-specnlp-fertility-calc
+      type: numeric
+      title: "Tokenizer Fertility hesabı"
+      prompt: |
+        Azərbaycan dilində $40$ sözdən ibarət bir abzas tokenizer-dən keçirildikdə $110$ subword token alınır.
+        Bu mətn üçün tokenizer-in **fertility** dəyəri (söz başına düşən token sayı) neçədir?
+      skills: [llm-tokens-context]
+      category: math
+      answer: 2.75
+      tolerance: 0.01
+      hints:
+        - "Fertility = N_tokens / N_words"
+        - "110 / 40 nisbətini hesabla."
+      explanation: "Fertility bir sözün orta hesabla neçə subword tokenə bölündüyünü göstərir: $\\text{Fertility} = 110 / 40 = 2.75$ token/söz — bu isə İngilis dili (~1.3) ilə müqayisədə 2 qatdan çox token xərci deməkdir."
+    - id: q-specnlp-asr-eval-best-practices
+      type: multi
+      title: "Azərbaycan dili ASR sisteminin düzgün qiymətləndirilməsi"
+      prompt: "Azərbaycan dilində zəng mərkəzi üçün ASR modelini qiymətləndirərkən aşağıdakılardan hansılar **düzgün mühəndislik təcrübəsidir**? Hamısını seç."
+      skills: [llm-evaluation, llm-tokens-context]
+      category: production
+      options:
+        - id: a
+          text: "WER hesablamazdan əvvəl həm reference, həm də hypothesis mətnlərinə eyni normalizasiyanı (lowercase, durğu işarələrinin təmizlənməsi) tətbiq etmək"
+          feedback: "Bəli, əks halda böyük/kiçik hərf və nöqtə-vergül fərqləri süni xəta yaradır."
+        - id: b
+          text: "Aqqlütinativ şəkilçi xətalarını daha həssas ölçmək üçün WER ilə yanaşı CER (Character Error Rate) metrikini də izləmək"
+          feedback: "Bəli, CER tək hərf/şəkilçi səhvi ilə tamamilə yanlış söz arasındakı fərqi göstərir."
+        - id: c
+          text: "Domain-spesifik terminlər (məhsul adları, bank terminləri, şəxs adları) üzrə ayrıca xəta analizini aparmaq"
+          feedback: "Bəli, ümumi bağlayıcı sözlərin düz tapılması kritik biznes terminlərinin səhv tanınmasını gizlədə bilər."
+        - id: d
+          text: "WER məxrəcində istinad söz sayı ($N_{\\text{ref}}$) əvəzinə həmişə $100$ sabit ədədini istifadə etmək"
+          feedback: "Xeyr, məxrəc hər bir nümunənin (və ya korpusun) həqiqi $N_{\\text{ref}}$ söz sayı olmalıdır."
+      answers: [a, b, c]
+      explanation: "Mətn normalizasiyası, WER + CER kombinasiyası və domain-spesifik termin analizi çoxdilli ASR sistemlərinin əsas qiymətləndirmə standartıdır."
+exercises:
+  - id: ex-specnlp-wer-calculator
+    type: code
+    title: "Söz səviyyəsində Levenshtein ilə WER hesablayıcısını (compute_wer) yaz"
+    prompt: |
+      ASR çıxışlarını qiymətləndirmək üçün `compute_wer(reference: str, hypothesis: str) -> float` funksiyasını implementasiya et:
+
+      **Müqavilə (Contract):**
+      1. Hər iki mətni `.lower().split()` ilə kiçik hərfli söz siyahısına çevir (`ref_words`, `hyp_words`).
+      2. Əgər `ref_words` boşdursa ($N_{\text{ref}} = 0$), `ValueError` qaldır.
+      3. Söz səviyyəsində Levenshtein redaktə məsafəsini ($S + D + I$) dinamik proqramlaşdırma ilə hesabla.
+      4. $\text{WER} = \frac{S + D + I}{N_{\text{ref}}}$ nisbətini `float` kimi qaytar.
+    skills: [llm-evaluation, llm-tokens-context]
+    category: python
+    difficulty: 2
+    hints:
+      - "`ref_words = reference.lower().split()` və `hyp_words = hypothesis.lower().split()` yaz; əgər `not ref_words:` olarsa `raise ValueError(...)`."
+      - "Ölçüsü `(m + 1) x (n + 1)` olan `dp` cədvəli qur (`m = len(ref_words)`, `n = len(hyp_words)`). İlk sütunu `0..m`, ilk sətri `0..n` ilə doldur."
+      - "İkiqat dövrdə sözlər bərabərdirsə `dp[i][j] = dp[i-1][j-1]`, fərqlidirsə `1 + min(dp[i-1][j-1], dp[i-1][j], dp[i][j-1])` yaz və sonda `dp[m][n] / m` qaytar."
+    starter_code: |
+      def compute_wer(reference: str, hypothesis: str) -> float:
+          # TODO: söz səviyyəsində Levenshtein məsafəsi ilə WER hesabla
+          return -1.0
+    tests:
+      - name: "Tam uyğunluq (case-insensitive) və qismən xəta"
+        code: |
+          assert compute_wer("Salam Dünya", "salam   dünya") == 0.0
+          wer = compute_wer("süni intellekt mühəndisliyi çox maraqlıdır", "süni intellekt mühəndisi maraqlıdır")
+          assert abs(wer - 0.4) < 1e-6, f"Gözlənilən 0.4, alınan {wer}"
+      - name: "Boş hypothesis (100% deletion) və artıq əlavələr (WER > 1.0)"
+        code: |
+          assert abs(compute_wer("bir iki üç", "") - 1.0) < 1e-6
+          wer_high = compute_wer("bəli tamam", "xeyr mən sabah işə gələcəyəm")
+          assert abs(wer_high - 2.5) < 1e-6, f"Gözlənilən 2.5, alınan {wer_high}"
+      - name: "Boş reference verildikdə ValueError"
+        code: |
+          for empty_ref in ["", "   "]:
+              try:
+                  compute_wer(empty_ref, "salam")
+                  assert False, "Boş reference üçün ValueError qaldırılmalıdır"
+              except ValueError:
+                  pass
+    solution: |
+      def compute_wer(reference: str, hypothesis: str) -> float:
+          ref_words = reference.lower().split()
+          hyp_words = hypothesis.lower().split()
+          if not ref_words:
+              raise ValueError("Reference must contain at least one word.")
+
+          m, n = len(ref_words), len(hyp_words)
+          dp = [[0] * (n + 1) for _ in range(m + 1)]
+          for i in range(m + 1):
+              dp[i][0] = i
+          for j in range(n + 1):
+              dp[0][j] = j
+
+          for i in range(1, m + 1):
+              for j in range(1, n + 1):
+                  if ref_words[i - 1] == hyp_words[j - 1]:
+                      dp[i][j] = dp[i - 1][j - 1]
+                  else:
+                      dp[i][j] = 1 + min(
+                          dp[i - 1][j - 1],
+                          dp[i - 1][j],
+                          dp[i][j - 1],
+                      )
+          return dp[m][n] / m
+    explanation: |
+      Dinamik proqramlaşdırma cədvəli söz səviyyəsində minimum əvəzləmə ($S$), silmə ($D$) və əlavə etmə ($I$) cəmini tapır, daha sonra onu istinad mətninin söz sayına ($m = N_{\text{ref}}$) bölür.
+  - id: ex-specnlp-wer-numeric
+    type: numeric
+    title: "Verilmiş S, D, I saylarına görə WER-i hesabla"
+    prompt: |
+      $10$ sözdən ibarət istinad (reference) transkripsiyası üzrə ASR modelinin çıxışı yoxlanılır:
+      - İstinad söz sayı: $N_{\text{ref}} = 10$
+      - Əvəzləmələr (Substitutions): $S = 1$
+      - Silinmələr (Deletions): $D = 1$
+      - Əlavələr (Insertions): $I = 0$
+
+      Bu transkripsiya üçün **Word Error Rate (WER)** neçədir? (Cavabı onluq kəsrlə, məsələn `0.2` kimi yaz).
+    skills: [llm-evaluation]
+    category: ml-metric
+    difficulty: 1
+    answer: 0.2
+    tolerance: 0.001
+    hints:
+      - "WER düsturunu xatırla: WER = (S + D + I) / N_ref"
+      - "Surətdə (1 + 1 + 0) = 2, məxrəcdə isə 10 dayanır."
+    explanation: |
+      $$\text{WER} = \frac{S + D + I}{N_{\text{ref}}} = \frac{1 + 1 + 0}{10} = \frac{2}{10} = 0.2$$
+references:
+  - title: "Radford et al. (2022) — Robust Speech Recognition via Large-Scale Weak Supervision (OpenAI Whisper)"
+    url: https://arxiv.org/abs/2212.04356
+    note: "Çoxdilli ASR arxitekturası, mətn normalizasiyası və WER qiymətləndirmə standartları"
+  - title: "Petrov et al. (2023) — Language Model Tokenizers Introduce Unfairness Between Languages"
+    url: https://arxiv.org/abs/2305.15425
+    note: "Müxtəlif dillər üzrə tokenizer fertility fərqlərinin xərc, gecikmə və kontekstə təsiri"

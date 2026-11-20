@@ -1,0 +1,362 @@
+id: prod-logging-monitoring
+track: production
+module: observability
+title: "Production-da Müşahidə: Structured Logging, Latency Faizləri (p50/p95/p99) və Drift"
+summary: "PII və gizli açarları sızdırmadan strukturlaşdırılmış JSON logları yazmağı, ortalama (mean) gecikmənin niyə aldadıcı olduğunu və p50/p95/p99 faizlərini hesablamağı, həmçinin production-da data/prediction drift-i aşkar etməyi öyrənəcəksən."
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [prod-docker-config-secrets]
+next: prod-cicd-versioning-reliability
+skills: [prod-monitoring]
+objectives:
+  - "PII və gizli məlumatları sızdırmadan request_id, model_version, latency_ms, token_count və status ilə strukturlaşdırılmış JSON logları qurmaq"
+  - "Orta (mean) gecikmənin quyruq problemlərini (tail latency) necə gizlətdiyini izah etmək və p50, p95, p99 faizlərini hesablamaq"
+  - "Xəta faizi (error rate), token xərci və gecikmə üzrə real-vaxt siqnalları (alerting) dizayn etmək"
+  - "Production-da Input Data Drift və Prediction Drift anlayışlarını fərqləndirmək və izləmək"
+why_it_matters: |
+  Ən təhlükəli AI uğursuzluğu HTTP `500` xətası deyil — xidmətin `200 OK` qaytarıb **səssizcə yararsız proqnozlar verməsidir**. Bazar dəyişəndə, yeni müştəri seqmenti gələndə və ya upstream komanda sütunun vahidini manatdan qəpiyə çevirəndə model çöküb dayanmır, sadəcə səhv qərarlar verir (**data & prediction drift**).
+
+  Digər tərəfdən, komanda *"Orta gecikməmiz 200 ms-dir, hər şey əladır"* deyə bilər, halbuki ən vacib müştərilərin 5%-i ($p_{95}$) 8 saniyə gözləyir. Strukturlaşdırılmış loglar, faiz metrikləri ($p_{50}, p_{95}, p_{99}$) və drift monitorinqi olmadan production-da kor uçursan.
+terms:
+  - term: Structured Logging
+    definition: "Adi mətn (`print('done')`) əvəzinə hər hadisəni sabit açarlara (`request_id`, `latency_ms`, `status`, `model_version`) malik birsətirli JSON obyekti kimi yazmaq."
+  - term: PII Redaction
+    definition: "Fərdi məlumatların (ad, FİN, telefon, e-poçt, kart nömrəsi) loglara yazılmazdan əvvəl maskalanması və ya heşlənməsi."
+  - term: Tail Latency (p50, p95, p99)
+    definition: "Sıralanmış gecikmə paylanmasının 50%-ci (median), 95%-ci və 99%-ci faiz nöqtələri. Məsələn, $p_{95} = 1200\\text{ ms}$ o deməkdir ki, sorğuların 95%-i $\\le 1200\\text{ ms}$, ən yavaş 5%-i isə $\\ge 1200\\text{ ms}$ çəkir."
+  - term: Input Data Drift (Covariate Shift)
+    definition: "Production-da gələn giriş əlamətlərinin paylanmasının ($P_{\\text{prod}}(X)$) modelin öyrədildiyi training paylanmasından ($P_{\\text{train}}(X)$) uzaqlaşması."
+  - term: Prediction Drift
+    definition: "Həqiqi etiketlər (ground truth) hələ məlum olmasa belə, modelin çıxardığı proqnozların və ya əminlik ballarının ($P(\\hat{Y})$) tarixi bazadan kəskin fərqlənməsi."
+  - term: Concept Drift
+    definition: "Giriş əlamətləri ilə hədəf arasındakı həqiqi əlaqənin ($P(Y \\mid X)$) zaman keçdikcə dəyişməsi (məs. yeni fırıldaqçılıq üsulu və ya inflyasiya)."
+sections:
+  - id: observability-pillars
+    kind: explanation
+    title: "Structured Logging, Latency Faizləri və Drift Monitorinqi"
+    body: |
+      ### 1. Structured JSON Logging və PII Məxfiliyi
+      Minlərlə sorğu gələn serverdə `print(f"User {email} took {t} ms")` yazmaq həm axtarışı mümkünsüz edir, həm də məxfilik qanunlarını pozur. Production logu **strukturlaşdırılmış JSON** olmalıdır:
+      ```json
+      {
+        "timestamp": "2026-03-15T10:21:04Z",
+        "request_id": "req-8841",
+        "model_version": "rag-support-v2.3",
+        "status": "ok",
+        "latency_ms": 412.5,
+        "tokens_in": 940,
+        "tokens_out": 115
+      }
+      ```
+      **Loglarda NƏ OLMAMALIDIR?**
+      - Xam API açarları, parollar və sessiya tokenləri.
+      - İstifadəçinin açıq PII məlumatları (tam kart nömrəsi, FİN, telefon, e-poçt, tibbi/maliyyə mətni). Debug üçün yalnız metadata (token sayı, uzunluq, heşlənmiş ID) və ya PII-dən təmizlənmiş nümunələr saxlanılır.
+
+      ### 2. Niyə Ortalama (Mean) Gecikmə Yalan Deyir? ($p_{50}, p_{95}, p_{99}$)
+      Təsəvvür et ki, 10 sorğudan 9-u **100 ms**, 1-i isə (uzun çıxış və ya retry ucbatından) **5100 ms** çəkib:
+      - **Ortalama (Mean):** $\frac{9 \times 100 + 5100}{10} = 600\text{ ms}$. Bu rəqəm nə tipik istifadəçini (100 ms), nə də əziyyət çəkən istifadəçini (5100 ms) göstərir!
+      - **$p_{50}$ (Median):** Sorğuların yarısı $\le 100\text{ ms}$ çəkir (tipik təcrübə).
+      - **$p_{95}$ və $p_{99}$ (Tail latency):** Ən yavaş 5% və 1% sorğuların gecikməsi. LLM və RAG sistemlərində $p_{95}$ ən vacib SLA göstəricisidir.
+
+      Sıralanmış $N$ elementli $s = [s_0, s_1, \dots, s_{N-1}]$ siyahısında $q \in [0, 100]$ faizini **nearest-rank** üsulu ilə belə hesablayırıq ($q = 0$ üçün $s_0$):
+
+      $$k = \max\!\left(0,\; \min\!\left(N - 1,\; \left\lceil \frac{q}{100} \cdot N \right\rceil - 1\right)\right), \quad p_q = s_k$$
+
+      ### 3. Production-da 3 Səviyyəli Monitorinq
+      1. **Sistem və Xərc Sağlamlığı:** Sorğu həcmi (RPS), HTTP `5xx`/`429` xəta faizi, $p_{50}/p_{95}$ gecikmə, saatlıq token sərfi və schema validation uğursuzluq faizi.
+      2. **Input Data Drift:** Gələn sorğulardakı əlamətlərin (məs. `income` ortalaması, `null` dəyərlərin faizi, yaxud LLM sorğularının uzunluğu və dili) training/baza paylanması ilə müqayisəsi. Məsələn, birdən-birə `income` sütununun 40%-i `0` və ya `null` gəlirsə, upstream data kəməri sınıb!
+      3. **Prediction / Output Drift:** Həqiqi nəticəni (məs. müştərinin krediti 6 ay sonra qaytarıb-qaytarmayacağını) dərhal bilməsən də, modelin bu gün verdiyi `"təsdiq"` faizini dünənki ilə müqayisə edə bilərsən. Əgər dünən müraciətlərin 8%-i `"fraud"` çıxırdısa, bu gün isə 65%-i `"fraud"` çıxırsa, modeldə və ya datada təcili problem var.
+  - id: hospital-monitor-analogy
+    kind: analogy
+    title: "Mental model: avtomobilin cihazlar paneli"
+    body: |
+      - **Structured Logging = Təyyarənin qara qutusu:** Hər saniyə strukturlaşdırılmış rəqəmləri (hündürlük, sürət, mühərrik kodu) qeyd edir ki, hadisə olanda dəqiq səbəb tapılsın.
+      - **Mean vs $p_{95}$:** Bakıdan Qəbələyə gedəndə yolun 90%-də 100 km/saatla gedib, sonda 1 saat tıxacda tam dayanmısansa, orta sürətin 60 km/saat görünür — amma tıxac ağrısını yalnız quyruq metrikası ($p_{95}$) göstərir.
+      - **Data Drift = Yanacaq keyfiyyətinin dəyişməsi:** Mühərrik 95 oktanlı benzin üçün tənzimlənib (training data), amma bu gün çənə 76 oktanlı qarışıq yanacaq tökülüb (production input drift). Mühərrik dərhal sönməsə də, səsi və çıxış gücü (prediction drift) dəyişir.
+  - id: monitoring-flow-diagram
+    kind: diagram
+    title: "Production Observability Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        R["Canlı Sorğu"] --> S["FastAPI / LLM Service"]
+        S --> P["Cavab (request_id, model_version)"]
+        S --> L["PII Redactor + JSON Logger"]
+        L --> M1["Sistem Metrikləri: p50/p95, Error %, Cost $"]
+        L --> M2["Drift Monitor: Input & Prediction Distribution"]
+        M1 --> A["Alerting (Slack / PagerDuty)"]
+        M2 --> A
+      ```
+
+      Log yazılmazdan əvvəl PII Redactor həssas məlumatları təmizləyir, daha sonra JSON axını həm gecikmə/xərc, həm də drift panellərini qidalandırır.
+  - id: worked-percentiles-drift
+    kind: worked_example
+    title: "Gecikmə faizlərinin (p50, p95) və Drift-in əl ilə hesabı"
+    body: |
+      Tutaq ki, son 20 sorğunun gecikmələri (ms ilə) artıq kiçikdən böyüyə sıralanıb ($N = 20$):
+      `[100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 155, 160, 165, 170, 175, 180, 190, 950, 2400]`
+
+      **1. $p_{50}$ (Median):**
+      - $\lceil \frac{50}{100} \times 20 \rceil - 1 = 10 - 1 = 9$-cu indeks (10-cu element) → **$145\text{ ms}$**.
+
+      **2. $p_{95}$:**
+      - $\lceil \frac{95}{100} \times 20 \rceil - 1 = 19 - 1 = 18$-ci indeks (19-cu element) → **$950\text{ ms}$**.
+
+      **3. Maksimum ($p_{100}$):**
+      - 19-cu indeks (20-ci element) → **$2400\text{ ms}$**.
+
+      Göründüyü kimi, tipik sorğu cəmi $145\text{ ms}$ çəkir, amma $p_{95} = 950\text{ ms}$-dir — yəni son 10% sorğuda ciddi quyruq gecikməsi var!
+  - id: code-percentile-summary
+    kind: code
+    title: "Kod: Nearest-Rank Percentile və Latency Xülasəsi"
+    body: |
+      ```python
+      import math
+
+
+      def percentile(values: list[float], q: float) -> float:
+          """Nearest-rank üsulu ilə q-cü (0 <= q <= 100) faizi hesablayır."""
+          if not values:
+              raise ValueError("values must not be empty")
+          if not (0.0 <= q <= 100.0):
+              raise ValueError("q must be between 0 and 100")
+
+          ordered = sorted(float(v) for v in values)
+          if q == 0.0:
+              return ordered[0]
+          idx = math.ceil((q / 100.0) * len(ordered)) - 1
+          idx = max(0, min(len(ordered) - 1, idx))
+          return ordered[idx]
+
+
+      def summarize_latencies(latencies_ms: list[float]) -> dict[str, float | int]:
+          """Gecikmə siyahısı üçün count, p50, p95 və max göstəricilərini qaytarır."""
+          if not latencies_ms:
+              raise ValueError("latencies_ms must not be empty")
+          if any(v < 0 for v in latencies_ms):
+              raise ValueError("latencies cannot be negative")
+
+          return {
+              "count": len(latencies_ms),
+              "p50": round(percentile(latencies_ms, 50), 2),
+              "p95": round(percentile(latencies_ms, 95), 2),
+              "max": round(max(float(v) for v in latencies_ms), 2),
+          }
+
+
+      sample = [120, 110, 130, 115, 125, 140, 135, 150, 145, 980]
+      print(summarize_latencies(sample))
+      # {'count': 10, 'p50': 130.0, 'p95': 980.0, 'max': 980.0}
+      ```
+
+      Diqqət et:
+      - `sorted(...)` yeni siyahı yaradır, çağıranın orijinal `latencies_ms` siyahısını yerində dəyişmir (pure function).
+      - Mənfi gecikmə (`v < 0`) və boş siyahı açıq `ValueError` ilə tutulur.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Yalnız orta (mean) gecikməni izləmək**
+      Orta gecikmə quyruqdakı 5% istifadəçinin yaşadığı timeout və retry problemlərini gizlədir. Dashboard-da həmişə $p_{50}$, $p_{95}$ və $p_{99}$ xətlərini birlikdə göstər.
+
+      **2. İstifadəçinin xam promptunu və ya bütün HTTP gövdəsini birbaşa loga yazmaq**
+      İstifadəçilər çatbota şəxsiyyət vəsiqəsi, kart nömrəsi, tibbi analiz və ya şirkət sirlərini yapışdırırlar. Xam mətni olduğu kimi mərkəzi log sisteminə yazmaq ciddi məxfilik pozuntusudur.
+
+      **3. HTTP `200 OK` qayıtdığı müddətcə modelin düzgün işlədiyini güman etmək**
+      Upstream xidmət yaş sütununu `NaN` və ya `0` göndərəndə API yenə `200 OK` qaytarır, amma modelin proqnozları tamamilə pozulur. Input və prediction paylanmalarını izləmək şərtdir.
+
+      **4. LLM xidmətlərində token və xərc siqnalı (cost alert) qoymamaq**
+      Bug nəticəsində yaranan retry dövrü və ya bədniyyətli trafik bir gecədə minlərlə dollar xərcləyə bilər. Saatlıq və günlük token/xərc limiti və avtomatik xəbərdarlıq mütləq olmalıdır.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri və məhdudiyyətlər"
+    body: |
+      - **Tam loglama vs Məxfilik və Yaddaş Xərci:** Hər sorğunun tam kontekstini (məs. 10k tokenlik RAG parçalarını) saxlamaq həm disk xərcini şişirdir, həm də PII riskini artırır. Production-da hər sorğu üçün yalnız yüngül strukturlaşdırılmış metrika logu yazılır; dərin keyfiyyət analizi üçün isə PII-dən təmizlənmiş kiçik seçmə (məs. sorğuların 1%-i və ya yalnız mənfi rəy alanlar) saxlanılır.
+      - **Həssas Alert həddi vs Alert Fatigue (Siqnal yorğunluğu):** Hər kiçik sıçrayışda mühəndisə gecə zəngi getsə, komanda siqnalları iqnor etməyə başlayacaq. Yalnız davamlı (məs. 5 dəqiqə ərzində $p_{95} > 3\text{ s}$ və ya `5xx > 2%`) pozuntularda təcili siqnal göndər.
+mastery_criteria:
+  - "Orta gecikmə ilə p50/p95/p99 faizləri arasındakı fərqi izah edə və Python-da nearest-rank percentile hesablaya bilirsən"
+  - "PII və gizli məlumatları sızdırmayan strukturlaşdırılmış JSON log sxemi tərtib edə bilirsən"
+  - "Input Data Drift ilə Prediction Drift fərqini və həqiqi etiketlər gecikəndə necə monitorinq aparıldığını izah edirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-prodmon-why-p95
+      type: mcq
+      title: "Niyə p95 və p99 izlənilir?"
+      prompt: "Bir AI xidmətində sorğuların 95%-i 120 ms çəkir, lakin 5%-i 6000 ms (6 saniyə) çəkir. Niyə təkcə ədədi ortanı (mean = 414 ms) izləmək kifayət deyil?"
+      skills: [prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: "Ədədi orta ən yavaş 5% istifadəçinin yaşadığı 6 saniyəlik ciddi gecikməni (tail latency) gizlədir"
+          feedback: "Doğrudur. $p_{95}$ və $p_{99}$ metrikləri məhz bu quyruq gecikmələrini aşkar etmək üçündür."
+        - id: b
+          text: "Ədədi ortanı Python-da hesablamaq mümkün deyil"
+          feedback: "Ədədi ortanı hesablamaq asandır, sadəcə qeyri-simmetrik (skewed) paylanmalarda aldadıcıdır."
+        - id: c
+          text: "p95 həmişə p50-dən kiçik olur"
+          feedback: "Xeyr, $p_{95} \\ge p_{50}$ olur."
+      answer: a
+      explanation: "Gecikmə paylanmaları sağa dartılmış (skewed) olur. Orta rəqəm quyruqdakı ağır gecikmələri pərdələyir; $p_{95}$ və $p_{99}$ isə ən pis istifadəçi təcrübəsini birbaşa göstərir."
+    - id: q-prodmon-drift-types
+      type: mcq
+      title: "Prediction Drift nədir?"
+      prompt: "Kredit riski modelində həqiqi nəticə (müştərinin krediti 1 il ərzində qaytarıb-qaytarmaması) yalnız 12 ay sonra bilinir. Lakin bu həftə modelin 'yüksək risk' dediyi müraciətlərin payı qəfil 10%-dən 55%-ə qalxıb. Bu hansı siqnaldır?"
+      skills: [prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: "Prediction Drift — həqiqi etiketlər (ground truth) hələ gəlməsə də, modelin çıxış paylanmasının tarixi bazadan kəskin yayınması"
+          feedback: "Doğrudur. Çıxış paylanmasının qəfil dəyişməsi həqiqi etiketləri gözləmədən problemi erkən aşkar etməyə imkan verir."
+        - id: b
+          text: "Container Layer Caching xətası"
+          feedback: "Docker layer caching build vaxtına aiddir, modelin proqnoz paylanmasına yox."
+        - id: c
+          text: "HTTP 404 Not Found xətası"
+          feedback: "Endpoint işləyir və proqnoz qaytarır, sadəcə proqnozların paylanması sürüşüb."
+      answer: a
+      explanation: "Ground-truth etiketləri gecikən sistemlərdə modelin çıxış ehtimallarının və sinif nisbətlərinin dəyişməsini (Prediction Drift) və giriş əlamətlərinin dəyişməsini (Input Data Drift) izləmək əsas erkən xəbərdarlıq üsuludur."
+    - id: q-prodmon-safe-logging
+      type: multi
+      title: "Təhlükəsiz Structured Logging"
+      prompt: "Production LLM xidmətinin JSON loglarında hansı məlumatların yazılması **doğru və təhlükəsizdir**? Doğru olanları seç."
+      skills: [prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: "request_id, model_version, status_code və latency_ms"
+          feedback: "Bəli — hər sorğunun izlənməsi və performans analizi üçün əsas sahələrdir."
+        - id: b
+          text: "tokens_in, tokens_out və təxmini sorğu xərci (cost_usd)"
+          feedback: "Bəli — xərc və kontekst istifadəsini izləmək üçün vacibdir."
+        - id: c
+          text: "Doğrulama və ya alət çağırışı xətasının növü (error_type)"
+          feedback: "Bəli — hansı xəta kateqoriyasının artdığını görməyə kömək edir."
+        - id: d
+          text: "Müştərinin tam bank kartı nömrəsi, CVV kodu və serverin OPENAI_API_KEY dəyəri"
+          feedback: "Xeyr — PII və gizli açarlar heç vaxt loglara yazılmamalıdır!"
+      answers: [a, b, c]
+      explanation: "Strukturlaşdırılmış loglar performans, xərc, versiya və xəta metadatasını saxlamalı, lakin PII və gizli açarları qətiyyən sızdırmamalıdır."
+exercises:
+  - id: ex-prodmon-latency-summary
+    type: code
+    title: "percentile və summarize_latencies funksiyalarını yaz"
+    prompt: |
+      Production gecikmələrini təhlil etmək üçün iki funksiya yaz:
+
+      1. `percentile(values: list[float], q: float) -> float`
+         - `values` boşdursa və ya `q` `0 <= q <= 100` aralığında deyilsə `ValueError` qaldır.
+         - Input siyahısını **dəyişdirmədən** (mutate etmədən) kiçikdən böyüyə sırala (`ordered`).
+         - `q == 0` olarsa `float(ordered[0])` qaytar.
+         - Əks halda nearest-rank indeksini hesabla:
+           `idx = max(0, min(len(ordered) - 1, math.ceil((q / 100.0) * len(ordered)) - 1))`
+           və `float(ordered[idx])` qaytar.
+
+      2. `summarize_latencies(latencies_ms: list[float]) -> dict`
+         - `latencies_ms` boşdursa və ya içində mənfi ədəd (`< 0`) varsa `ValueError` qaldır.
+         - Bu lüğəti qaytar (`p50`, `p95`, `max` dəyərləri `round(val, 2)` ilə yuvarlaqlaşdırılmış `float`):
+           `{"count": len(latencies_ms), "p50": ..., "p95": ..., "max": ...}`
+    skills: [prod-monitoring]
+    category: python
+    difficulty: 2
+    hints:
+      - "`ordered = sorted(float(v) for v in values)` həm elementləri `float`-a çevirir, həm də yeni siyahı yaradır."
+      - "`summarize_latencies` içində `if not latencies_ms or any(v < 0 for v in latencies_ms): raise ValueError(...)` yoxlamasını əvvəldə yaz."
+      - "`percentile(latencies_ms, 50)` və `percentile(latencies_ms, 95)` çağırışlarından istifadə et."
+    starter_code: |
+      import math
+
+      def percentile(values: list[float], q: float) -> float:
+          # TODO: nearest-rank üsulu ilə q-cü faizi hesabla
+          pass
+
+
+      def summarize_latencies(latencies_ms: list[float]) -> dict:
+          # TODO: count, p50, p95 və max qaytar
+          pass
+    tests:
+      - name: "10 elementli siyahıda p50, p95 və max düzgün hesablanır"
+        code: |
+          raw = [150, 110, 120, 130, 140, 160, 170, 180, 190, 900]
+          copy_before = list(raw)
+          summary = summarize_latencies(raw)
+          assert summary == {
+              "count": 10,
+              "p50": 150.0,
+              "p95": 900.0,
+              "max": 900.0,
+          }, f"Alınan: {summary}"
+          assert raw == copy_before, "Input list dəyişdirilməməlidir!"
+      - name: "percentile sərhəd dəyərlərini (q=0, q=100) düzgün qaytarır"
+        code: |
+          vals = [40.0, 10.0, 30.0, 20.0]
+          assert percentile(vals, 0) == 10.0
+          assert percentile(vals, 50) == 20.0
+          assert percentile(vals, 100) == 40.0
+      - name: "Boş siyahı, mənfi latency və ya yanlış q ValueError qaldırır"
+        code: |
+          for fn, args in [
+              (percentile, ([], 50)),
+              (percentile, ([10.0], -1)),
+              (percentile, ([10.0], 105)),
+              (summarize_latencies, ([],)),
+              (summarize_latencies, ([10.0, -5.0],)),
+          ]:
+              try:
+                  fn(*args)
+                  assert False, f"ValueError qaldırılmalı idi: {fn.__name__}{args}"
+              except ValueError:
+                  pass
+    solution: |
+      import math
+
+      def percentile(values: list[float], q: float) -> float:
+          if not values:
+              raise ValueError("values cannot be empty")
+          if not (0.0 <= q <= 100.0):
+              raise ValueError("q must be in [0, 100]")
+          ordered = sorted(float(v) for v in values)
+          if q == 0.0:
+              return ordered[0]
+          idx = math.ceil((q / 100.0) * len(ordered)) - 1
+          idx = max(0, min(len(ordered) - 1, idx))
+          return ordered[idx]
+
+
+      def summarize_latencies(latencies_ms: list[float]) -> dict:
+          if not latencies_ms or any(v < 0 for v in latencies_ms):
+              raise ValueError("latencies_ms must be non-empty and non-negative")
+          return {
+              "count": len(latencies_ms),
+              "p50": round(percentile(latencies_ms, 50), 2),
+              "p95": round(percentile(latencies_ms, 95), 2),
+              "max": round(max(float(v) for v in latencies_ms), 2),
+          }
+    explanation: |
+      `percentile` funksiyası input siyahısını dəyişdirmədən sıralayır və nearest-rank düsturu ilə $p_q$ dəyərini tapır. `summarize_latencies` isə mənfi və boş dəyərləri rədd edərək əsas SLA göstəricilərini qaytarır.
+  - id: ex-prodmon-p95-calc
+    type: numeric
+    title: "20 sorğuluq seçmədə p95-i tap"
+    prompt: |
+      Aşağıda 20 sorğunun sıralanmış gecikmə siyahısı (ms ilə) verilib:
+
+      `[80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130, 135, 140, 145, 150, 160, 170, 180, 750, 1900]`
+
+      Nearest-rank düsturuna ($\lceil 0.95 \times 20 \rceil$-ci element, yəni 19-cu element) əsasən **$p_{95}$** gecikməsi neçə millisaniyədir?
+    skills: [prod-monitoring]
+    category: math
+    difficulty: 1
+    answer: 750
+    tolerance: 0.1
+    unit: "ms"
+    hints:
+      - "20 elementin 95%-i: 0.95 * 20 = 19-cu element (0-dan başlayan indekslə 18-ci indeks)."
+      - "Siyahının sondan ikinci (19-cu) elementinə bax."
+    explanation: "$0.95 \\times 20 = 19$-cu element siyahıdakı sondan ikinci ədəddir: `750` ms."
+references:
+  - title: "Google SRE Book — Monitoring Distributed Systems"
+    url: https://sre.google/sre-book/monitoring-distributed-systems/
+    note: "Four Golden Signals (Latency, Traffic, Errors, Saturation) və faiz metrikləri"
+  - title: "Evidently AI — Data and Prediction Drift Explained"
+    url: https://docs.evidentlyai.com/user-guide/monitoring/drift-detection
+    note: "Production ML sistemlərində data və prediction drift-in ölçülməsi"

@@ -1,0 +1,111 @@
+id: focused-startup-mvp
+title: "Focused AI Startup MVP: Problem Discovery, Prototype və Unit Economics"
+summary: "Dar və real bir istifadəçi problemini 5 qərəzsiz müsahibə (The Mom Test) ilə doğrulamaq, ölçülə bilən keyfiyyət/latency meyarlı işlək AI prototipi qurmaq və token + infrastruktur + səhv xərcini əhatə edən unit economics modeli çıxarmaq."
+optional: false
+level: core
+estimated_hours: [14, 22]
+recommended_lessons:
+  - product-problem-mvp-costs
+  - llm-tokens-structured-output
+  - prod-fastapi-model-serving
+  - prod-logging-monitoring
+problem_statement: |
+  Əksər uğursuz AI startapları "Gəlin hər kəs üçün süni intellekt köməkçisi düzəldək" cümləsi ilə başlayır, dostlarından "Bəli, maraqlı görünür" tərifini eşidir, aylarla mürəkkəb sistem qurur və sonda məlum olur ki, ya heç kim bu problem üçün pul ödəmir, ya da hər istifadəçinin aylıq LLM/inference xərci abunə qiymətindən 3 dəfə yüksəkdir. Bu layihədə sən mühəndisliklə məhsul intizamını birləşdirəcəksən: dar bir peşə və ya gündəlik iş axını problemi seçəcək, keçmiş davranışa fokuslanan 5 qərəzsiz müsahibə aparacaq, yalnız 1 əsas işi əla görən işlək MVP prototipi quracaq və onun real unit economics ilə məxfilik/təhlükəsizlik modelini hesablayacaqsan.
+intended_user: "Tez-tez təkrarlanan, vaxt aparan və səhvə meyilli konkret bir tapşırığı (məsələn, mühasibat qaimələrinin yoxlanması, müəllimin rəy yazması, hüquqi müqavilə bəndlərinin müqayisəsi, texniki qeydlərin strukturlaşdırılması) icra edən konkret rol."
+requirements:
+  - "Problemi dar hədəf istifadəçi, hazırkı həll yolu (status quo), itirilən vaxt/pul və ölçülə bilən uğur meyarı ilə 1 səhifəlik Problem Brief-də rəsmiləşdirmək."
+  - "'The Mom Test' prinsiplərinə uyğun (gələcək fərziyyə deyil, keçmiş real davranış və mövcud xərc soruşan) 5 istifadəçi müsahibəsi aparmaq və ya mövcud proses müşahidəsini sənədləşdirmək."
+  - "MVP əhatə dairəsini (scope) tək bir əsas iş axınına daraltmaq və aydın keyfiyyət (məsələn, 15 real nümunəlik eval dəstində >=85% dəqiqlik) və latency (məsələn, p95 < 4s) hədəfi qoymaq."
+  - "Seçilmiş problemi həll edən, real input qəbul edib yoxlanıla bilən nəticə qaytaran işlək AI prototipi (API + sadə CLI və ya minimal UI) qurmaq."
+  - "İstifadəçi və əməliyyat başına xərc modelini (input/output tokenlər, retry/fallback əmsalı, embedding/infra xərci və insan düzəlişi vaxtı) hesablayan Unit Economics cədvəli və Python kalkulyatoru yazmaq."
+  - "Məlumat məxfiliyi, PII saxlanma müddəti və model səhv etdikdə istifadəçiyə dəyəcək zərərin azaldılması (fallback/ux) üzrə Privacy & Safety Review hazırlamaq."
+non_goals:
+  - "Tam qeydiyyat, billing/Stripe inteqrasiyası, admin panel və mobil tətbiq qurmaq."
+  - "10 fərqli funksiyanı yarımçıq görən 'hər şey daxil' platforma yaratmaq."
+  - "'İstifadəçilər bəyəndi' kimi ölçülə bilməyən subyektiv rəylərlə kifayətlənmək."
+architecture: |
+  MVP həm istifadəçi dəyərini çatdıran minimal texniki axından, həm də hər əməliyyatın keyfiyyət və maya dəyərini ölçən telemetriya qatından ibarətdir:
+
+  ```mermaid
+  flowchart LR
+    User["Target User (Single Core Workflow)"] -->|"Raw Input"| App["MVP Service (FastAPI / CLI)"]
+    App --> Guard["Input Validation & PII Redaction"]
+    Guard --> AI["Core AI Pipeline (Structured LLM / RAG / ML)"]
+    AI --> Verify["Output Validator & Confidence Check"]
+    Verify -->|"Pass"| UI["Actionable Output + Human Edit Option"]
+    Verify -->|"Fail / Low Confidence"| Fallback["Safe Fallback / Manual Review Queue"]
+    AI --> Cost["Telemetry: Tokens, Latency & Cost per Task"]
+    Eval["15+ Real Domain Test Cases"] --> AI
+  ```
+
+  - `docs/discovery.md`: Problem tərifi, 5 müsahibə qeydi, rədd edilən fərziyyələr və MVP scope.
+  - `src/mvp_pipeline.py`: Əsas AI funksionallığı, schema validasiyası və fallback məntiqi.
+  - `src/economics.py`: Tapşırıq və aylıq aktiv istifadəçi (MAU) başına maya dəyəri, gross margin və break-even hesablayıcısı.
+  - `eval/domain_cases.jsonl`: Real istifadəçi ssenarilərindən ibarət 15+ test nümunəsi.
+milestones:
+  - id: m1-discovery-mom-test
+    title: "Problem Discovery və 5 'Mom Test' Müsahibə Qeydi"
+    goal: "Kod yazmazdan əvvəl problemin həqiqətən mövcud olduğunu və insanların hazırda onu necə həll etdiyini sübut etmək."
+    tasks:
+      - "Hədəf istifadəçi seqmentini və hazırkı iş axınını təsvir et; yönləndirici olmayan ('Bu məhsulu alardınızmı?' tipli suallardan uzaq) 6 müsahibə sualı hazırla."
+      - "5 nəfərlə aparılmış müsahibə və ya iş axını müşahidəsini strukturlaşdırılmış qeydlərlə (`cari həll`, `itirilən vaxt/pul`, `ən ağrılı hissə`, `ödəmə/dəyişmə siqnalı`) sənədləşdir."
+    evidence_required: "`docs/discovery.md` faylında 5 müsahibə xülasəsi və müsahibələrdən sonra dəyişdirilən/daraldılan MVP qərarı."
+    skills:
+      - product-discovery
+  - id: m2-scoped-mvp-prototype
+    title: "Daraldılmış İşlək MVP Prototipi"
+    goal: "Yalnız bir əsas problemi etibarlı şəkildə həll edən və səhv hallarında təhlükəsiz davranan prototip qurmaq."
+    tasks:
+      - "MVP üçün 'Must-Have' (yalnız 1 əsas axın) və 'Out-of-Scope' siyahısını, həmçinin hədəf keyfiyyət və p95 latency hədlərini təyin et."
+      - "Giriş validasiyası, strukturlaşdırılmış AI emalı, çıxış yoxlaması və hər sorğunun token/zaman sərfiyyatını qeyd edən işlək prototipi (`src/mvp_pipeline.py`) yaz."
+    evidence_required: "İşlək prototip kodu və ən azı 3 real nümunə üzərində giriş/çıxış və telemetriya qeydləri."
+    skills:
+      - llm-structured-output
+      - llm-tokens-context
+      - prod-monitoring
+  - id: m3-domain-eval-and-unit-economics
+    title: "Domain Evaluation (15+ Hal) və Unit Economics Modeli"
+    goal: "Prototipin həm keyfiyyət hədəfinə çatdığını, həm də iqtisadi cəhətdən dayanıqlı olduğunu rəqəmlərlə yoxlamaq."
+    tasks:
+      - "15+ real domen nümunəsi üzərində prototipi işə salıb uğur faizini, p50/p95 latency-ni və uğursuzluq (retry/fallback) dərəcəsini ölç."
+      - "`src/economics.py` daxilində bir əməliyyatın tam maya dəyərini (`input_tokens`, `output_tokens`, `retry_rate`, `failure_manual_cost`, `monthly_infra`) və 100 / 1,000 / 10,000 istifadəçi miqyasında gross margin-i hesablayan funksiya yaz."
+    evidence_required: "15+ nümunəlik eval hesabatı, `src/economics.py` kodu və 3 miqyas səviyyəsi üçün xərc/marja cədvəli."
+    skills:
+      - product-mvp-economics
+      - llm-evaluation
+  - id: m4-privacy-safety-iteration
+    title: "Privacy, Safety Review və İterasiya Planı"
+    goal: "Məhsulun məlumat təhlükəsizliyi risklərini bağlamaq və ilk istifadəçi testindən sonrakı qərarı (`iterate`, `narrow`, `pivot`) əsaslandırmaq."
+    tasks:
+      - "PII təmizlənməsi, üçüncü tərəf API-lərə göndərilən məlumatlar və modelin səhv çıxışının biznesə təsiri üzrə qoruyucu mexanizmləri tətbiq et."
+      - "Prototipi ən azı 2 hədəf istifadəçiyə real tapşırıq üzərində sınatdır və nəticəni sənədləşdir."
+    evidence_required: "Privacy & Safety cədvəli, 2 istifadəçi testinin müşahidə qeydləri və növbəti iterasiya qərarı."
+    skills:
+      - llm-security
+      - product-discovery
+      - product-mvp-economics
+test_plan:
+  - "Unit economics calculator test: `calculate_unit_cost()` funksiyası sıfır olmayan retry dərəcəsi və token qiymətləri verildikdə dəqiq əməliyyat xərcini və gross margin-i qaytarır (`pytest`)."
+  - "Pipeline contract test: Prototip boş, həddən artıq uzun və ya sınmış input aldıqda 500 ilə çökmür, aydın xəta və ya təhlükəsiz fallback qaytarır."
+  - "Domain benchmark test: `eval/domain_cases.jsonl` daxilindəki 15+ real nümunə üzərində avtomatik yoxlama müəyyən edilmiş keyfiyyət və p95 latency həddini keçir."
+failure_cases:
+  - "Polite False Validation: Müsahibədə 'Belə bir alət olsa istifadə edərdinizmi?' soruşulduğu üçün insanların nəzakətdən 'Bəli' deməsi, amma real ehtiyacın olmaması."
+  - "Negative Gross Margin Trap: Sabit 10 USD aylıq abunə qoyulduğu halda, aktiv istifadəçinin uzun kontekstli sorğular və retry-larla ayda 18 USD API xərci yaratması."
+  - "Silent High-Stakes Error: Hüquqi, maliyyə və ya tibbi mətndə modelin əmin görünən bir rəqəm səhvi etməsi və istifadəçinin bunu yoxlamadan qəbul etməsi."
+  - "Latency Churn: Cavabın 25 saniyə çəkməsi səbəbindən istifadəçinin işi əl ilə görməyə qayıtması."
+privacy_security:
+  - "Müsahibə qeydlərində və `eval/domain_cases.jsonl` faylında real şirkətlərin məxfi kommersiya sirləri və şəxsi FİN/telefon məlumatları anonimləşdirilməlidir."
+  - "Xarici LLM API-yə sorğu göndərilməzdən əvvəl lazımsız şəxsi identifikatorlar (PII) maskalanmalı və istifadəçiyə məlumatın necə işləndiyi açıq göstərilməlidir."
+definition_of_done:
+  - "5 'Mom Test' müsahibə qeydi, daraldılmış MVP spesifikasiyası və işlək prototip repo-da mövcuddur."
+  - "15+ real nümunəlik evaluation dəsti üzrə dəqiqlik, latency və uğursuzluq faizi ölçülüb."
+  - "Unit economics kalkulyatoru (`pytest` ilə test olunmuş) və Privacy/Safety təhlili README-də rəqəmlərlə təqdim edilib."
+readme_outline:
+  - "1. Problem Brief, Hədəf İstifadəçi və Status Quo (Hazırkı Həll)"
+  - "2. 5 İstifadəçi Müsahibəsinin Xülasəsi (The Mom Test) və Scope Qərarları"
+  - "3. MVP Arxitekturası, Keyfiyyət (15+ Eval Case) və Latency Nəticələri"
+  - "4. Unit Economics Modeli (Token + Retry + Infra Xərci və Gross Margin Cədvəli)"
+  - "5. Privacy & Safety Review, İstifadəçi Testi Rəyləri və Növbəti Addım"
+stretch_goals:
+  - "Bahalı model ilə ucuz/kiçik modeli eyni 15+ domen dəsti üzərində müqayisə edib keyfiyyət vs 10x xərc azalması trade-off cədvəlini çıxarmaq."
+  - "Sadə semantic/exact cache əlavə edərək təkrarlanan sorğularda gözlənilən aylıq xərc qənaətini simulyasiya etmək."

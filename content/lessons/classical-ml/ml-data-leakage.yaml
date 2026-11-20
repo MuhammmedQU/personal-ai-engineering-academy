@@ -1,0 +1,402 @@
+id: ml-data-leakage
+track: classical-ml
+module: ml-foundations
+title: Data leakage — gələcəyin keçmişə sızması və Pipeline ilə müdafiə
+summary: Modelin sınaqda 99% nəticə göstərib real production-da tamamilə çökməsinin bir nömrəli səbəbini — Data Leakage-i (preprocessing, target və group/time leakage) tanımağı və scikit-learn Pipeline arxitekturası ilə qarşısını almağı öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [ml-framing-baselines-splits]
+next: ml-classification-metrics
+skills: [ml-data-leakage, ml-data-splitting]
+objectives:
+  - Data leakage anlayışını "proqnoz anında ($t_0$) əlçatan olmayan məlumatın modelin öyrənməsinə və ya əlamətlərinə sızması" kimi müəyyən etmək
+  - Üç klassik leakage formasını (split-dən əvvəl preprocessing, target leakage, group/time leakage) kodda və cədvəldə aşkar etmək
+  - "`fit` (yalnız train üzərində) və `transform` (train, val, test üzərində) ayrılığını pure Python-da tətbiq etmək"
+  - scikit-learn `Pipeline` obyektinin cross-validation zamanı preprocessing leakage-in qarşısını necə aldığını izah etmək
+why_it_matters: |
+  Təsəvvür et ki, kredit riski modeli qurmusan: validation və test dəstlərində ROC-AUC `0.99` çıxır, rəhbərlik tərifləyir və model production-a buraxılır. Bir ay sonra məlum olur ki, model real müştərilərdə təsadüfi təxmindən fərqlənmir və şirkət yüz minlərlə manat zərər edib. Nə baş verdi? Sənə verilən tarixi cədvəldə `collection_calls_count` (borc gecikəndən sonra edilən zənglərin sayı) sütunu var imiş — yəni hədəfin nəticəsi əlamətlərin içinə sızıbmış!
+
+  **Data leakage** ML mühəndisliyində ən hiyləgər bug-dır, çünki Python heç bir `Exception` qaldırmır — əksinə, metriklərin möhtəşəm görünür. Qayda sadədir: **əgər ilk cəhddən nəticə həddindən artıq yaxşıdırsa (>98%), sevinmə — böyük ehtimalla data leakage var.**
+terms:
+  - term: Data leakage
+    definition: Proqnoz verilən anda ($t_0$) real dünyada mövcud olmayacaq məlumatın modelin təliminə (training) və ya əlamətlərinə ($X$) daxil olması.
+  - term: Target leakage
+    definition: Hədəf hadisə ($y$) baş verdikdən sonra yaranan və ya hədəflə birbaşa eyni mənanı daşıyan sütunun (məsələn, `cancelled_at`, `refund_amount`) giriş əlaməti kimi işlədilməsi.
+  - term: Preprocessing leakage
+    definition: Train/test bölgüsündən əvvəl bütün data üzərində statistika (`mean`, `std`, `min`, `max`, `vocabulary`, `PCA`) hesablamaqla test dəstinin paylanmasını train-ə sızdırmaq.
+  - term: Group leakage
+    definition: Eyni obyektə (məsələn, eyni pasiyentə və ya eyni müştəriyə) aid müxtəlif sətirlərin həm train, həm də test dəstinə düşməsi.
+  - term: fit vs transform
+    definition: "`fit` yalnız train datasından parametrləri (məs. $\\mu_{train}, \\sigma_{train}$) öyrənir; `transform` isə həmin dondurulmuş parametrləri train, val, test və production sorğularına tətbiq edir."
+  - term: scikit-learn Pipeline
+    definition: Preprocessing addımlarını və modeli tək zəncirdə birləşdirən obyekt; hər cross-validation qatında (fold) `fit`-in yalnız həmin qatın train hissəsində çağırılmasına zəmanət verir.
+sections:
+  - id: three-forms-of-leakage
+    kind: explanation
+    title: Data Leakage nədir və 3 klassik forması hansılardır?
+    body: |
+      Hər bir əlamətə ($X_j$) və hər bir preprocessing addımına bu sualı ver:
+      > *"Production-da tək bir yeni müştəri üçün proqnoz verən anda ($t_0$) bu rəqəmi dəqiq biləcəyəmmi?"*
+
+      Cavab **"Xeyr"**dirsə, bu **Data Leakage**-dir. O, əsasən 3 formada qarşımıza çıxır:
+
+      ### 1. Preprocessing Leakage (Split-dən əvvəl emal)
+      Yeni başlayanların 90%-i notebook-da əvvəlcə bütün `X` cədvəlini standartlaşdırır və ya boşluqları doldurur, sonra `train_test_split` edir:
+      ```python
+      # SƏHV: Bütün datanın ortalaması və standart meyli hesablanır!
+      X_scaled = scaler.fit_transform(X)
+      X_train, X_test = train_test_split(X_scaled)
+      ```
+      Burada `scaler.fit(X)` çağırılanda test dəstindəki ekstremal dəyərlər (outlier-lər) və paylanma $\mu$ və $\sigma$ vasitəsilə train dəstinə sızır. Daha pisi: $k$-fold cross-validation-dan əvvəl `fit_transform(X)` etsən, hər fold-dakı validation hissəsi artıq `fit` zamanı görülüb!
+
+      ### 2. Target Leakage (Gələcəkdən gələn sütunlar)
+      Tarixi baza eksport edilərkən sətirlər son vəziyyəti əks etdirir. Məsələn, abunə ləğvi (`churn`) proqnozlaşdırarkən cədvəldə bu sütunlar ola bilər:
+      - `cancelled_at` (ləğv tarixi dolu olanlar = 100% churn)
+      - `refund_amount` (pul geri qaytarılıbsa, artıq müştəri gedib)
+      - `antibiotic_prescribed` (pnevmoniya diaqnozunu proqnozlaşdırarkən həkim diaqnoz qoyandan *sonra* yazdığı dərman)
+
+      ### 3. Group və Time Leakage
+      - **Group leakage:** Ağciyər rentgenlərindən xəstəlik tapırsan. Eyni pasiyentin 5 şəkli var: 3-ü train-ə, 2-si test-ə düşür. Model xəstəliyi yox, pasiyentin döş qəfəsinin formasını və ya xəstəxana nişanını əzbərləyir. Həll: `GroupKFold` (bir pasiyentin bütün şəkilləri yalnız bir dəstdə olur).
+      - **Time leakage:** Sabahkı valyuta məzənnəsini və ya növbəti həftənin orta satışını bu günün proqnozunda əlamət kimi işlətmək.
+  - id: exam-leak-analogy
+    kind: analogy
+    title: "Mental model: İmtahan suallarının bir gecə əvvəl sızması"
+    body: |
+      Təsəvvür et ki, iki tələbə sabahkı riyaziyyat imtahanına hazırlaşır:
+
+      - **Birinci tələbə (Leakage yoxdur):** Keçən illərin mövzularını oxuyur, qaydaları öyrənir. İmtahanda 82 bal toplayır. Universitetə qəbul olanda da dərsləri rahat qavrayır.
+      - **İkinci tələbə (Data Leakage):** İmtahandan bir gecə əvvəl sabah düşəcək sualların cavab vərəqini (`cancelled_at`) ələ keçirir və əzbərləyir. İmtahanda **100 bal** toplayır! Hamı onun dahi olduğunu düşünür. Amma universitetdə ilk real dərsdə (Production) lövhəyə çıxanda heç bir suala cavab verə bilmir — çünki o, riyaziyyatı öyrənməmişdi, sadəcə cavab vərəqindəki şablonu kopyalamışdı.
+
+      Target leakage modelə imtahanın cavab vərəqini verməkdir. Preprocessing leakage isə imtahanda hansı mövzulardan neçə sual düşəcəyinin statistikasını əvvəlcədən öyrənməkdir.
+  - id: pipeline-leakage-diagram
+    kind: diagram
+    title: Səhv axın vs Düzgün Pipeline axını
+    body: |
+      ```mermaid
+      flowchart TD
+        subgraph WRONG["SƏHV: Split-dən əvvəl fit_transform (Leakage!)"]
+          A1["Tam Data X"] --> B1["scaler.fit_transform(X) — Test statistikası sızdı!"]
+          B1 --> C1["train_test_split"]
+        end
+
+        subgraph RIGHT["DÜZGÜN: Split-dən sonra yalnız Train-də fit"]
+          A2["Tam Data X"] --> B2["train_test_split"]
+          B2 --> C2["X_train"]
+          B2 --> D2["X_test"]
+          C2 --> E2["scaler.fit(X_train) -> mean_tr, std_tr"]
+          E2 --> F2["scaler.transform(X_train)"]
+          E2 --> G2["scaler.transform(X_test) — eyni mean_tr, std_tr ilə!"]
+        end
+      ```
+
+      Sağ (və ya aşağı) blokdakı qızıl qaydaya fikir ver: `X_test` heç vaxt `fit()` metoduna ötürülmür! Test dəsti yalnız `X_train`-dən öyrənilmiş $\mu_{train}$ və $\sigma_{train}$ ilə çevrilir (`transform`).
+  - id: worked-standardizer-leakage
+    kind: worked_example
+    title: "Rəqəmlərlə sübut: Test-dəki outlier train-ə necə sızır?"
+    body: |
+      Standartlaşdırma (Z-score scaling) düsturu belədir:
+
+      $$z = \frac{x - \mu}{\sigma}, \quad \mu = \frac{1}{n}\sum_{i=1}^n x_i, \quad \sigma = \sqrt{\frac{1}{n}\sum_{i=1}^n (x_i - \mu)^2}$$
+
+      Tutaq ki, maaş sütunumuz (min AZN ilə) belədir:
+      - `train = [2.0, 4.0, 6.0]`
+      - `test = [100.0]` (test dəstində bir milyarder outlier var)
+
+      **Düzgün yol (yalnız train üzərində `fit`):**
+      - $\mu_{train} = \frac{2 + 4 + 6}{3} = 4.0$
+      - $\sigma_{train} = \sqrt{\frac{(-2)^2 + 0^2 + 2^2}{3}} = \sqrt{\frac{8}{3}} \approx 1.633$
+      - Train çevrilir: $[-1.225, 0.0, +1.225]$
+      - Test həmin $\mu_{train}=4.0, \sigma_{train}=1.633$ ilə çevrilir: $z_{test} = \frac{100 - 4}{1.633} \approx +58.79$ (model açıq görür ki, bu çox böyük outlier-dir).
+
+      **Səhv yol (bütün `[2, 4, 6, 100]` üzərində `fit` — Leakage!):**
+      - $\mu_{all} = \frac{112}{4} = 28.0$, $\sigma_{all} \approx 41.59$
+      - Train çevrilir: $[-0.625, -0.577, -0.529]$ — bütün normal maaşlar mənfi dar bir aralığa sıxıldı! Çünki gələcəkdəki (test-dəki) `100.0` dəyəri keçmişin (train-in) şkalasını pozdu.
+  - id: code-standardizer-pipeline
+    kind: code
+    title: "Kod: fit/transform ayrılığı və scikit-learn Pipeline"
+    body: |
+      Əvvəlcə pure Python-da `fit` və `transform` müqaviləsini açıq yazaq:
+
+      ```python
+      import math
+
+
+      def fit_standardizer(train_values: list[float]) -> tuple[float, float]:
+          """Compute (mean, std) using ONLY training values."""
+          if not train_values:
+              raise ValueError("train_values cannot be empty")
+          n = len(train_values)
+          mean = sum(train_values) / n
+          variance = sum((x - mean) ** 2 for x in train_values) / n
+          std = math.sqrt(variance)
+          return mean, std
+
+
+      def apply_standardizer(
+          values: list[float], mean: float, std: float
+      ) -> list[float]:
+          """Transform any dataset using pre-fitted (mean, std)."""
+          if std == 0:
+              return [0.0 for _ in values]
+          return [(x - mean) / std for x in values]
+
+
+      train_x = [2.0, 4.0, 6.0]
+      test_x = [10.0]
+
+      mu, sigma = fit_standardizer(train_x)          # YALNIZ train_x!
+      train_scaled = apply_standardizer(train_x, mu, sigma)
+      test_scaled = apply_standardizer(test_x, mu, sigma)
+      ```
+
+      **Real layihədə `scikit-learn Pipeline` bunu avtomatlaşdırır:**
+      ```python
+      # scikit-learn nümunəsi (konseptual):
+      # from sklearn.pipeline import Pipeline
+      # from sklearn.preprocessing import StandardScaler
+      # from sklearn.linear_model import LogisticRegression
+      # from sklearn.model_selection import cross_val_score
+      #
+      # pipe = Pipeline([
+      #     ("scaler", StandardScaler()),
+      #     ("clf", LogisticRegression()),
+      # ])
+      # # Hər CV fold-unda scaler YALNIZ həmin fold-un train hissəsində fit olunur:
+      # scores = cross_val_score(pipe, X_train, y_train, cv=5)
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər və leakage ovu
+    body: |
+      **1. Dublikat sətirləri split-dən əvvəl təmizləməmək**
+      Əgər datada eyni sətir 2 dəfə təkrarlanıbsa (məsələn, log iki dəfə yazılıb) və ya data augmentation (sintetik nümunə artırma / SMOTE) split-dən **əvvəl** edilibsə, eyni nümunənin əkizi həm train, həm də test dəstinə düşür. Augmentation və oversampling **yalnız train dəsti daxilində** edilməlidir!
+
+      **2. Feature selection-u bütün data üzərində aparmaq**
+      *"Əvvəlcə bütün `X` və `y` arasında korrelyasiyaya baxıb ən yaxşı 20 sütunu seçdim, sonra train/test böldüm."* — Bu da leakage-dir, çünki sütunlar seçilərkən test dəstinin etiketlərindən ($y_{test}$) istifadə olundu.
+
+      **3. Zaman pəncərəsi olmadan aqreqasiya (`GROUP BY user_id`)**
+      Müştərinin bütün tarixçəsi üzrə `avg_order_value` hesablayıb keçən ilki sifarişin sətirinə yazmaq gələcək sifarişlərin məbləğini keçmişə sızdırır. Aqreqasiyalar həmişə `WHERE order_date < t_0` şərti ilə hesablanmalıdır.
+
+      **Debugging ipucu:** Modeli öyrədəndən sonra **Feature Importance** (əlamətlərin əhəmiyyəti) qrafikinə bax. Əgər tək bir sütun digər bütün sütunlardan 10 dəfə güclüdürsə (məsələn, `account_status` və ya `last_payment_id`), dərhal həmin sütunun necə və nə vaxt yarandığını araşdır — 95% ehtimalla target leakage tapacaqsan.
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Point-in-time correctness vs Mühəndislik mürəkkəbliyi:** Tarixi bazada hər bir $t_0$ anı üçün cədvəlin həmin tarixdə necə göründüyünü bərpa etmək ("time-travel queries" və ya Feature Store) SQL cəhətdən çətin və bahalıdır. Amma bunu etməmək modeli production-da yararsız edir.
+      - **Test dəstində görünməyən kateqoriyalar (`handle_unknown`):** Yalnız train üzərində `fit` etdiyimiz üçün test dəstində və ya production-da yeni bir şəhər adı və ya kateqoriya çıxa bilər. Buna görə `OneHotEncoder(handle_unknown="ignore")` kimi qoruyucu müqavilələr vacibdir.
+      - **Pipeline daxilində hesablama xərci:** $5$-fold cross-validation zamanı `Pipeline` içindəki ağır preprocessing (məsələn, TF-IDF və ya böyük SVD) 1 dəfə yox, 5 dəfə `fit` olunur. Bu daha yavaşdır, amma dürüst qiymətləndirmə üçün zəruri qiymətdir.
+mastery_criteria:
+  - Verilmiş kod və ya cədvəl təsvirində preprocessing, target və group/time leakage hallarını dəqiq göstərə bilirsən
+  - "`fit` və `transform` mərhələlərini ayıraraq test statistikasının train-ə sızmadığı kodu yaza bilirsən"
+  - Modelin şübhəli dərəcədə yüksək metrik göstərdiyi halda leakage diaqnostikası addımlarını (feature importance, timestamp yoxlaması, group split) tətbiq edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mldlk-target-leak
+      type: mcq
+      title: Hansı sütun Target Leakage-dir?
+      prompt: "Kredit müraciəti anında ($t_0$) müştərinin krediti qaytarıb-qaytarmayacağını ($y \\in \\{0, 1\\}$) proqnozlaşdırırsan. Aşağıdakı sütunlardan hansı **Target Leakage** yaradır?"
+      skills: [ml-data-leakage]
+      category: data
+      options:
+        - id: a
+          text: Müştərinin müraciət anındakı rəsmi aylıq gəliri (`monthly_income`)
+          feedback: Bu məlumat müraciət anında ($t_0$) məlumdur və qanuni əlamətdir.
+        - id: b
+          text: Müştərinin əvvəlki bağlanmış kreditlərindəki gecikmə sayı (`past_delinquencies`)
+          feedback: Keçmiş tarixçə $t_0$-dan əvvəl baş verib, istifadə oluna bilər.
+        - id: c
+          text: Cari kredit üzrə məhkəmə icraçısına göndərilmə tarixi (`sent_to_collections_date`)
+          feedback: Doğru! Bu sütun yalnız müştəri krediti qaytarmadıqdan SONRA yaranır — yəni gələcəkdəki hədəfin birbaşa özüdür.
+      answer: c
+      explanation: Cari kredit üzrə icra tarixi müraciət anında mövcud ola bilməz; onu modelə vermək cavabı əvvəlcədən deməkdir.
+    - id: q-mldlk-scaler-fit
+      type: mcq
+      title: StandardScaler harada fit olunmalıdır?
+      prompt: "`X_train`, `X_val` və `X_test` dəstlərinin üçünü də standartlaşdırmaq üçün düzgün ardıcıllıq hansıdır?"
+      skills: [ml-data-leakage, ml-data-splitting]
+      category: concept
+      options:
+        - id: a
+          text: "`scaler.fit(X_train)`, sonra `scaler.transform(X_train)`, `scaler.transform(X_val)`, `scaler.transform(X_test)`"
+          feedback: Doğru! Statistikalar yalnız train-dən öyrənilir və bütün dəstlərə eyni şkala tətbiq edilir.
+        - id: b
+          text: "`scaler.fit_transform(X_train)`, `scaler.fit_transform(X_val)`, `scaler.fit_transform(X_test)`"
+          feedback: Səhv! Hər dəsti öz ortalamasına görə ayrı fit etsən, eyni rəqəm train və test-də fərqli məna daşıyacaq (və tək sətirlik production sorğusunda std=0 olacaq!).
+        - id: c
+          text: Split-dən əvvəl `scaler.fit_transform(X_all)`, sonra `train_test_split`"
+          feedback: Səhv! Bu zaman validation və test dəstlərinin statistikası train-ə sızır (preprocessing leakage).
+      answer: a
+      explanation: "`fit` yalnız və yalnız `X_train` üzərində çağırılır; `X_val`, `X_test` və gələcək production sorğuları həmin sabit parametrlərlə `transform` edilir."
+    - id: q-mldlk-group-leakage
+      type: mcq
+      title: Tibbi şəkillərdə Group Leakage
+      prompt: "500 pasiyentin hər birindən 10 ədəd dəri xalı şəkli çəkilib (cəmi 5,000 şəkil). Melanoma təsnifatı üçün adi random `train_test_split` edildikdə nə baş verir?"
+      skills: [ml-data-leakage, ml-data-splitting]
+      category: data
+      options:
+        - id: a
+          text: Heç bir problem olmur, 5,000 şəkil müstəqildir
+          feedback: Eyni pasiyentin şəkilləri müstəqil deyil (dəri rəngi, işıqlandırma, kamera, hətta eyni xalın fərqli bucağı paylaşılır).
+        - id: b
+          text: Eyni pasiyentin şəkilləri həm train, həm də test dəstinə düşür (Group Leakage) və test nəticəsi yeni pasiyentlər üçün həddindən artıq optimist çıxır
+          feedback: Doğru! Pasiyent ID-sinə görə `GroupShuffleSplit` və ya `GroupKFold` istifadə edilməlidir.
+        - id: c
+          text: Model underfitting edir və train xətası yüksək qalır
+          feedback: Əksinə, model pasiyenti əzbərləyib test-də süni yüksək nəticə göstərir.
+      answer: b
+      explanation: Müşahidələr qrup (pasiyent, istifadəçi, cihaz) daxilində asılıdırsa, bölgü sətir səviyyəsində yox, qrup (`patient_id`) səviyyəsində aparılmalıdır.
+    - id: q-mldlk-multi-spot
+      type: multi
+      title: Hansı hallarda Data Leakage var?
+      prompt: Aşağıdakı təcrübələrdən hansılar **Data Leakage** yaradır? Hamısını seç.
+      skills: [ml-data-leakage]
+      category: debug
+      options:
+        - id: a
+          text: "`train_test_split`-dən əvvəl bütün datada boşluqları (`NaN`) sütunun ümumi medianı ilə doldurmaq"
+          feedback: Bəli — median hesabında test dəstinin dəyərləri iştirak edir.
+        - id: b
+          text: "`scikit-learn Pipeline` içində `SimpleImputer` və `RandomForest` qoyub `cross_val_score(pipe, X_train, y_train)` çağırmaq"
+          feedback: Xeyr — bu, leakage-in qarşısını alan düzgün mühəndislik praktikasıdır.
+        - id: c
+          text: Sinif disbalansını aradan qaldırmaq üçün split-dən əvvəl bütün data üzərində SMOTE / dublikat artırma etmək
+          feedback: Bəli — eyni və ya qonşu sintetik nümunələr həm train, həm də test-ə düşür.
+        - id: d
+          text: E-ticarət sifarişinin çatdırılma müddətini proqnozlaşdırarkən kuryerin çatdıqdan sonra qeyd etdiyi `actual_dropoff_hour` sütununu əlamət kimi vermək
+          feedback: Bəli — bu, proqnoz anında məlum olmayan target leakage-dir.
+      answers: [a, c, d]
+      explanation: Split-dən əvvəl edilən hər hansı qlobal statistika/oversampling və proqnoz anından sonra yaranan hər hansı sütun data leakage-dir.
+exercises:
+  - id: ex-mldlk-fit-apply-standardizer
+    type: code
+    title: Leakage-siz Standardizer (fit və apply) yaz
+    prompt: |
+      Test datasının statistikasının training-ə sızmaması üçün standartlaşdırmanı iki ayrı pure-Python funksiyası kimi yaz:
+
+      1. `fit_standardizer(train_values: list[float]) -> tuple[float, float]`:
+         - Yalnız `train_values` əsasında `(mean, std)` hesablayıb qaytarır:
+           $\mu = \frac{1}{n}\sum x_i$ və $\sigma = \sqrt{\frac{1}{n}\sum (x_i - \mu)^2}$ (populyasiya std, yəni $n$-ə bölmə).
+         - Əgər `train_values` boşdursa, `ValueError` qaldır.
+
+      2. `apply_standardizer(values: list[float], mean: float, std: float) -> list[float]`:
+         - Verilmiş `mean` və `std` ilə hər bir $x \in \text{values}$ üçün $(x - \text{mean}) / \text{std}$ qaytarır (**yeni** list, input dəyişmir).
+         - Əgər `std == 0` olarsa, sıfıra bölməməli və eyni uzunluqda `[0.0, ...]` qaytarmalıdır.
+    skills: [ml-data-leakage]
+    category: python
+    difficulty: 1
+    hints:
+      - "`math.sqrt(sum((x - mean) ** 2 for x in train_values) / len(train_values))` ilə `std` hesabla."
+      - "`apply_standardizer` daxilində `values`-un öz ortalamasını HESABLAMA! Parametr kimi gələn `mean` və `std`-dən istifadə et."
+    starter_code: |
+      import math
+
+
+      def fit_standardizer(train_values: list[float]) -> tuple[float, float]:
+          # TODO: yalnız train_values üzərindən (mean, std) hesabla
+          pass
+
+
+      def apply_standardizer(
+          values: list[float], mean: float, std: float
+      ) -> list[float]:
+          # TODO: hazır mean və std ilə yeni list qaytar
+          pass
+    tests:
+      - name: Train üzərində fit və həm train, həm test üzərində apply
+        code: |
+          mu, sigma = fit_standardizer([2.0, 4.0, 6.0])
+          assert abs(mu - 4.0) < 1e-9, f"mean 4.0 olmalı idi, alınan {mu}"
+          assert abs(sigma - math.sqrt(8.0 / 3.0)) < 1e-9, f"std səhvdir: {sigma}"
+
+          tr_scaled = apply_standardizer([2.0, 4.0, 6.0], mu, sigma)
+          assert abs(tr_scaled[1] - 0.0) < 1e-9
+          assert abs(tr_scaled[0] + tr_scaled[2]) < 1e-9
+
+          # Test-dəki böyük outlier train-in mu və sigma-sını dəyişmir!
+          te_scaled = apply_standardizer([100.0], mu, sigma)
+          expected_te = (100.0 - 4.0) / math.sqrt(8.0 / 3.0)
+          assert abs(te_scaled[0] - expected_te) < 1e-6
+      - name: std == 0 olduqda sıfıra bölmə baş vermir
+        code: |
+          mu, sigma = fit_standardizer([5.0, 5.0, 5.0])
+          assert mu == 5.0 and sigma == 0.0
+          assert apply_standardizer([5.0, 10.0], mu, sigma) == [0.0, 0.0]
+      - name: Boş train_values üçün ValueError və input mutasiya olunmur
+        code: |
+          try:
+              fit_standardizer([])
+              assert False, "Boş train_values üçün ValueError qaldırılmalı idi"
+          except ValueError:
+              pass
+          raw = [1.0, 2.0]
+          out = apply_standardizer(raw, 1.5, 0.5)
+          assert raw == [1.0, 2.0] and out is not raw
+    solution: |
+      import math
+
+
+      def fit_standardizer(train_values: list[float]) -> tuple[float, float]:
+          if not train_values:
+              raise ValueError("train_values cannot be empty")
+          n = len(train_values)
+          mean = sum(train_values) / n
+          variance = sum((x - mean) ** 2 for x in train_values) / n
+          return mean, math.sqrt(variance)
+
+
+      def apply_standardizer(
+          values: list[float], mean: float, std: float
+      ) -> list[float]:
+          if std == 0:
+              return [0.0 for _ in values]
+          return [(x - mean) / std for x in values]
+    explanation: |
+      `fit_standardizer` və `apply_standardizer` funksiyalarının ayrılması `scikit-learn`-dəki `fit()` və `transform()` dizaynının nüvəsidir: test və production datası heç vaxt `fit_standardizer`-ə daxil olmur.
+  - id: ex-mldlk-diagnose-code
+    type: multi
+    title: "Debug: Bu ML pipeline-dakı 3 leakage səhvini tap"
+    prompt: |
+      Bir namizəd texniki müsahibədə aşağıdakı kodu təqdim edib:
+
+      ```python
+      # Sətir 1: Bütün datanı standartlaşdır
+      X_scaled = scaler.fit_transform(df[["age", "income", "refund_issued_amount"]])
+      y = df["churned"]
+
+      # Sətir 2: Sinif balansını düzəltmək üçün azlıq sinfini kopyala
+      X_bal, y_bal = oversample_minority(X_scaled, y)
+
+      # Sətir 3: Train və Test-ə böl (müştərilərin aylıq sətirləri var, user_id nəzərə alınmır)
+      X_train, X_test, y_train, y_test = train_test_split(X_bal, y_bal, test_size=0.2)
+      ```
+
+      Bu kodda baş verən **bütün** leakage növlərini seç:
+    skills: [ml-data-leakage, ml-data-splitting]
+    category: debug
+    difficulty: 2
+    hints:
+      - "Hər sətrin `train_test_split`-dən ƏVVƏL yoxsa SONRA icra olunduğuna diqqət et."
+      - "Həm `scaler.fit_transform`, həm də `oversample_minority` split-dən əvvəl çağırıldıqda test datası ilə train datası qarışır. Bundan əlavə `refund_issued_amount` sütununun nə vaxt yarandığını düşün."
+    options:
+      - id: a
+        text: "Preprocessing leakage: `scaler.fit_transform` train/test bölgüsündən əvvəl bütün data üzərində çağırılıb"
+        feedback: Doğru! Test dəstinin mean və std-si train-ə sızıb.
+      - id: b
+        text: "Target leakage: `refund_issued_amount` müştəri abunəni ləğv etdikdən sonra geri qaytarılan məbləğdir"
+        feedback: Doğru! Bu sütun hədəf hadisənin nəticəsidir.
+      - id: c
+        text: "Duplicate/Oversampling leakage: `oversample_minority` split-dən əvvəl çağırıldığı üçün kopyalanmış eyni sətirlər həm train, həm də test-ə düşür"
+        feedback: Doğru! Oversampling yalnız `X_train, y_train` üzərində edilməlidir.
+      - id: d
+        text: "`test_size=0.2` seçilməsi özü-özlüyündə data leakage yaradır"
+        feedback: Xeyr, 20% test ölçüsü standartdır; problem split-dən əvvəl edilən əməliyyatlarda və `user_id` qruplaşmasının olmamasındadır.
+    answers: [a, b, c]
+    explanation: Bu 5 sətirlik kodda həm preprocessing leakage, həm target leakage, həm də split-öncəsi oversampling leakage eyni vaxtda baş verib — test dəqiqliyi 99% çıxacaq, amma model real həyatda işləməyəcək.
+references:
+  - title: scikit-learn — Common pitfalls and recommended practices (Data leakage)
+    url: https://scikit-learn.org/stable/common_pitfalls.html#data-leakage
+    note: Rəsmi scikit-learn sənədlərində data leakage nümunələri və Pipeline həlli
+  - title: Kaufman et al. — Leakage in Data Mining (Formulation, Detection, and Avoidance)
+    url: https://dl.acm.org/doi/10.1145/2382577.2382579
+    note: Data leakage üzrə klassik elmi məqalə

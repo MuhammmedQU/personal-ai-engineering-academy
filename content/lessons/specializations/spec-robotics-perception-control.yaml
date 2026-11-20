@@ -1,0 +1,429 @@
+id: spec-robotics-perception-control
+track: specializations
+module: robotics-autonomy
+title: "Robototexnika və Avtonom Sistemlər — Qavrayış-İdarəetmə Dövrəsi, Sensor Filtrasiyası və PID"
+summary: "Mobil robotlarda və avtonom dronlarda Sense → Estimate → Plan → Actuate qapalı dövrəsini, küylü sensor ölçüləri üçün EMA filtrasiyasını, hədəf itdikdə failsafe mexanizmini və diskret PID kontroller riyaziyyatını öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [math-derivatives-gradient-descent, spec-cnn-computer-vision]
+next: null
+skills: [spec-robotics, derivatives-chain-rule]
+objectives:
+  - "Avtonom sistemlərdə Sense → Estimate → Plan → Actuate qapalı idarəetmə dövrəsinin (closed-loop control) hər mərhələsinin rolunu izah etmək"
+  - "Küylü sensor ölçülərini Exponential Moving Average (EMA / 1D Kalman) ilə hamarlamaq və kamera kadrı itdikdə coasting/failsafe timeout tətbiq etmək"
+  - "Diskret PID kontrollerin P, I və D hədlərini riyazi və proqramatik olaraq hesablamaq"
+  - "Mühərrik doyma məhdudiyyətini (actuator saturation clamping) və integral windup problemini həll etmək"
+why_it_matters: |
+  Notebook-da işləyən Computer Vision modeli şəkildəki hədəfin koordinatını tapmaqla işini bitirir. Amma **avtonom dron** və ya **mobil robot** üçün həmin koordinat sadəcə başlanğıcdır: fiziki dünyada ətalət (inertia), külək, təkər sürüşməsi, küylü sensorlar və gecikən kamera kadrları var.
+
+  Əgər kameradan gələn xam (filtrasiya olunmamış) piksel xətasını birbaşa mühərrikə ötürsən:
+  - Sensor küyü mühərrikləri yüksək tezliklə titrədəcək və qızdıracaq,
+  - Hədəf 1 saniyəlik ağacın arxasında gizləndikdə robot nəzarətsiz qalacaq (failsafe yoxdursa qəza edəcək),
+  - Yalnız mütənasib ($P$) idarəetmə ilə dron ya hədəfin ətrafında sonsuz rəqs edəcək (overshoot/oscillation), ya da küləyin təsirindən hədəfə heç vaxt tam çatmayacaq (steady-state error).
+
+  Bu dərsdə sən AI qavrayışını (perception) fiziki hərəkətə (actuation) təhlükəsiz bağlayan idarəetmə mühəndisliyini öyrənəcəksən.
+terms:
+  - term: Closed-Loop Control (Qapalı dövrəli idarəetmə)
+    definition: "Sistemin çıxış vəziyyətinin sensorlarla davamlı ölçülüb hədəflə (setpoint) müqayisə edildiyi və yaranan xətanın ($e_t$) idarəetmə əmrinə çevrildiyi əks-əlaqə (feedback) arxitekturası."
+  - term: Setpoint və Tracking Error
+    definition: "Setpoint ($r_t$) sistemin çatmaq istədiyi hədəf dəyərdir; Tracking Error ($e_t = r_t - \\hat{x}_t$) isə hədəflə cari qiymətləndirilmiş vəziyyət arasındakı fərqdir."
+  - term: Exponential Moving Average (EMA)
+    definition: "$\\hat{x}_t = \\alpha z_t + (1 - \\alpha)\\hat{x}_{t-1}$ düsturu ilə yeni sensor ölçüsünü keçmiş vəziyyətlə birləşdirərək yüksək tezlikli küyü süzən 1-ci tərtib rəqəmsal filtr."
+  - term: Coasting və Failsafe Timeout
+    definition: "Hədəf müvəqqəti itdikdə ($\\le K$ kadr) son məlum vəziyyətlə davam etmək (coasting), həddi aşdıqda ($> K$ kadr) isə robotu təhlükəsiz dayandırmaq və ya hover rejiminə keçirmək (failsafe)."
+  - term: PID Controller
+    definition: "İdarəetmə siqnalını cari xəta (Proportional), keçmiş xətaların yığımı (Integral) və xətanın dəyişmə sürətinin (Derivative) çəkili cəmi kimi hesablayan klassik kontroller."
+  - term: Actuator Saturation (İcraçı mexanizmin doyması)
+    definition: "Mühərrikin, servonun və ya sükanın fiziki həddi; kontrollerin hesabladığı əmr $[u_{\\min}, u_{\\max}]$ aralığına sıxılmalıdır (clamping)."
+  - term: Integral Windup
+    definition: "İcraçı mexanizm maksimum həddə dirəndiyi halda inteqral həddinin böyüməyə davam etməsi və hədəfə çatdıqda belə sistemin gec reaksiya verib hədəfi aşması (overshoot)."
+sections:
+  - id: perception-control-loop
+    kind: explanation
+    title: "Sense → Estimate → Plan → Actuate Dövrəsi, Filtrasiya və PID Riyaziyyatı"
+    body: |
+      ### 1. Avtonom sistemin 4 pilləli qapalı dövrəsi
+      Avtonom robot hər $\Delta t$ saniyədə (məsələn, $50\text{ Hz} \Rightarrow \Delta t = 0.02\text{ s}$) dörd addımı icra edir:
+      1. **Sense (Qavrayış):** Kamera, LiDAR, IMU və ya təkər enkoderindən xam ölçü ($z_t$) oxunur (məsələn, CNN detektoru hədəfin mərkəz koordinatını qaytarır).
+      2. **Estimate (Qiymətləndirmə):** Xam ölçü küylüdür və bəzən kadr düşür (drop). Filtr (məsələn, EMA və ya Kalman filtri) həqiqi vəziyyəti ($\hat{x}_t$) təxmin edir.
+      3. **Plan (Planlama):** Cari tapşırıq üçün hədəf nöqtə (**setpoint**, $r_t$) müəyyən edilir və əgər hədəf uzun müddət itibsə, **failsafe** rejimi seçilir.
+      4. **Actuate (İcra / İdarəetmə):** Kontroller (məsələn, PID) xətanı ($e_t = r_t - \hat{x}_t$) mühərrik əmrinə ($u_t$) çevirir və fiziki hədlərə sıxır (clamping).
+
+      ### 2. Küylü Sensorlar və İtmiş Kadrlar: EMA və Failsafe
+      Kamera detektoru hər kadrda bir neçə piksel titrəyir. **Exponential Moving Average (EMA)** (sabit qazanclı 1D Kalman filtrinin xüsusi halı) vəziyyəti belə yeniləyir:
+
+      $$\hat{x}_t = \alpha z_t + (1 - \alpha)\hat{x}_{t-1}, \qquad \alpha \in (0, 1]$$
+
+      - $\alpha \to 1$: yeni ölçüyə tam inanır (sürətli reaksiya, amma küylü).
+      - $\alpha \to 0$: keçmiş tarixçəyə inanır (hamar çıxış, amma gecikmə / lag yaradır).
+
+      **Bəs kamera hədəfi bu kadrda görməsə (`z_t = None`)?**
+      - `lost_frames` sayğacını $1$ artırırıq.
+      - Əgər `lost_frames <= K` (məsələn, $K = 5$ kadr, yəni $0.1$ san) olarsa, **coasting** edirik: son təxmini saxlayırıq ($\hat{x}_t = \hat{x}_{t-1}$).
+      - Əgər `lost_frames > K` olarsa, **Failsafe Timeout** işə düşür: mühərrik əmri dərhal $u_t = 0$ (stop / hover) edilir və inteqral sıfırlanır.
+
+      ### 3. Diskret PID Kontroller Riyaziyyatı
+      Hədəf $r_t$ ilə cari vəziyyət $\hat{x}_t$ arasındakı xəta $e_t = r_t - \hat{x}_t$ olsun. Diskret zamanda ($\Delta t$ addımı ilə) **PID kontrollerin** çıxışı:
+
+      $$u_t = K_p e_t + K_i \sum_{k=0}^t e_k \Delta t + K_d \frac{e_t - e_{t-1}}{\Delta t}$$
+
+      Simvollar:
+      - $e_t = r_t - \hat{x}_t$ — cari zaman addımındakı izləmə xətası (tracking error),
+      - $e_{t-1}$ — əvvəlki addımdakı xəta,
+      - $\Delta t$ — iki yenilənmə arasındakı zaman fərqi ($\Delta t > 0$),
+      - $K_p \ge 0$ — **Proportional** əmsal: cari xətaya mütənasib əmr verir ("indi nə qədər uzağam?"),
+      - $K_i \ge 0$ — **Integral** əmsal: zamanla yığılan xətanı ($I_t = I_{t-1} + e_t \Delta t$) aradan qaldırır ("sabit külək və ya sürtünmə ucbatından hədəfə çata bilmirəmmi?"),
+      - $K_d \ge 0$ — **Derivative** əmsal: xətanın dəyişmə sürətinə ($\frac{e_t - e_{t-1}}{\Delta t}$) reaksiya verərək əyləc rolunu oynayır və rəqsləri (overshoot) söndürür ("hədəfə çox sürətlə yaxınlaşırammı?").
+
+      Nəhayət, fiziki mühərrikləri qorumaq üçün çıxış $[-u_{\max}, u_{\max}]$ aralığına sıxılır (**actuator saturation clamping**):
+
+      $$u_{\text{clamped}} = \min\!\big(u_{\max},\; \max(-u_{\max},\; u_t)\big)$$
+  - id: highway-lane-analogy
+    kind: analogy
+    title: "Mental model: Magistral yolda avtomobili zolağın mərkəzində saxlamaq"
+    body: |
+      Avtomobil sürərkən zolağın tam ortasında qalmağa çalışdığını təsəvvür et:
+
+      - **P (Proportional — İndiki vəziyyət):** Maşın mərkəzdən $1\text{ metr}$ sağa çıxıbsa, sükanı sola çevirirsən. Nə qədər çox kənara çıxıbsa, bir o qədər çox çevirirsən. Amma yalnız buna baxsan, mərkəzə çatanda maşının burnu hələ də sola baxdığı üçün bu dəfə sol zolağa keçəcəksən (zikzak / rəqs).
+      - **D (Derivative — Yaxınlaşma sürəti / Amortizator):** Görürsən ki, maşın mərkəz xəttinə **çox sürətlə** yaxınlaşır. Hələ mərkəzə çatmamış sükanı əks istiqamətdə düzəltməyə başlayırsan ki, mərkəz xəttini keçib getməyəsən (damping / əyləcləmə).
+      - **I (Integral — Keçmişin yaddaşı):** Yolda güclü yan külək əsir. Sən sükanı düz tutsan da, külək maşını həmişə $20\text{ sm}$ sağa sıxır. Bir neçə saniyə bu kiçik xətanın davam etdiyini görüb, küləyi kompensasiya etmək üçün sükanı daimi olaraq bir az sola meyilli saxlayırsan.
+      - **Failsafe:** Birdən güclü duman düşür və yol xətlərini $3$ saniyədən çox görə bilmirsən. Gözüyumulu qaza basmaq əvəzinə, qəza işıqlarını yandırıb sürəti təhlükəsiz şəkildə sıfıra endirirsən.
+  - id: closed-loop-diagram
+    kind: diagram
+    title: "Qapalı İdarəetmə Dövrəsi (Sense → Estimate → Plan → Actuate)"
+    body: |
+      ```mermaid
+      flowchart LR
+        R["Setpoint (r_t)"] --> E["Xəta: e_t = r_t - x_hat_t"]
+        E --> PID["PID Kontroller (P + I + D)"]
+        PID --> CLAMP["Clamping [-limit, +limit]"]
+        CLAMP --> PLANT["Fiziki Robot / Mühərriklər"]
+        PLANT --> SENS["Sensorlar / Kamera (z_t)"]
+        SENS --> FILT["EMA Filtr + Failsafe (x_hat_t)"]
+        FILT --> E
+      ```
+
+      Bu sxemdə hər hansı həlqənin qırılması (məsələn, sensorun gecikməsi və ya clamping olmaması) bütün qapalı dövrənin dayanıqlığını (stability) pozur.
+  - id: worked-pid-table
+    kind: worked_example
+    title: "Addım-addım cədvəllə PID hesablanması"
+    body: |
+      Dronun yüksəkliyini $r = 10.0\text{ m}$ hədəfinə çatdırmaq istəyirik.
+      **Parametrlər:** $\Delta t = 0.5\text{ s}$, $K_p = 2.0$, $K_i = 0.5$, $K_d = 0.5$, mühərrik limiti $u_{\max} = 20.0$.
+      Başlanğıcda ($t=0$-dan əvvəl): `prev_error = 4.0`, `integral = 0.0`.
+
+      **Addım $t = 1$:** Cari ölçü $\hat{x}_1 = 6.0\text{ m}$.
+      1. Xəta: $e_1 = 10.0 - 6.0 = 4.0$
+      2. Yeni inteqral: $I_1 = 0.0 + 4.0 \times 0.5 = 2.0$
+      3. Törəmə: $D_1 = \frac{4.0 - 4.0}{0.5} = 0.0$
+      4. Xam əmr: $u_1 = (2.0 \times 4.0) + (0.5 \times 2.0) + (0.5 \times 0.0) = 8.0 + 1.0 + 0.0 = 9.0$
+      5. Clamping ($[-20, 20]$): $u_{\text{clamped}, 1} = 9.0$
+
+      **Addım $t = 2$:** Dron qalxır, yeni ölçü $\hat{x}_2 = 9.0\text{ m}$.
+      1. Xəta: $e_2 = 10.0 - 9.0 = 1.0$
+      2. Yeni inteqral: $I_2 = 2.0 + 1.0 \times 0.5 = 2.5$
+      3. Törəmə: $D_2 = \frac{1.0 - 4.0}{0.5} = -6.0$ *(xəta sürətlə azaldığı üçün törəmə mənfidir — tormozlayır!)*
+      4. Xam əmr: $u_2 = (2.0 \times 1.0) + (0.5 \times 2.5) + (0.5 \times (-6.0)) = 2.0 + 1.25 - 3.0 = 0.25$
+      5. Clamping ($[-20, 20]$): $u_{\text{clamped}, 2} = 0.25$
+
+      | Addım $t$ | Ölçü $\hat{x}_t$ | Xəta $e_t$ | İnteqral $I_t$ | Törəmə $\frac{\Delta e}{\Delta t}$ | $P = K_p e_t$ | $I = K_i I_t$ | $D = K_d \frac{\Delta e}{\Delta t}$ | Yekun $u_t$ |
+      |---|---|---|---|---|---|---|---|---|
+      | 1 | $6.0$ | $4.0$ | $2.0$ | $0.0$ | $8.0$ | $1.00$ | $0.0$ | $9.00$ |
+      | 2 | $9.0$ | $1.0$ | $2.5$ | $-6.0$ | $2.0$ | $1.25$ | $-3.0$ | $0.25$ |
+
+      Diqqət et: $t=2$ addımında dron hədəfə sürətlə yaxınlaşdığı üçün $D$ həddi $-3.0$ verərək mühərrik gücünü $3.25$-dən $0.25$-ə endirir və dronun $10\text{ m}$ hədəfini keçib getməsinin (overshoot) qarşısını alır.
+  - id: code-pid-and-tracker
+    kind: code
+    title: "Python ilə Diskret PID Addımı və Failsafe Sensor İzləyicisi"
+    body: |
+      ```python
+      def pid_control_step(
+          setpoint: float,
+          measurement: float,
+          prev_error: float,
+          integral: float,
+          dt: float,
+          kp: float,
+          ki: float,
+          kd: float,
+          limit: float,
+      ) -> tuple[float, float, float]:
+          """Execute one discrete PID step with output saturation clamping.
+
+          Returns:
+              (clamped_command, error, new_integral)
+          """
+          if dt <= 0.0:
+              raise ValueError("Time step dt must be strictly positive.")
+          if limit <= 0.0:
+              raise ValueError("Actuator limit must be strictly positive.")
+
+          error = setpoint - measurement
+          new_integral = integral + error * dt
+          derivative = (error - prev_error) / dt
+
+          raw_u = kp * error + ki * new_integral + kd * derivative
+          clamped_u = max(-limit, min(limit, raw_u))
+          return clamped_u, error, new_integral
+
+
+      def ema_filter_ with_failsafe(
+          measurement: float | None,
+          prev_estimate: float,
+          lost_frames: int,
+          alpha: float = 0.4,
+          max_lost_frames: int = 5,
+      ) -> tuple[float, int, bool]:
+          """Update state estimate using EMA or trigger failsafe if target lost too long.
+
+          Returns:
+              (estimate, updated_lost_frames, is_failsafe)
+          """
+          if measurement is None:
+              lost_frames += 1
+              is_failsafe = lost_frames > max_lost_frames
+              return prev_estimate, lost_frames, is_failsafe
+
+          estimate = alpha * measurement + (1.0 - alpha) * prev_estimate
+          return estimate, 0, False
+
+
+      u, err, integ = pid_control_step(
+          setpoint=10.0, measurement=9.0, prev_error=4.0, integral=2.0,
+          dt=0.5, kp=2.0, ki=0.5, kd=0.5, limit=20.0
+      )
+      print(f"u={u}, error={err}, integral={integ}")  # u=0.25, error=1.0, integral=2.5
+      ```
+
+      *(Qeyd: yuxarıdakı nümunədə funksiya adı `ema_filter_with_failsafe` olaraq nəzərdə tutulub).*
+      Burada `pid_control_step` funksiyası **pure function** kimi dizayn edilib: daxili qlobal vəziyyət saxlamır, `prev_error` və `integral` dəyərlərini qəbul edib yenilənmiş `(clamped_command, error, new_integral)` üçlüyünü qaytarır. Bu dizayn həm simulyasiyada deterministik unit test yazmağı, həm də failsafe baş verdikdə inteqralı kənardan sıfırlamağı çox asanlaşdırır.
+  - id: common-robotics-mistakes
+    kind: mistakes
+    title: "Robototexnika və İdarəetmədə ən çox edilən səhvlər"
+    body: |
+      **1. Xətanın işarəsini tərs yazmaq (`measurement - setpoint`)**
+      Əgər $e_t = \hat{x}_t - r_t$ yazsan və müsbət qazanc ($K_p > 0$) versən, mənfi əks-əlaqə (**negative feedback**) əvəzinə müsbət əks-əlaqə (**positive feedback**) yaranır: dron hədəfdən aşağıdadırsa, mühərriki artırmaq əvəzinə daha da azaldır və yerə çırpılır! Standart konvensiya həmişə `error = setpoint - measurement`-dir.
+
+      **2. Zaman addımını ($\Delta t$) nəzərə almamaq və ya sabit fərz etmək**
+      ```python
+      # YALNIŞ: dt nəzərə alınmır
+      integral += error
+      derivative = error - prev_error
+      ```
+      Əgər kamera FPS-i GPU yükündən asılı olaraq $30\text{ FPS}$-dən $15\text{ FPS}$-ə düşsə ($\Delta t$ iki dəfə böyüsə), $\Delta t$-siz yazılmış kontrollerin davranışı tamamilə pozulur. Bundan əlavə, $\Delta t \le 0$ halı sıfıra bölmə və ya mənfi zaman yaratdığı üçün mütləq yoxlanmalıdır.
+
+      **3. Xam (filtrasiya olunmamış) sensor üzərində yüksək $K_d$ işlətmək (Derivative Kick / Noise Amplification)**
+      Törəmə həddi $\frac{e_t - e_{t-1}}{\Delta t}$ kiçik $\Delta t$-yə bölündüyü üçün yüksək tezlikli sensor küyünü $1/\Delta t$ dəfə böyüdür. Məsələn, $\Delta t = 0.01\text{ s}$ olduqda sadəcə $0.2$ piksellik təsadüfi titrəmə $\frac{0.2}{0.01} = 20$ vahidlik törəmə sıçrayışı yaradır! Ölçünü əvvəlcə EMA/Kalman ilə hamarlamaq şərtdir.
+
+      **4. İtmiş kadrlarda son əmri sonsuza qədər təkrarlamaq (Failsafe-in olmaması)**
+      Kamera hədəfi itirdikdə son hesablanmış mühərrik əmrini (`u = +15`) saxlamaq robotun kor-koranə tam sürətlə divara dəyməsi ilə nəticələnir. Maksimum $K$ itmiş kadrdan sonra failsafe (dayanma/hover) məcburidir.
+  - id: robotics-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: Reaksiya sürəti, Küy süzülməsi və Anti-Windup"
+    body: |
+      - **EMA $\alpha$ seçimi (Küy vs Gecikmə):** Kiçik $\alpha$ (məsələn, $0.1$) sensor küyünü mükəmməl təmizləyir, lakin faz gecikməsi (phase lag) yaradır. Qapalı dövrədə böyük gecikmə PID-nin keçmiş vəziyyətə reaksiya verməsinə və sistemin dayanıqlığını itirib rəqs etməsinə səbəb olur.
+      - **Aqressiv $K_p$ vs Dayanıqlılıq ($K_d$):** Yüksək $K_p$ sistemi sürətləndirir (rise time azalır), lakin overshoot və rəqs yaradır. $K_d$ rəqsləri söndürür, amma sensor küyünə həssasdır. Real robotlarda çox vaxt kiçik $K_i$ və ya yalnız **PD kontroller** (mövqe izləmədə) istifadə olunur.
+      - **Integral Windup və Anti-Windup:** Robot ağır maneəyə dirənəndə mühərrik maksimum gücdə ($u = u_{\max}$) işləsə də, xəta sıfırlanmır və inteqral nəhəng rəqəmə çatır. Maneə götürüləndə həmin yığılmış inteqral robotu təhlükəli şəkildə irəli atır. Production sistemlərdə çıxış doyma həddinə (`abs(raw_u) > limit`) çatdıqda inteqralın böyüməsi dondurulur (conditional integration / clamping anti-windup).
+      - **PID vs MPC (Model Predictive Control):** PID sadədir, hesablama xərci sıfıra yaxındır və mikrokontrollerdə $1\text{ kHz}$-də işləyir. Avtonom avtomobillərdə yüksək sürətli trayektoriya planlamasında isə gələcək $N$ addımı fizika modeli ilə optimallaşdıran MPC üstünlük təşkil edir.
+mastery_criteria:
+  - "Qapalı idarəetmə dövrəsində xətanın, inteqralın, törəmənin və doyma məhdudiyyətinin (clamping) hesablanmasını səhvsiz proqramlaşdırır"
+  - "P, I və D əmsallarının sistemin davranışına (rise time, overshoot, steady-state error, sensor küyünə həssaslıq) təsirini dəqiq fərqləndirir"
+  - "Sensor kadrı düşdükdə EMA, coasting və failsafe timeout məntiqini dizayn edir"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-specrob-pid-terms
+      type: mcq
+      title: "PID hədlərinin fiziki rolu"
+      prompt: "Sabit yan külək əsdiyi üçün avtonom dron hədəf nöqtəsindən daim $15\\text{ sm}$ kənarda sabitləşir (steady-state error yaranır). Bu sabit xətanı aradan qaldırmaq üçün PID kontrollerin hansı həddi əsas rol oynayır?"
+      skills: [spec-robotics]
+      category: concept
+      options:
+        - id: a
+          text: "Integral (I) həddi — zamanla yığılan kiçik xətaları toplayaraq küləyin yaratdığı sabit sürüşməni kompensasiya edir"
+          feedback: "Doğrudur! Xəta sıfırdan fərqli qaldıqca inteqral həddi böyüyür və dronu hədəfə çatdırana qədər əlavə itələmə gücü yaradır."
+        - id: b
+          text: "Derivative (D) həddi — çünki sabit xətanın törəməsi çox böyük olur"
+          feedback: "Yanlışdır. Xəta sabit ($15\\text{ sm}$) qaldıqda $e_t - e_{t-1} = 0$ olur, yəni D həddinin çıxışı sıfırdır!"
+        - id: c
+          text: "Actuator clamping — limiti azaltmaqla sabit xəta yox olur"
+          feedback: "Yanlışdır. Clamping yalnız maksimum gücü məhdudlaşdırır."
+      answer: a
+      explanation: "Sabit xətada törəmə sıfır olur, P həddi isə küləklə tarazlaşdığı üçün çatmır. Yalnız Integral ($K_i \\sum e_k \\Delta t$) zaman keçdikcə artaraq steady-state xətanı sıfırlayır."
+    - id: q-specrob-ema-numeric
+      type: numeric
+      title: "EMA sensor filtrasiyası"
+      prompt: |
+        Dronun əvvəlki yüksəklik təxmini $\hat{x}_{t-1} = 10.0\text{ m}$-dir. Yeni sensor ölçüsü $z_t = 14.0\text{ m}$ gəlir.
+        Əgər EMA hamarlama əmsalı $\alpha = 0.25$ olarsa, yeni qiymətləndirilmiş yüksəklik $\hat{x}_t$ neçə metr olar?
+      skills: [spec-robotics]
+      category: math
+      answer: 11.0
+      tolerance: 0.01
+      hints:
+        - "EMA düsturu: x_hat_t = alpha * z_t + (1 - alpha) * x_hat_{t-1}"
+        - "0.25 * 14.0 + 0.75 * 10.0 ifadəsini hesabla."
+      explanation: "$\\hat{x}_t = 0.25 \\times 14.0 + (1 - 0.25) \\times 10.0 = 3.5 + 7.5 = 11.0\\text{ m}$."
+    - id: q-specrob-derivative-role
+      type: mcq
+      title: "Törəmə (Derivative) həddinin işarəsi"
+      prompt: "Robot hədəfə doğru sürətlə yaxınlaşır: əvvəlki addımda müsbət xəta $e_{t-1} = 5.0\\text{ m}$ idi, cari addımda isə $e_t = 2.0\\text{ m}$-ə düşdü. Bu anda Derivative ($D$) həddi idarəetmə əmrinə necə təsir edir?"
+      skills: [spec-robotics, derivatives-chain-rule]
+      category: math
+      options:
+        - id: a
+          text: "Xətanın dəyişməsi mənfi olduğu üçün ($e_t - e_{t-1} = -3.0$) D həddi mənfi olur və mühərrik əmrini azaldaraq əyləc (damping) rolunu oynayır"
+          feedback: "Doğrudur! Xəta hələ müsbət olsa da, sürətlə azaldığı üçün D həddi mənfi işarə ilə P həddinə əks çıxır və overshoot-un qarşısını alır."
+        - id: b
+          text: "Xəta müsbət olduğu üçün D həddi də müsbət olur və robotu daha da sürətləndirir"
+          feedback: "Yanlışdır. D həddi xətanın özünə yox, onun dəyişməsinə ($e_t - e_{t-1}$) baxır."
+        - id: c
+          text: "D həddi yalnız xəta mənfi olduqda işə düşür"
+          feedback: "Yanlışdır. D həddi xətanın dəyişdiyi hər bir addımda aktivdir."
+      answer: a
+      explanation: "$e_t - e_{t-1} = 2.0 - 5.0 = -3.0 < 0$. Buna görə $K_d \\frac{e_t - e_{t-1}}{\\Delta t}$ mənfi olur və robot hədəfə çatmazdan əvvəl sürəti yumşaldır."
+    - id: q-specrob-safety-practices
+      type: multi
+      title: "Real-zamanlı avtonom idarəetmə təhlükəsizliyi"
+      prompt: "Fiziki robot və ya dron üçün idarəetmə dövrəsi yazarkən aşağıdakılardan hansılar **məcburi təhlükəsizlik təcrübəsidir**? Hamısını seç."
+      skills: [spec-robotics]
+      category: production
+      options:
+        - id: a
+          text: "PID çıxışını icraçı mexanizmin fiziki hədlərinə (`[-limit, +limit]`) sıxmaq (actuator clamping)"
+          feedback: "Bəli, mühərrik sürücüsünə icazəli həddən artıq siqnal göndərmək həm təhlükəlidir, həm də qeyri-xətti pozuntular yaradır."
+        - id: b
+          text: "Kamera hədəfi ardıcıl $K$ kadrdan çox itirdikdə failsafe (stop / hover) rejiminə keçmək"
+          feedback: "Bəli, kor-koranə köhnə əmrlə hərəkətə davam etmək qəzaya səbəb olur."
+        - id: c
+          text: "Zaman addımı $\\Delta t \\le 0$ olduqda xətanı tutmaq və sıfıra bölmənin qarşısını almaq"
+          feedback: "Bəli, saat sinxronizasiyası və ya dublikat timestamp zamanı $\\Delta t = 0$ `ZeroDivisionError` və ya `inf` əmr yarada bilər."
+        - id: d
+          text: "Sensor küyünü azaltmaq üçün $\\Delta t$-ni həmişə $10\\text{ saniyə}$ götürmək"
+          feedback: "Xeyr! $10$ saniyəlik idarəetmə gecikməsi ilə heç bir dinamik robot və ya dron tarazlıqda qala bilməz."
+      answers: [a, b, c]
+      explanation: "Actuator saturation clamping, failsafe timeout və $\\Delta t > 0$ validasiyası hər bir avtonom idarəetmə proqramının təməl təhlükəsizlik müqaviləsidir."
+exercises:
+  - id: ex-specrob-pid-controller
+    type: code
+    title: "Diskret PID Kontroller addımını (pid_control_step) implementasiya et"
+    prompt: |
+      Avtonom robotun idarəetmə dövrəsi üçün `pid_control_step` funksiyasını yaz:
+
+      ```python
+      def pid_control_step(
+          setpoint: float,
+          measurement: float,
+          prev_error: float,
+          integral: float,
+          dt: float,
+          kp: float,
+          ki: float,
+          kd: float,
+          limit: float,
+      ) -> tuple[float, float, float]:
+      ```
+
+      **Müqavilə (Contract):**
+      1. Əgər `dt <= 0` və ya `limit <= 0` olarsa, `ValueError` qaldırmalıdır.
+      2. Cari xətanı hesabla: `error = setpoint - measurement`.
+      3. Yeni inteqralı hesabla: `new_integral = integral + error * dt`.
+      4. Xətanın törəməsini hesabla: `derivative = (error - prev_error) / dt`.
+      5. Xam PID əmrini hesabla: `u = kp * error + ki * new_integral + kd * derivative`.
+      6. Əmri `[-limit, limit]` aralığına sıx (`clamped_command`).
+      7. `(clamped_command, error, new_integral)` tuple-nı qaytar.
+    skills: [spec-robotics, derivatives-chain-rule]
+    category: python
+    difficulty: 2
+    hints:
+      - "Əvvəlcə `if dt <= 0 or limit <= 0: raise ValueError(...)` yoxlamasını yaz."
+      - "`error = setpoint - measurement`, `new_integral = integral + error * dt` və `derivative = (error - prev_error) / dt` ardıcıllığı ilə P, I, D komponentlərini tap."
+      - "Çıxışı sıxmaq üçün `clamped = max(-limit, min(limit, raw_u))` ifadəsindən istifadə et və `(clamped, error, new_integral)` qaytar."
+    starter_code: |
+      def pid_control_step(
+          setpoint: float,
+          measurement: float,
+          prev_error: float,
+          integral: float,
+          dt: float,
+          kp: float,
+          ki: float,
+          kd: float,
+          limit: float,
+      ) -> tuple[float, float, float]:
+          # TODO: PID hesablamasını və [-limit, limit] clamping-i implementasiya et
+          return 0.0, 0.0, 0.0
+    tests:
+      - name: "Dərsdəki nümunə ilə dəqiq PID hesabı"
+        code: |
+          u, err, integ = pid_control_step(10.0, 9.0, 4.0, 2.0, 0.5, 2.0, 0.5, 0.5, 20.0)
+          assert abs(u - 0.25) < 1e-6, f"Gözlənilən u=0.25, alınan {u}"
+          assert abs(err - 1.0) < 1e-6, f"Gözlənilən err=1.0, alınan {err}"
+          assert abs(integ - 2.5) < 1e-6, f"Gözlənilən integ=2.5, alınan {integ}"
+      - name: "Yuxarı və aşağı doyma hədlərinə sıxılma (Clamping)"
+        code: |
+          u_hi, _, _ = pid_control_step(100.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 15.0)
+          assert u_hi == 15.0, f"Yuxarı limit 15.0 gözlənilirdi, alınan {u_hi}"
+          u_lo, _, _ = pid_control_step(-100.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 15.0)
+          assert u_lo == -15.0, f"Aşağı limit -15.0 gözlənilirdi, alınan {u_lo}"
+      - name: "Yanlış dt və ya limit üçün ValueError"
+        code: |
+          for bad_dt, bad_limit in [(0.0, 10.0), (-0.1, 10.0), (0.1, 0.0), (0.1, -5.0)]:
+              try:
+                  pid_control_step(1.0, 0.0, 0.0, 0.0, bad_dt, 1.0, 0.1, 0.1, bad_limit)
+                  assert False, f"ValueError gözlənilirdi: dt={bad_dt}, limit={bad_limit}"
+              except ValueError:
+                  pass
+    solution: |
+      def pid_control_step(
+          setpoint: float,
+          measurement: float,
+          prev_error: float,
+          integral: float,
+          dt: float,
+          kp: float,
+          ki: float,
+          kd: float,
+          limit: float,
+      ) -> tuple[float, float, float]:
+          if dt <= 0 or limit <= 0:
+              raise ValueError("dt and limit must be strictly positive.")
+          error = setpoint - measurement
+          new_integral = integral + error * dt
+          derivative = (error - prev_error) / dt
+          raw_u = kp * error + ki * new_integral + kd * derivative
+          clamped_command = max(-limit, min(limit, raw_u))
+          return clamped_command, error, new_integral
+    explanation: |
+      Funksiya əvvəlcə $\Delta t > 0$ və $\text{limit} > 0$ şərtlərini yoxlayır, daha sonra diskret PID tənliyini hesablayıb çıxışı $[-\text{limit}, +\text{limit}]$ parçasına sıxır və növbəti dövrə üçün lazım olan `(clamped_command, error, new_integral)` vəziyyətini qaytarır.
+  - id: ex-specrob-pd-numeric
+    type: numeric
+    title: "PD kontrollerin çıxış əmrini hesabla"
+    prompt: |
+      Mobil robotun sükan idarəetməsində yalnız **PD kontroller** ($K_i = 0$) istifadə olunur.
+      Verilənlər:
+      - Cari xəta: $e_t = 4.0$
+      - Əvvəlki xəta: $e_{t-1} = 2.0$
+      - Zaman addımı: $\Delta t = 0.5\text{ s}$
+      - Əmsallar: $K_p = 1.5$, $K_d = 0.5$
+
+      İdarəetmə əmri $u_t = K_p e_t + K_d \frac{e_t - e_{t-1}}{\Delta t}$ neçəyə bərabərdir?
+    skills: [spec-robotics, derivatives-chain-rule]
+    category: math
+    difficulty: 1
+    answer: 8.0
+    tolerance: 0.01
+    hints:
+      - "Proportional hissəni hesabla: $K_p \\times e_t = 1.5 \\times 4.0 = 6.0$."
+      - "Törəməni tap: $(4.0 - 2.0) / 0.5 = 4.0$. Sonra $K_d \\times 4.0 = 0.5 \\times 4.0 = 2.0$ əlavə et."
+    explanation: |
+      $P = 1.5 \times 4.0 = 6.0$.
+      $D = 0.5 \times \frac{4.0 - 2.0}{0.5} = 0.5 \times 4.0 = 2.0$.
+      Yekun əmr: $u_t = 6.0 + 2.0 = 8.0$.
+references:
+  - title: "Åström & Murray — Feedback Systems: An Introduction for Scientists and Engineers"
+    url: https://www.cds.caltech.edu/~murray/amwiki/index.php/Second_Edition
+    note: "Caltech və Lund Universitetinin klassik açıq dərsliyi — PID və qapalı dövrəli idarəetmə nəzəriyyəsi"
+  - title: "PX4 Autopilot — Controller Diagrams and PID Tuning"
+    url: https://docs.px4.io/main/en/config_mc/pid_tuning_guide_multicopter.html
+    note: "Real avtonom dronlarda PID kontrollerlərinin tətbiqi və tənzimlənməsi"

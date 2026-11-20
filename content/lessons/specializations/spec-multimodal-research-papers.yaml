@@ -1,0 +1,412 @@
+id: spec-multimodal-research-papers
+track: specializations
+module: multimodal-research-reading
+title: "Multimodal AI (CLIP, VLM) və Elmi Məqalə Oxuma (3-Pass Paper Reading & Ablation Analysis)"
+summary: "Şəkil və mətni vahid vektor fəzasında birləşdirən Contrastive Learning (CLIP / simmetrik InfoNCE loss) riyaziyyatını, Vision-Language modellərin (VLM) şəkilləri visual tokenlərə necə çevirdiyini və arXiv elmi məqalələrini 3-keçidli metodla (ablasion cədvəlləri, gizli compute xərci və benchmark məhdudiyyətləri daxil) tənqidi oxumağı öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 80]
+prerequisites: [dl-attention-transformers, spec-cnn-computer-vision]
+next: null
+skills: [spec-multimodal-research, vectors-dot-product, llm-evaluation]
+objectives:
+  - CLIP arxitekturasında L2-normallaşdırılmış şəkil/mətn embedding-ləri üzərindən kosinus oxşarlığı matrisi və simmetrik InfoNCE (cross-entropy) loss hesabını aparmaq
+  - Vision-Language modellərində (ViT + Projection Adapter + LLM) bir şəklin neçə visual token yaratdığını və kontekst pəncərəsinə təsirini hesablamaq
+  - "Elmi AI məqalələrini 3-keçidli metodla (Pass 1: struktur və töhfə, Pass 2: ablasion və metod, Pass 3: minimal reproduksiya) sistemli şəkildə təhlil etmək"
+  - Benchmark cherry-picking, ədalətsiz baseline və ablasion əskikliyi kimi elmi məqalə zəifliklərini ayırd etmək
+why_it_matters: |
+  AI mühəndisliyi ildə minlərlə yeni arXiv məqaləsi çıxan sahədir. İki kritik bacarıq səni "hype izləyicisi"ndən real **Senior AI Engineer**-ə çevirir:
+
+  1. **Multimodal arxitektura savadlılığı:** Müasir tətbiqlər yalnız mətn yox — PDF skanları, tibbi görüntülər, məhsul fotoları, dron kamerası və səs axınları ilə işləyir. **CLIP** və **VLM** (LLaVA / Qwen-VL / Gemini Multimodal) mexanizmini bildikdə həm multimodal axtarış (text-to-image), həm də sənəd-şəkil analizini düzgün dizayn edirsən.
+  2. **Məqalələri tənqidi oxumaq:** Yeni çıxan bir məqalə *"SOTA-nı +4% üstələdik!"* yaza bilər, amma ablasion cədvəlinə baxanda görürsən ki, 3.8% artım onların təklif etdiyi mürəkkəb alqoritmdən yox, sadəcə 4x daha böyük təlim datasından gəlir! 3-keçidli metod həftələrlə boş yerə tətbiq cəhdinin qarşısını alır.
+terms:
+  - term: Contrastive Learning (CLIP)
+    definition: Uyğun şəkil-mətn cütlərinin (diaqonal) kosinus oxşarlığını maksimuma, uyğun olmayan cütlərin (qeyri-diaqonal) oxşarlığını isə minimuma yaxınlaşdıran ikili-enkoder öyrənmə metodu.
+  - term: Symmetric InfoNCE Loss
+    definition: $B \times B$ oxşarlıq matrisində həm sətirlər üzrə (şəkildən mətnə), həm də sütunlar üzrə (mətndən şəklə) hesablanan Cross-Entropy itkilərinin ortalaması.
+  - term: Vision-Language Model (VLM)
+    definition: Şəkli Vision Transformer (ViT) ilə patch vektorlarına bölüb proyeksiya adapteri (MLP) vasitəsilə LLM-in token fəzasına ötürən multimodal model.
+  - term: Visual Tokens (Patch Count)
+    definition: "$H \\times W$ ölçülü şəklin $P \\times P$ yamaqlara (patches) bölünməsi nəticəsində yaranan $(H/P) \\times (W/P)$ sayda görüntü tokeni."
+  - term: Ablation Study (Ablasion Təhlili)
+    definition: Təklif olunan sistemin hər bir komponentini bir-bir çıxararaq hansı hissənin nəticəyə həqiqətən töhfə verdiyini ölçən nəzarətli eksperiment cədvəli.
+  - term: 3-Pass Paper Reading Method
+    definition: "Elmi məqaləni əvvəlcədən sona kor-koranə oxumaq əvəzinə 3 mərhələdə (1: 5–10 dəq skan, 2: 40 dəq dərin metod/ablasion, 3: reproduksiya) təhlil etmə strategiyası."
+sections:
+  - id: clip-vlm-and-paper-reading
+    kind: explanation
+    title: "CLIP Contrastive Learning, VLM Visual Tokenləri və 3-Keçidli Məqalə Oxuma"
+    body: |
+      ### 1. CLIP: Şəkil və Mətni Eyni Fəzada Birləşdirmək
+      $B$ ədəd (şəkil, təsvir) cütündən ibarət batch verilib:
+      1. **Şəkil Enkoderi (ViT/ResNet)** hər şəkli vektorlaşdırır və L2-normallaşdırır: $\hat{I} \in \mathbb{R}^{B \times d}$.
+      2. **Mətn Enkoderi (Transformer)** hər mətni eyni ölçülü fəzaya proyeksiya edib L2-normallaşdırır: $\hat{T} \in \mathbb{R}^{B \times d}$.
+      3. **Ölçülənmiş Oxşarlıq Matrisi (Logits):**
+         $$S = \frac{\hat{I} \hat{T}^T}{\tau} \in \mathbb{R}^{B \times B}$$
+         Burada $\tau > 0$ **temperature** hiperparametridir (kiçik $\tau$ paylanmanı kəskinləşdirir).
+      4. **Simmetrik InfoNCE itkisi:** Hər $i$-ci şəkil öz $i$-ci mətnini (diaqonal element $S_{i,i}$) seçməli, hər $j$-ci mətn də öz $j$-ci şəklini seçməlidir:
+         $$\mathcal{L}_{I \to T} = -\frac{1}{B} \sum_{i=0}^{B-1} \log \frac{e^{S_{i,i}}}{\sum_{k=0}^{B-1} e^{S_{i,k}}}, \qquad \mathcal{L}_{T \to I} = -\frac{1}{B} \sum_{j=0}^{B-1} \log \frac{e^{S_{j,j}}}{\sum_{k=0}^{B-1} e^{S_{k,j}}}$$
+         $$\mathcal{L}_{\text{CLIP}} = \frac{1}{2}\left(\mathcal{L}_{I \to T} + \mathcal{L}_{T \to I}\right)$$
+
+      ---
+
+      ### 2. Vision-Language Modellər (VLM) və Visual Token Büdcəsi
+      Müasir VLM-lər (məs. LLaVA tipli) 3 blokdan ibarətdir:
+      1. **Vision Encoder (ViT):** $H \times W$ şəkli $P \times P$ yamaqlara (patches) bölür:
+         $$N_{\text{patches}} = \left(\frac{H}{P}\right) \times \left(\frac{W}{P}\right)$$
+         Məsələn, $336 \times 336$ şəkil $14 \times 14$ yamaqlarla **$24 \times 24 = 576$ visual token** yaradır!
+      2. **Projection Adapter (MLP / Cross-Attention):** ViT vektorlarını LLM-in `d_model` ölçüsünə uyğunlaşdırır.
+      3. **LLM Backbone:** Visual tokenlərlə mətn tokenlərini eyni ardıcıllıqda emal edib cavab yazır.
+
+      ---
+
+      ### 3. Mühəndislər üçün 3-Keçidli Məqalə Oxuma Metodu (S. Keshav)
+      - **Pass 1 (5–10 dəq — "Oxumağa dəyərmi?"):** Yalnız Başlıq, Abstract, Girişin son abzası, Bölmə başlıqları, Əsas diaqram/cədvəl və Nəticəni (Conclusion) oxu. 5 suala cavab ver: *Nə problem? Hansı əsas fikir? Doğru baseline-larla müqayisə olunubmu? Mənim layihəmə tətbiq oluna bilərmi?*
+      - **Pass 2 (30–45 dəq — "Həqiqətən niyə işləyir?"):** Metod bölməsini və **Ablation Study** cədvəlini diqqətlə oxu. İki şeyi yoxla: (a) əsas artım təklif olunan metoddan gəlir, yoxsa daha çox data/compute hesabına? (b) **Limitations** bölməsində hansı uğursuzluq halları etiraf olunub?
+      - **Pass 3 (1–3 saat — "Reproduksiya"):** Əgər metodu öz layihəndə işlədəcəksənsə, mərkəzi düsturu (məs. CLIP loss və ya yeni attention maskası) sintetik 4 nümunəlik datada özün kodla və əsas fərziyyələri yoxla.
+  - id: multilingual-translator-analogy
+    kind: analogy
+    title: "Mental model: İkidilli lüğət (CLIP) və Ev alarkən texniki ekspertiza (Ablation)"
+    body: |
+      - **CLIP:** Təsəvvür et ki, iki insan biri yalnız şəkil çəkir (Vision Encoder), digəri isə yalnız cümlə yazır (Text Encoder). Onları elə öyrədirik ki, "qırmızı alma" şəkli ilə `"qırmızı alma"` cümləsi otağın eyni küncünə (eyni koordinata), "yaşıl maşın" isə tam əks küncə düşsün. Təlimdən sonra yeni bir sinif üçün modeli yenidən öyrətmədən (**Zero-Shot Classification**) istənilən mətni vektorlaşdırıb ən yaxın şəkli tapmaq olur!
+      - **Ablation Study:** Bir maşın ustası sənə deyir: *"Mühərriki, təkərləri və şüşəsiləni dəyişdim — sürət +30 km/saat artdı!"* Ablasion cədvəli hər dəyişikliyi tək-tək sınaqdan keçirib həqiqəti göstərir: bəlkə +29 km/saat mühərrikdən gəlib, şüşəsilən isə +0 km/saat verib. Ablasion olmadan hansı hissənin əsl səbəb olduğunu bilmək mümkün deyil.
+  - id: multimodal-clip-vlm-diagram
+    kind: diagram
+    title: "CLIP Contrastive Öyrənmə vs VLM Token Birləşməsi Arxitekturası"
+    body: |
+      ```mermaid
+      flowchart TD
+        subgraph CLIP["CLIP: Contrastive Dual-Encoder (Search & Zero-Shot)"]
+          IMG["B Şəkil"] --> VE["Vision Encoder + L2 Norm"]
+          TXT["B Mətn"] --> TE["Text Encoder + L2 Norm"]
+          VE --> MAT["Oxşarlıq Matrisi S = (I @ T^T) / tau  [B x B]"]
+          TE --> MAT
+          MAT --> LOSS["Symmetric InfoNCE Loss\n(Diaqonalı artır, qeyri-diaqonalı azalt)"]
+        end
+
+        subgraph VLM["VLM: Multimodal Generation (Şəkil + Sual -> Cavab)"]
+          IMG2["Şəkil (336x336)"] --> VIT["ViT Patch Encoder (14x14 -> 576 patch)"]
+          VIT --> PROJ["MLP Projection Adapter"]
+          PROJ --> LLM["LLM Backbone\n[576 visual token + text prompt] -> Cavab"]
+          Q["Mətn Sualı"] --> LLM
+        end
+      ```
+
+      Diqqət et: **CLIP** sürətli retrieval və zero-shot təsnifat üçün idealdır (vektorlar əvvəlcədən indekslənir), **VLM** isə sənəd/qrafik oxuma və mürəkkəb sual-cavab generasiyası üçün istifadə olunur.
+  - id: worked-clip-infonce-example
+    kind: worked_example
+    title: "Addım-addım rəqəmlərlə: 2x2 CLIP InfoNCE Loss və Ablation Cədvəli Təhlili"
+    body: |
+      ### Hissə A: $B = 2$ batch üçün CLIP Simmetrik InfoNCE Loss
+      Artıq L2-normallaşdırılmış vektorlar və $\tau = 0.5$ ($1/\tau = 2.0$) verilib:
+      - $\hat{I}_0 = [1.0, 0.0], \quad \hat{I}_1 = [0.0, 1.0]$
+      - $\hat{T}_0 = [0.8, 0.6], \quad \hat{T}_1 = [0.0, 1.0]$
+
+      **Addım 1: Kosinus oxşarlığı $C = \hat{I}\hat{T}^T$ və ölçülənmiş logit-lər $S = C / 0.5$**
+      $$C = \begin{bmatrix} 0.8 & 0.0 \\ 0.6 & 1.0 \end{bmatrix} \implies S = 2.0 \cdot C = \begin{bmatrix} 1.6 & 0.0 \\ 1.2 & 2.0 \end{bmatrix}$$
+
+      **Addım 2: Şəkildən Mətnə Cross-Entropy ($\mathcal{L}_{I \to T}$ — sətirlər üzrə)**
+      - Sətir 0 (`[1.6, 0.0]`, hədəf `0`): $p_{0,0} = \frac{e^{1.6}}{e^{1.6} + e^0} = \frac{4.953}{5.953} \approx 0.8320 \implies -\ln(0.8320) \approx 0.1839$
+      - Sətir 1 (`[1.2, 2.0]`, hədəf `1`): $p_{1,1} = \frac{e^{2.0}}{e^{1.2} + e^{2.0}} = \frac{7.389}{10.709} \approx 0.6900 \implies -\ln(0.6900) \approx 0.3711$
+      $$\mathcal{L}_{I \to T} = \frac{0.1839 + 0.3711}{2} = \mathbf{0.2775}$$
+
+      **Addım 3: Mətndən Şəklə Cross-Entropy ($\mathcal{L}_{T \to I}$ — sütunlar üzrə)**
+      - Sütun 0 (`[1.6, 1.2]`, hədəf `0`): $p = \frac{4.953}{4.953 + 3.320} \approx 0.5987 \implies -\ln(0.5987) \approx 0.5130$
+      - Sütun 1 (`[0.0, 2.0]`, hədəf `1`): $p = \frac{7.389}{1.0 + 7.389} \approx 0.8808 \implies -\ln(0.8808) \approx 0.1269$
+      $$\mathcal{L}_{T \to I} = \frac{0.5130 + 0.1269}{2} = \mathbf{0.3200}$$
+
+      **Addım 4: Simmetrik CLIP Loss**
+      $$\mathcal{L}_{\text{CLIP}} = \frac{0.2775 + 0.3200}{2} \approx \mathbf{0.2987}$$
+
+      ---
+
+      ### Hissə B: Ablasion Cədvəlini Tənqidi Oxumaq
+      Bir məqalənin cədvəli belə görünür:
+      | Variant | Təlim Datası | Model | F1 Skoru | Latency |
+      |---|---|---|---|---|
+      | Baseline (Məqalədəki) | 10k | Standard ViT | 78.0% | 12 ms |
+      | + 5x Təlim Datası | 50k | Standard ViT | 83.4% | 12 ms |
+      | + Yeni Mürəkkəb Modul X | 50k | ViT + Modul X | 83.7% | 48 ms |
+
+      **Mühəndis diaqnozu:** +5.7% ümumi artımın **5.4%-i sadəcə datanı 5x böyütməkdən** gəlib! Yeni "Modul X" cəmi +0.3% (statistik küy səviyyəsində!) verir, amma gecikməni **4 qat (12 ms -> 48 ms)** pisləşdirir. Production-da Modul X-i tətbiq etmək səhv qərar olar!
+  - id: clip-loss-python-code
+    kind: code
+    title: "Kod: Saf Python-da L2-Normallaşdırılmış CLIP Simmetrik InfoNCE Loss"
+    body: |
+      ```python
+      import math
+
+
+      def l2_normalize(vec: list[float]) -> list[float]:
+          norm = math.sqrt(sum(v * v for v in vec))
+          if norm == 0.0:
+              raise ValueError("cannot L2-normalize zero vector")
+          return [v / norm for v in vec]
+
+
+      def cross_entropy_row(logits: list[float], target_idx: int) -> float:
+          """Numerically stable -log(softmax(logits)[target_idx])."""
+          m = max(logits)
+          log_denom = m + math.log(sum(math.exp(x - m) for x in logits))
+          return -(logits[target_idx] - log_denom)
+
+
+      def clip_contrastive_loss(
+          image_embeds: list[list[float]],
+          text_embeds: list[list[float]],
+          temperature: float = 0.07,
+      ) -> float:
+          """Compute symmetric InfoNCE CLIP loss for matched (image_i, text_i) pairs."""
+          if not image_embeds or len(image_embeds) != len(text_embeds):
+              raise ValueError("image_embeds and text_embeds must be non-empty and same batch size")
+          if temperature <= 0:
+              raise ValueError("temperature must be positive")
+
+          b = len(image_embeds)
+          d = len(image_embeds[0])
+          img_n = [l2_normalize(v) for v in image_embeds]
+          txt_n = [l2_normalize(v) for v in text_embeds]
+          if any(len(v) != d for v in img_n + txt_n):
+              raise ValueError("all embeddings must share the same dimension")
+
+          # S[i][j] = (img_n[i] . txt_n[j]) / temperature
+          logits = [
+              [sum(img_n[i][k] * txt_n[j][k] for k in range(d)) / temperature for j in range(b)]
+              for i in range(b)
+          ]
+          loss_i2t = sum(cross_entropy_row(logits[i], i) for i in range(b)) / b
+          loss_t2i = sum(cross_entropy_row([logits[i][j] for i in range(b)], j) for j in range(b)) / b
+          return 0.5 * (loss_i2t + loss_t2i)
+
+
+      print(round(clip_contrastive_loss([[1.0, 0.0], [0.0, 1.0]], [[0.8, 0.6], [0.0, 1.0]], temperature=0.5), 4))
+      # 0.2987
+      ```
+  - id: common-multimodal-paper-mistakes
+    kind: mistakes
+    title: "Multimodal AI və Elmi Məqalə Oxumada Ən Çox Edilən Səhvlər"
+    body: |
+      **1. Məqalənin yalnız Abstract və 1-ci cədvəlinə baxıb production arxitekturanı dəyişmək**
+      Bir çox məqalə öz metodunu zəif tənzimlənmiş (untuned) baseline-larla müqayisə edir və ya yalnız akademik benchmark-da (ImageNet/MMLU) yüksək nəticə göstərir. Ablasion cədvəlinə, latency/VRAM xərcinə və öz real datanda kiçik pilot testə baxmadan arxitekturanı dəyişmə.
+
+      **2. VLM-lərdə yüksək çözünürlüklü şəkillərin token xərcini unutmaq**
+      Bir PDF-in 10 səhifəsini yüksək çözünürlüklü (high-res) şəkil kimi VLM-ə göndərmək səhifə başına 1000–2000 visual token (cəmi 15,000+ giriş tokeni!) yarada bilər. Həm API xərci, həm də TTFT gecikməsi kəskin artır — mətn əsaslı PDF-lərdə əvvəlcə mətni çıxar, VLM-i yalnız cədvəl/diaqram olan səhifələrdə işlət.
+
+      **3. CLIP-dən məkan/sayma məntiqi gözləmək ("bag-of-words" effekti)**
+      Standart CLIP *"qırmızı kubun solundakı mavi kürə"* ilə *"mavi kürənin solundakı qırmızı kub"* arasındakı fərqi ayırmaqda zəifdir, çünki kontrastiv itki əsasən qlobal obyekt sözlərinə fokuslanır. Məkan əlaqələri və OCR üçün güclü VLM və ya obyekt detektoru + koordinatlar lazımdır.
+
+      **4. Benchmark Contamination (Data Sızması) riskini görməzdən gəlmək**
+      İnternetdən toplanmış nəhəng pretraining korpuslarında açıq benchmark test sualları artıq mövcud ola bilər. Məqalənin nəticəsini həmişə öz gizli (held-out) daxili eval dəstində təsdiqlə.
+  - id: multimodal-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik Seçimləri: CLIP vs VLM və OCR+LLM vs End-to-End VLM"
+    body: |
+      - **CLIP vs VLM:** 1 milyon məhsul şəkli içindən 20 ms ərzində mətnlə axtarış (multimodal retrieval) üçün **CLIP** rəqibsizdir (şəkillər bir dəfə indekslənir). Tək bir faktura şəklinin içindən strukturlaşdırılmış JSON çıxarmaq üçün isə **VLM** lazımdır.
+      - **OCR + Mətn LLM vs Birbaşa VLM:** Təmiz skan edilmiş sadə mətn sənədlərində OCR + ucuz mətn LLM daha ucuz və sürətlidir; lakin mürəkkəb cədvəllər, qrafiklər, əl yazısı və vizual sxemlər olan sənədlərdə birbaşa VLM məkan düzülüşünü itirmədiyi üçün daha dəqiq olur.
+      - **Tədqiqat Yeniliyi vs Mühəndislik Sadəliyi:** Yeni bir məqalə +0.5% dəqiqlik verib kodu 3x mürəkkəbləşdirirsə və gecikməni 2x artırırsa, məhsul mühəndisliyində 99% halda sadə və dayanıqlı baseline qalib gəlir.
+mastery_criteria:
+  - Verilmiş şəkil və mətn embedding cütləri üçün L2-normallaşdırılmış simmetrik InfoNCE (CLIP) itkisini kodda yaza bilirsən
+  - ViT patch ölçüsünə görə VLM visual token sayını hesablaya bilirsən
+  - Elmi məqalənin ablasion cədvəlini təhlil edib həqiqi töhfəni data/compute artımından ayıra bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-specmm-clip-symmetry
+      type: mcq
+      title: "CLIP itkisi niyə simmetrikdir?"
+      prompt: "CLIP təlimində $B \\times B$ oxşarlıq matrisində niyə həm sətirlər üzrə (Image -> Text), həm də sütunlar üzrə (Text -> Image) Cross-Entropy itkisi hesablanır?"
+      skills: [spec-multimodal-research, vectors-dot-product]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Hər şəklin öz mətnini, eyni zamanda hər mətnin də batch daxilində öz uyğun şəklini seçməsini təmin edərək ikiistiqamətli hizalanma yaratmaq üçün"
+          feedback: "Doğrudur! Simmetrik InfoNCE həm image-to-text, həm də text-to-image axtarışını eyni fəzada öyrədir."
+        - id: b
+          text: "Çünki matrisin diaqonalı həmişə sıfırdır"
+          feedback: "Yanlışdır — diaqonal elementlər məhz müsbət (uyğun) cütlərdir və maksimuma çatdırılır."
+        - id: c
+          text: "Yalnız batch size 1 olduqda işləməsi üçün"
+          feedback: "Yanlışdır — kontrastiv öyrənmə mənfi nümunələr (in-batch negatives) üçün böyük batch size ($B \\gg 1$) tələb edir."
+      answer: a
+      explanation: "Simmetrik InfoNCE itkisi diaqonaldakı uyğun (şəkil, mətn) cütlərini həm sətir, həm sütun istiqamətində qeyri-diaqonal mənfi cütlərdən ayırır."
+    - id: q-specmm-vit-tokens
+      type: numeric
+      title: "VLM Visual Token (Patch) sayı hesabı"
+      prompt: |
+        Bir Vision-Language modelin ViT enkoderi $448 \\times 448$ ölçülü şəkli $14 \\times 14$ ölçülü üst-üstə düşməyən yamaqlara (patches) bölür.
+        Bu tək şəkil LLM-in kontekst pəncərəsinə neçə **visual token** əlavə edir?
+      skills: [spec-multimodal-research]
+      category: math
+      answer: 1024
+      tolerance: 0.1
+      unit: "token"
+      hints:
+        - "Üfüqi yamaq sayı $448 / 14 = 32$, şaquli yamaq sayı $448 / 14 = 32$."
+        - "Ümumi visual token sayı $32 \\times 32$-dir."
+      explanation: "$448 / 14 = 32$ olduğu üçün şəkil $32 \\times 32 = 1024$ yamağa (visual tokenə) bölünür. Bu, bir səhifəlik şəklin ~1000 mətn tokeni qədər kontekst tutması deməkdir."
+    - id: q-specmm-ablation-audit
+      type: mcq
+      title: "Ablasion cədvəlinin tənqidi təhlili"
+      prompt: "Yeni bir elmi məqalədə Baseline (10k data, 15 ms) 80.0% F1 alır; təklif olunan 'SuperAttention' (50k data, 60 ms) 86.2% F1 alır. Ablasion cədvəlində isə göstərilir ki, sadəcə Baseline + 50k data (15 ms) artıq 85.9% F1 alır. Senior AI Engineer hansı nəticəni çıxarmalıdır?"
+      skills: [spec-multimodal-research, llm-evaluation]
+      category: concept
+      options:
+        - id: a
+          text: "Artımın demək olar ki hamısı (+5.9%) data artımından gəlir; 'SuperAttention' cəmi +0.3% verərək gecikməni 4x pisləşdirir — production üçün əsaslı deyil"
+          feedback: "Doğrudur! Ablasion təhlili məhz metodun real töhfəsini data/compute dəyişikliyindən ayırmaq üçündür."
+        - id: b
+          text: "'SuperAttention' təkbaşına +6.2% artım gətirdiyi üçün dərhal production-a tətbiq edilməlidir"
+          feedback: "Yanlışdır — 80.0%-dən 85.9%-ə sıçrayış SuperAttention olmadan yalnız 50k data ilə baş verib."
+        - id: c
+          text: "Ablasion cədvəli yalnız qrafik gözəlliyi üçündür, qərarlara təsir etmir"
+          feedback: "Yanlışdır — ablasion cədvəli məqalənin ən vacib sübut hissəsidir."
+      answer: a
+      explanation: "Nəzarətli ablasion göstərir ki, +5.9% qazanc əlavə datadan gəlir; +0.3% əlavə fərq 4x latency xərcini əsaslandırmır."
+    - id: q-specmm-3pass-principles
+      type: multi
+      title: "Elmi məqaləni tənqidi qiymətləndirmə meyarları"
+      prompt: "arXiv-də çıxmış yeni bir AI məqaləsini öz layihəndə tətbiq etməzdən əvvəl hansı yoxlamalar vacibdir? Hamısını seç."
+      skills: [spec-multimodal-research, llm-evaluation]
+      category: concept
+      options:
+        - id: a
+          text: "Ablasion cədvəlində hər yeni komponentin ayrı-ayrılıqda verdiyi töhfəni və statistik əhəmiyyətini yoxlamaq"
+          feedback: "Bəli — ablasion olmadan hansı dəyişikliyin işlədiyi bilinmir."
+        - id: b
+          text: "Gecikmə (latency), GPU yaddaşı və təlim xərci (compute budget) kimi praktiki məhdudiyyətləri oxumaq"
+          feedback: "Bəli — 1000 GPU-da əldə edilmiş +1% artım sənin real sistemində tətbiqolunmaz ola bilər."
+        - id: c
+          text: "Metodu kor-koranə bütün sistemə tətbiq etməzdən əvvəl öz held-out (gizli) qiymətləndirmə dəstində kiçik reproduksiya sınağı etmək"
+          feedback: "Bəli — açıq benchmark-larda contamination ola bilər; öz datandakı nəticə həlledicidir."
+        - id: d
+          text: "Yalnız sosial şəbəkədəki xülasəyə (tweet/post) əsaslanıb məqalənin Limitations bölməsini oxumamaq"
+          feedback: "Xeyr — Limitations bölməsi metodun harada uğursuz olduğunu ən dürüst göstərən hissədir."
+      answers: [a, b, c]
+      explanation: "Ablasion təhlili, compute/latency yoxlaması və öz held-out datanda minimal reproduksiya mühəndislik səviyyəli məqalə oxumanın əsas sütunlarıdır."
+exercises:
+  - id: ex-specmm-clip-loss
+    type: code
+    title: "Simmetrik CLIP Contrastive (InfoNCE) itkisini (clip_contrastive_loss) yaz"
+    prompt: |
+      Multimodal (şəkil + mətn) təlimi üçün `clip_contrastive_loss(image_embeds, text_embeds, temperature=0.07) -> float` funksiyasını sıfırdan (yalnız Python `math` ilə) yaz:
+
+      **Müqavilə (Contract):**
+      1. `image_embeds` və `text_embeds` boş olmamalı, eyni batch ölçüsünə ($B \ge 1$) və eyni vektor ölçüsünə ($d \ge 1$) malik olmalıdır; `temperature <= 0` olarsa və ya sıfır uzunluqlu vektor verilərsə `ValueError` qaldır.
+      2. Hər şəkil və mətn vektorunu L2-normallaşdır: $\hat{v} = v / \|v\|_2$.
+      3. $B \times B$ logit matrisini hesabla: $S_{i,j} = (\hat{I}_i \cdot \hat{T}_j) / \tau$.
+      4. Sətirlər üzrə orta Cross-Entropy ($\mathcal{L}_{I \to T}$, hədəf $i$) və sütunlar üzrə orta Cross-Entropy ($\mathcal{L}_{T \to I}$, hədəf $j$) hesabla (rəqəmsal dayanıqlı log-sum-exp ilə: `max` çıx!).
+      5. Simmetrik ortalamanı qaytar: `0.5 * (loss_i2t + loss_t2i)`.
+    skills: [spec-multimodal-research, vectors-dot-product]
+    category: llm-architecture
+    difficulty: 3
+    hints:
+      - "Hər vektor üçün `norm = math.sqrt(sum(x*x for x in v))` tap; `norm == 0` olarsa `ValueError` qaldır və `[x / norm for x in v]` qaytar."
+      - "Dayanıqlı Cross-Entropy üçün: `m = max(row)`, `log_denom = m + math.log(sum(math.exp(x - m) for x in row))`, itki = `-(row[target] - log_denom)`. Sütun `j` isə `[logits[i][j] for i in range(b)]`-dir."
+    starter_code: |
+      import math
+
+
+      def clip_contrastive_loss(
+          image_embeds: list[list[float]],
+          text_embeds: list[list[float]],
+          temperature: float = 0.07,
+      ) -> float:
+          # TODO: validasiya, L2 norm, logits = (I @ T^T) / temperature, simmetrik InfoNCE loss
+          return 0.0
+    solution: |
+      import math
+
+
+      def _l2_norm(vec: list[float]) -> list[float]:
+          norm = math.sqrt(sum(x * x for x in vec))
+          if norm == 0.0:
+              raise ValueError("zero vector cannot be normalized")
+          return [x / norm for x in vec]
+
+
+      def _ce(logits: list[float], target: int) -> float:
+          m = max(logits)
+          log_denom = m + math.log(sum(math.exp(x - m) for x in logits))
+          return -(logits[target] - log_denom)
+
+
+      def clip_contrastive_loss(
+          image_embeds: list[list[float]],
+          text_embeds: list[list[float]],
+          temperature: float = 0.07,
+      ) -> float:
+          if not image_embeds or len(image_embeds) != len(text_embeds):
+              raise ValueError("batch sizes must match and be non-empty")
+          if temperature <= 0:
+              raise ValueError("temperature must be positive")
+          b = len(image_embeds)
+          d = len(image_embeds[0])
+          if d == 0 or any(len(v) != d for v in image_embeds) or any(len(v) != d for v in text_embeds):
+              raise ValueError("all vectors must share a positive dimension")
+
+          img_n = [_l2_norm(v) for v in image_embeds]
+          txt_n = [_l2_norm(v) for v in text_embeds]
+          logits = [
+              [sum(img_n[i][k] * txt_n[j][k] for k in range(d)) / temperature for j in range(b)]
+              for i in range(b)
+          ]
+          loss_i2t = sum(_ce(logits[i], i) for i in range(b)) / b
+          loss_t2i = sum(_ce([logits[i][j] for i in range(b)], j) for j in range(b)) / b
+          return 0.5 * (loss_i2t + loss_t2i)
+    tests:
+      - name: "2x2 dərs nümunəsində dəqiq 0.2987 qaytarır"
+        code: |
+          import math
+          loss = clip_contrastive_loss([[1.0, 0.0], [0.0, 1.0]], [[0.8, 0.6], [0.0, 1.0]], temperature=0.5)
+          assert math.isclose(loss, 0.298736, abs_tol=1e-4), f"got {loss}"
+      - name: "Ölçülənmiş (norm != 1) vektorlar L2 normallaşdırıldığı üçün eyni itkini verir"
+        code: |
+          import math
+          loss1 = clip_contrastive_loss([[1.0, 0.0], [0.0, 1.0]], [[0.8, 0.6], [0.0, 1.0]], temperature=0.5)
+          loss2 = clip_contrastive_loss([[5.0, 0.0], [0.0, 10.0]], [[4.0, 3.0], [0.0, 2.0]], temperature=0.5)
+          assert math.isclose(loss1, loss2, abs_tol=1e-6)
+      - name: "Mükəmməl hizalanma çox kiçik itki verir, tərs hizalanma böyük itki verir"
+        code: |
+          good = clip_contrastive_loss([[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]], temperature=0.1)
+          bad = clip_contrastive_loss([[1.0, 0.0], [0.0, 1.0]], [[0.0, 1.0], [1.0, 0.0]], temperature=0.1)
+          assert good < 0.001 and bad > 5.0
+      - name: "Sıfır vektor, uyğunsuz batch və ya mənfi temperature ValueError qaldırır"
+        code: |
+          for args in [
+              ([[0.0, 0.0]], [[1.0, 0.0]], 0.1),
+              ([[1.0, 0.0]], [[1.0, 0.0], [0.0, 1.0]], 0.1),
+              ([[1.0, 0.0]], [[1.0, 0.0]], 0.0),
+          ]:
+              try:
+                  clip_contrastive_loss(*args)
+                  assert False
+              except ValueError:
+                  pass
+    explanation: "L2-normallaşdırma vektor uzunluğunun təsirini aradan qaldırır (təmiz kosinus oxşarlığı), `max`-çıxmalı log-sum-exp kiçik `temperature=0.07` zamanı `math.exp` daşmasının (overflow) qarşısını alır, simmetrik orta isə hər iki axtarış istiqamətini eyni anda optimallaşdırır."
+  - id: ex-specmm-explain-ablation
+    type: explain
+    title: "Elmi məqalə icmalı: Ablasion və benchmark risklərini tənqidi izah et"
+    prompt: |
+      Bir startap mühəndisi sənə yeni bir arXiv məqaləsini göstərib deyir:
+      *"Bu məqalə yeni multimodal modelini 200M veb şəkli üzərində öyrədib və açıq benchmark-da köhnə baseline-ı +4.2% keçib! Gəl bizim tibbi rentgen layihəmizdə dərhal köhnə modeli atıb buna keçək."*
+
+      Öz sözlərinlə (ən azı 30 sözlə) izah et: bu qərarı verməzdən əvvəl məqalədə və öz layihəndə **hansı 3 kritik yoxlamanı** aparmalısan və niyə?
+    skills: [spec-multimodal-research, llm-evaluation]
+    category: explain-code
+    difficulty: 2
+    hints:
+      - "Məqalədəki +4.2% artımın metoddan, yoxsa 200M əlavə datadan gəldiyini haradan bilərsən? (Ablasion!)"
+      - "Ümumi veb şəkilləri ilə tibbi rentgen domain-i arasındakı fərqi, benchmark contamination riskini və latency/VRAM xərcini qeyd et."
+    rubric:
+      - "Ablasion cədvəlində +4.2% artımın yeni arxitekturadan, yoxsa sadəcə daha böyük data/compute büdcəsindən gəldiyini yoxlamaq"
+      - "Domain uyğunluğu və data sızması (benchmark contamination): ümumi veb benchmark-ı tibbi rentgen kimi xüsusi sahəni təmsil etmir, öz held-out eval dəstində sınamaq lazımdır"
+      - "Əməliyyat xərci: latency, GPU VRAM tələbi, visual token sayı və lisenziya/məxfilik məhdudiyyətlərini yoxlamaq"
+    model_answer: |
+      Ümumi veb benchmark-ındakı +4.2% nəticəyə görə tibbi sistemi dərhal dəyişmək risklidir. Birincisi, məqalənin **ablasion cədvəlini** yoxlamaq lazımdır: bu artım təklif olunan arxitekturadan gəlir, yoxsa sadəcə 200M veb datası və daha çox GPU saatından? İkincisi, **domain fərqi və benchmark contamination** riski var: ümumi veb fotoları tibbi rentgen görüntülərindən tamamilə fərqlidir və açıq benchmark sualları pretraining datasına sızmış ola bilər — buna görə öz gizli (held-out) klinik eval dəstimizdə köhnə baseline ilə baş-başa müqayisə aparmalıyıq. Üçüncüsü, **latency, VRAM, visual token xərci və uğursuzluq halları (Limitations)** tibbi SLA və təhlükəsizlik tələblərimizlə yoxlanmalıdır.
+    explanation: "Senior AI Engineer elmi məqalələri headline rəqəminə görə yox, ablasion sübutuna, domain/held-out qiymətləndirməsinə və production xərc-gecikmə büdcəsinə görə dəyərləndirir."
+references:
+  - title: "Learning Transferable Visual Models From Natural Language Supervision — CLIP (Radford et al., 2021)"
+    url: "https://arxiv.org/abs/2103.00020"
+    note: "Simmetrik contrastive loss və zero-shot visual-language öyrənməsinin əsas məqaləsi."
+  - title: "How to Read a Paper (S. Keshav, University of Waterloo)"
+    url: "https://blizzard.cs.uwaterloo.ca/keshav/home/Papers/data/07/paper-reading.pdf"
+    note: "Elmi məqalələri 3-keçidli metodla sürətli və tənqidi oxumağın klassik bələdçisi."

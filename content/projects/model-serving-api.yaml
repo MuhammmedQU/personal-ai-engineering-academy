@@ -1,0 +1,117 @@
+id: model-serving-api
+title: "Model Serving API: FastAPI, Docker və Observability"
+summary: "Təlim keçmiş ML modelini Pydantic validasiyası, lifespan yükləməsi, avtomatik pytest TestClient testləri, structured latency logları və Docker konteyneri ilə istehsalata hazır REST API kimi təqdim etmək."
+optional: false
+level: core
+estimated_hours: [10, 16]
+recommended_lessons:
+  - py-functions-contracts
+  - py-errors-validation
+  - py-testing-pytest
+  - http-json-api-clients
+  - prod-fastapi-model-serving
+  - prod-docker-config-secrets
+  - prod-logging-monitoring
+problem_statement: |
+  Notebook-da `.predict()` çağırmaqla modeli digər proqramların istifadə edə biləcəyi etibarlı xidmətə çevirmək arasında böyük mühəndislik fərqi var. Real sistemlərdə müştəri tərəfdən səhv tipdə, mənfi və ya çatışmayan sahələrlə JSON göndərilir, model hər sorğuda diskdən yenidən yükləndiyi üçün latency partlayır, konteyner başqa maşında işləmir və xəta baş verdikdə heç bir strukturlaşdırılmış iz qalmır. Bu layihədə təlim keçmiş bir modeli (əvvəlki layihədən və ya yeni kiçik pipeline-dan) FastAPI arxasında qoruyacaq, Docker ilə paketləyəcək və p50/p95 latency ölçümü ilə müşahidə oluna bilən (observable) edəcəksən.
+intended_user: "Modeldən real vaxtda proqnoz almaq üçün HTTP POST sorğusu göndərən backend mühəndisi və xidmətin sağlamlığını izləyən platforma/MLOps komandası."
+requirements:
+  - "Model artefaktını hər request-də deyil, FastAPI `lifespan` kontekstində başlanğıcda bir dəfə yaddaşa yükləmək."
+  - "Giriş və çıxış sxemlərini Pydantic (`BaseModel`, `Field` məhdudiyyətləri ilə) vasitəsilə ciddi validasiya etmək; səhv inputa aydın 422 cavabı qaytarmaq."
+  - "`GET /health` (modelin yüklənmə statusu və versiyası) və `POST /predict` (proqnoz, ehtimal/skor, `model_version`, `request_id`, `latency_ms`) endpoint-lərini yazmaq."
+  - "Hər sorğu üçün JSON formatında structured log (`request_id`, `path`, `status_code`, `latency_ms`, `model_version`) çıxarmaq."
+  - "`pytest` və `TestClient` ilə ən azı 8 avtomatik test (valid, boundary, missing field, wrong type, out-of-range, health) yazmaq."
+  - "Xidməti non-root istifadəçi və pinned dependency-lərlə işləyən reproducible `Dockerfile` daxilində paketləmək."
+non_goals:
+  - "Modeli API sorğusu zamanı sıfırdan train etmək (training və serving tamamilə ayrı proseslər olmalıdır)."
+  - "Kubernetes klasteri, Kafka və ya mürəkkəb bulud infrastrukturunu qurmaq."
+  - "Frontend UI və ya istifadəçi qeydiyyatı/ödəniş sistemi hazırlamaq."
+architecture: |
+  Xidmət konfiqurasiyanı mühit dəyişənlərindən oxuyur, başlanğıcda model artefaktını yükləyir və hər sorğunu validasiya + telemetriya qatından keçirir:
+
+  ```mermaid
+  flowchart LR
+    Client["Backend / API Client"] -->|"POST /predict (JSON)"| MW["Request ID & Latency Middleware"]
+    MW --> Schema["Pydantic Input Validation"]
+    Schema -->|"Invalid -> 422"| Client
+    Schema -->|"Valid"| Service["Loaded Model Pipeline (Lifespan)"]
+    Service --> Resp["Pydantic Response + model_version"]
+    Resp --> Log["Structured JSON Logger (stdout)"]
+    Resp --> Client
+  ```
+
+  - `app/main.py`: FastAPI tətbiqi, `lifespan` yükləyicisi, middleware və endpoint-lər.
+  - `app/schemas.py`: `PredictRequest`, `PredictResponse` və `HealthResponse` Pydantic modelləri.
+  - `app/config.py`: `MODEL_PATH`, `MODEL_VERSION`, `LOG_LEVEL` kimi environment konfiqurasiyası.
+  - `tests/test_api.py`: `TestClient` əsaslı funksional və kənar-hal testləri.
+  - `Dockerfile` və `.env.example`: Konteyner tərifi və təhlükəsiz konfiqurasiya nümunəsi.
+milestones:
+  - id: m1-contract-and-lifespan
+    title: "API Müqaviləsi (Pydantic) və Lifespan Model Loading"
+    goal: "Modeli bir dəfə yükləyən və giriş/çıxış müqaviləsini ciddi yoxlayan FastAPI nüvəsini qurmaq."
+    tasks:
+      - "Model artefaktını (`model.joblib` və ya deterministik pipeline) və onun `model_version` metadatasını hazırla."
+      - "`PredictRequest` sxemində bütün sahələr üçün tip və məntiqi sərhədləri (`ge`, `le`, `min_length`, enum/literal) təyin et."
+      - "FastAPI `lifespan` funksiyasında modeli yükləyib `app.state`-də saxla, `/health` və `/predict` endpoint-lərini birləşdir."
+    evidence_required: "`app/main.py` və `app/schemas.py` faylları; `/health` və `/predict` sorğularının yerli uğurlu cavabları."
+    skills:
+      - prod-model-serving
+      - py-functions
+      - py-errors
+      - http-apis
+  - id: m2-automated-api-tests
+    title: "TestClient ilə Avtomatik Test Paketi"
+    goal: "Endpoint-lərin həm normal, həm də sınmış inputlarda müqaviləyə uyğun davrandığını avtomatik sübut etmək."
+    tasks:
+      - "`TestClient` istifadə edərək `/health` (200 OK) və `/predict` (200 OK, cavab sxemi və `model_version` yoxlaması) testlərini yaz."
+      - "Çatışmayan sahə, səhv tip (`\"abc\"` ədəd yerinə), həddən kənar dəyər (məsələn, mənfi yaş/qiymət) və boş body üçün 422 qaytarıldığını yoxlayan testlər əlavə et."
+    evidence_required: "`pytest` çıxışı — ən azı 8 testin hamısı yaşıl (passed) olmalıdır."
+    skills:
+      - py-testing
+      - prod-model-serving
+  - id: m3-structured-logging-latency
+    title: "Structured Logging və Latency Benchmark"
+    goal: "Xidmətin hər bir sorğusunu izlənilə bilən etmək və p50/p95 cavab müddətini ölçmək."
+    tasks:
+      - "Hər sorğuya unikal `request_id` təyin edən və tamamlandıqda tək sətirlik JSON log (`timestamp`, `request_id`, `status_code`, `latency_ms`, `model_version`) yazan mexanizm qur."
+      - "Kiçik bir benchmark skripti ilə ardıcıl 100 sorğu göndərərək p50, p95 və p99 latency dəyərlərini hesabla."
+    evidence_required: "Nümunə JSON log sətirləri və README-də 100 sorğuluq p50/p95 latency cədvəli."
+    skills:
+      - prod-monitoring
+      - debugging
+  - id: m4-docker-and-config
+    title: "Docker Konteynerləşdirmə və Secrets/Config İntizamı"
+    goal: "Xidməti istənilən mühitdə eyni cür işləyən təhlükəsiz Docker imicinə çevirmək."
+    tasks:
+      - "Konfiqurasiyaları (`MODEL_PATH`, `MODEL_VERSION`, `PORT`) kodun içindən çıxarıb environment variable-lara bağla və `.env.example` yarat."
+      - "Kiçik baza imici (`python:3.12-slim`), pinned `requirements.txt` və non-root istifadəçi ilə `Dockerfile` və `.dockerignore` yaz."
+    evidence_required: "`Dockerfile`, `.dockerignore`, `.env.example` və konteyner daxilində `/health` ilə `/predict` sorğularının işləmə sübutu."
+    skills:
+      - prod-docker-config
+test_plan:
+  - "Happy path test: Düzgün doldurulmuş JSON payload ilə `POST /predict` 200 qaytarır, `prediction`, `model_version` və `request_id` sahələri dolu olur."
+  - "Validation boundary test: Sərhəd dəyərlər (məsələn, `0` və ya maksimum icazəli hədd) 200 qaytarır, sərhəddən 1 vahid kənar dəyər isə 422 qaytarır."
+  - "Malformed & missing field test: Məcburi sahə göndərilmədikdə və ya tip uyğunsuzluğu olduqda server 500 ilə çökmür, 422 və aydın sahə adı qaytarır."
+  - "Lifespan test: Server ayağa qalxdıqda `/health` endpoint-i `{\"status\": \"ok\", \"model_loaded\": true}` və düzgün `model_version` qaytarır."
+failure_cases:
+  - "Missing model artifact at startup: `MODEL_PATH` yanlış olduqda xidmət səssizcə işə düşüb ilk müştəri sorğusunda 500 verməməli, başlanğıcda aydın xəta ilə dayanmalıdır (fail-fast)."
+  - "NaN / Infinity JSON payload: Standart olmayan float dəyərlər və ya ekstremal böyük rəqəmlər modeldə `ValueError` yaratmamalı, Pydantic qatında tutulmalıdır."
+  - "Per-request model reload bottleneck: Model təsadüfən endpoint funksiyasının içində `joblib.load()` edilərsə, p95 latency 10-50 dəfə artır."
+  - "PII leakage in logs: Xام müştəri məlumatlarının bütövlükdə info loglarına yazılması nəticəsində məxfilik pozuntusu."
+privacy_security:
+  - "Repo-ya heç bir real `.env`, API açarı və ya parol commit edilməməlidir; yalnız `.env.example` saxlanmalıdır."
+  - "Structured loglarda xam şəxsi məlumatlar (PII) deyil, yalnız texniki telemetriya (`request_id`, `latency_ms`, `status_code`, aqreqat feature xülasəsi) yazılmalıdır."
+  - "Docker konteyneri `root` istifadəçisi ilə deyil, məhdud hüquqlu tətbiq istifadəçisi ilə işləməlidir."
+definition_of_done:
+  - "`pytest` ilə bütün API testləri (minimum 8 test) sıfır xəta ilə keçir."
+  - "`docker build` və `docker run` ilə xidmət əlavə əl müdaxiləsi olmadan ayağa qalxır və sorğulara cavab verir."
+  - "Hər sorğu stdout-a parse edilə bilən JSON log sətiri çıxarır və README-də p50/p95 latency ölçümü sənədləşdirilib."
+readme_outline:
+  - "1. Xidmətin Arxitekturası və Model Artefaktının Xülasəsi"
+  - "2. API Müqaviləsi (`GET /health` və `POST /predict` üçün Request/Response Nümunələri)"
+  - "3. Yerli Quraşdırma, Testlərin İcrası (`pytest`) və Docker Təlimatı"
+  - "4. Observability: Structured Log Formatı və p50/p95 Latency Benchmark Nəticələri"
+  - "5. Məlum Məhdudiyyətlər və Təhlükəsizlik Qeydləri"
+stretch_goals:
+  - "Son N sorğunun feature paylanmasını izləyib təlim paylanmasından kəskin uzaqlaşma olduqda `drift_warning: true` bayrağı qaytaran sadə monitorinq əlavə etmək."
+  - "GitHub Actions ilə hər push zamanı `pytest` və `docker build` yoxlamasını işə salan CI workflow faylı (`.github/workflows/ci.yml`) yazmaq."

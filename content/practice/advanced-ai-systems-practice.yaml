@@ -1,0 +1,208 @@
+topic: advanced-ai-systems-lab
+title: "Advanced AI Systems, SQL, Git/CI-CD, CV & Robotics Practice"
+exercises:
+  - id: prac-adv-git-merge-resolution
+    type: mcq
+    title: "Git: Merge Conflict zamanı düzgün həll qaydası"
+    prompt: |
+      Komanda yoldaşın `main` budağında `config.py` faylında `MAX_TOKENS = 2048` və yeni `TIMEOUT_SEC = 15` əlavə edib. Sən isə öz feature budağında eyni sətirdə `MAX_TOKENS = 4096` dəyişikliyi etmisən. Pull Request zamanı belə konflikt yaranıb:
+
+      ```text
+      <<<<<<< HEAD (feature/long-context)
+      MAX_TOKENS = 4096
+      =======
+      MAX_TOKENS = 2048
+      TIMEOUT_SEC = 15
+      >>>>>>> main
+      ```
+
+      Həm sənin yeni kontekst həddini (`4096`), həm də komanda yoldaşının əlavə etdiyi `TIMEOUT_SEC = 15` qoruyucusunu saxlamaq üçün ən düzgün addım hansıdır?
+    skills: [git-workflow, debugging]
+    category: concept
+    difficulty: 1
+    hints:
+      - "Avtomatik `--ours` seçsən `TIMEOUT_SEC = 15` silinəcək; `--theirs` seçsən sənin `4096` dəyişikliyin itəcək."
+      - "Konflikt markerlərini (`<<<<<<<`, `=======`, `>>>>>>>`) silib hər iki mənalı dəyişikliyi birləşdirmək və pytest-i işə salmaq lazımdır."
+    options:
+      - id: a
+        text: "Konflikt markerlərini təmizləyib həm `MAX_TOKENS = 4096`, həm də `TIMEOUT_SEC = 15` sətirlərini saxlamaq, testləri işə salıb yeni merge commit etmək"
+        feedback: "Doğrudur! Hər iki budağın mühəndislik niyyəti qorunur və testlə təsdiqlənir."
+      - id: b
+        text: "`git push --force origin main` yazıb main budağının tarixçəsini öz budağınla əzmək"
+        feedback: "Paylaşılan `main` budağına force push etmək komanda yoldaşının `TIMEOUT_SEC` dəyişikliyini və digər commit-ləri silər."
+      - id: c
+        text: "Konflikt markerlərini faylda olduğu kimi saxlayıb commit etmək"
+        feedback: "Konflikt markerləri etibarsız Python sintaksisidir (`SyntaxError`) və tətbiqi dərhal çökdürəcək."
+    answer: a
+    explanation: "Merge konflikti zamanı hər iki tərəfin niyyəti təhlil olunur, markerlər silinir, birləşmiş kod yazılır və test dəsti ilə yoxlanılır."
+
+  - id: prac-adv-sql-parameterized-search
+    type: code
+    title: "SQL: Parametrləşdirilmiş axtarış və B-Tree indeks analitikası"
+    prompt: |
+      Python-un daxili `sqlite3` modulundan istifadə edərək `query_high_latency_logs(rows: list[tuple[str, str, int]], model_ver: str, min_latency_ms: int) -> list[str]` funksiyasını yaz:
+
+      - Yaddaşdaxili (`:memory:`) SQLite bazasında `request_logs(request_id TEXT PRIMARY KEY, model_version TEXT, latency_ms INTEGER)` cədvəli və `idx_model_latency` indeksi yarat.
+      - `rows` siyahısındakı `(request_id, model_version, latency_ms)` qeydlərini **parametrləşdirilmiş `?` sorğusu** ilə əlavə et.
+      - Yalnız `model_version = ?` və `latency_ms >= ?` şərtlərini ödəyən `request_id`-ləri **`latency_ms` üzrə azalan (`DESC`), bərabərlikdə `request_id` üzrə artan (`ASC`)** sıra ilə qaytar.
+      - `model_ver` içində SQL injection simvolları (`"' OR '1'='1"`) olsa belə, funksiya təhlükəsiz işləməli və yalnız həmin literal sətirlə uyğunlaşan qeydləri qaytarmalıdır!
+    skills: [sql-basics, py-errors]
+    category: data
+    difficulty: 2
+    hints:
+      - "`conn = sqlite3.connect(':memory:')` ilə baza yarat və `conn.executemany('INSERT INTO request_logs VALUES (?, ?, ?)', rows)` işlət."
+      - "`SELECT request_id FROM request_logs WHERE model_version = ? AND latency_ms >= ? ORDER BY latency_ms DESC, request_id ASC` sorğusuna `(model_ver, min_latency_ms)` ötür."
+    starter_code: |
+      import sqlite3
+
+      def query_high_latency_logs(
+          rows: list[tuple[str, str, int]], model_ver: str, min_latency_ms: int
+      ) -> list[str]:
+          # TODO: SQLite cədvəli qur, ? ilə insert/select et və request_id siyahısını qaytar
+          return []
+    tests:
+      - name: "Düzgün filtrləmə və ORDER BY latency_ms DESC, request_id ASC"
+        code: |
+          sample = [
+              ("req-1", "v1", 120),
+              ("req-2", "v2", 450),
+              ("req-3", "v2", 900),
+              ("req-4", "v2", 450),
+              ("req-5", "v2", 200),
+          ]
+          assert query_high_latency_logs(sample, "v2", 400) == ["req-3", "req-2", "req-4"]
+      - name: "SQL Injection cəhdi (' OR '1'='1) heç bir yad sətir sızdırmır"
+        code: |
+          sample = [("req-1", "v1", 500), ("req-2", "v2", 600)]
+          evil = "' OR '1'='1"
+          assert query_high_latency_logs(sample, evil, 100) == []
+      - name: "Uyğun sətir olmadıqda boş list qaytarır"
+        code: |
+          assert query_high_latency_logs([], "v1", 100) == []
+    solution: |
+      import sqlite3
+
+      def query_high_latency_logs(
+          rows: list[tuple[str, str, int]], model_ver: str, min_latency_ms: int
+      ) -> list[str]:
+          conn = sqlite3.connect(":memory:")
+          try:
+              conn.execute(
+                  "CREATE TABLE request_logs (request_id TEXT PRIMARY KEY, model_version TEXT, latency_ms INTEGER)"
+              )
+              conn.execute(
+                  "CREATE INDEX idx_model_latency ON request_logs(model_version, latency_ms)"
+              )
+              conn.executemany(
+                  "INSERT INTO request_logs (request_id, model_version, latency_ms) VALUES (?, ?, ?)",
+                  rows,
+              )
+              cur = conn.execute(
+                  """
+                  SELECT request_id
+                  FROM request_logs
+                  WHERE model_version = ? AND latency_ms >= ?
+                  ORDER BY latency_ms DESC, request_id ASC
+                  """,
+                  (model_ver, min_latency_ms),
+              )
+              return [r[0] for r in cur.fetchall()]
+          finally:
+              conn.close()
+    explanation: |
+      Parametrləşdirilmiş `?` sorğuları SQL strukturunu datadan ayırır, kompozit indeks `(model_version, latency_ms)` isə həm `WHERE`, həm də `ORDER BY` əməliyyatını sürətləndirir.
+
+  - id: prac-adv-cv-nms-filter
+    type: code
+    title: "Computer Vision: Sadə Non-Maximum Suppression (NMS) filtri"
+    prompt: |
+      Object detector eyni obyektin ətrafında bir neçə üst-üstə düşən qutu qaytarır. `simple_nms(detections: list[dict], iou_threshold: float) -> list[str]` funksiyasını yaz:
+
+      - Hər element `{"id": str, "score": float, "box": [x1, y1, x2, y2]}` formatındadır.
+      - Qutuları `score` üzrə **azalan** sıra ilə düz.
+      - Ən yüksək ballı qutunu seçilmişlər siyahısına əlavə et, sonra qalan qutulardan onunla `IoU >= iou_threshold` olanların hamısını sil (suppress et).
+      - Qalan növbəti ən yüksək ballı qutu üçün eyni addımı təkrarla və saxlanılan qutuların `"id"` siyahısını qaytar.
+    skills: [spec-computer-vision, py-control-flow]
+    category: python
+    difficulty: 2
+    hints:
+      - "Əvvəlcə iki `[x1, y1, x2, y2]` qutusu üçün `_iou(a, b)` köməkçi funksiyası yaz."
+      - "Sıralanmış siyahıdan ilk elementi `kept`-ə götür və `[d for d in rest if _iou(current['box'], d['box']) < iou_threshold]` ilə qalanları filtrlə."
+    starter_code: |
+      def simple_nms(detections: list[dict], iou_threshold: float) -> list[str]:
+          # TODO: score üzrə sırala və IoU >= iou_threshold olan dublikat qutuları sil
+          return []
+    tests:
+      - name: "Üst-üstə düşən aşağı ballı dublikat qutu silinir, uzaq qutu saxlanılır"
+        code: |
+          dets = [
+              {"id": "car_dup", "score": 0.75, "box": [1, 1, 10, 10]},
+              {"id": "car_best", "score": 0.95, "box": [0, 0, 10, 10]},
+              {"id": "person_1", "score": 0.85, "box": [50, 50, 70, 90]},
+          ]
+          assert simple_nms(dets, 0.5) == ["car_best", "person_1"]
+      - name: "Kəsişmə həddən kiçik olduqda hər iki qutu saxlanılır"
+        code: |
+          dets = [
+              {"id": "b1", "score": 0.9, "box": [0, 0, 10, 10]},
+              {"id": "b2", "score": 0.8, "box": [8, 0, 18, 10]},
+          ]
+          assert simple_nms(dets, 0.5) == ["b1", "b2"]
+      - name: "Boş siyahı üçün [] qaytarır"
+        code: |
+          assert simple_nms([], 0.5) == []
+    solution: |
+      def _iou(a: list[float], b: list[float]) -> float:
+          ix1 = max(a[0], b[0])
+          iy1 = max(a[1], b[1])
+          ix2 = min(a[2], b[2])
+          iy2 = min(a[3], b[3])
+          iw = max(0.0, ix2 - ix1)
+          ih = max(0.0, iy2 - iy1)
+          inter = iw * ih
+          if inter <= 0.0:
+              return 0.0
+          area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+          area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+          union = area_a + area_b - inter
+          return inter / union if union > 0.0 else 0.0
+
+      def simple_nms(detections: list[dict], iou_threshold: float) -> list[str]:
+          ordered = sorted(detections, key=lambda d: d["score"], reverse=True)
+          kept_ids: list[str] = []
+          while ordered:
+              best = ordered.pop(0)
+              kept_ids.append(best["id"])
+              ordered = [
+                  d for d in ordered if _iou(best["box"], d["box"]) < iou_threshold
+              ]
+          return kept_ids
+    explanation: |
+      Non-Maximum Suppression (NMS) hər addımda ən yüksək əminlikli deteksiyanı saxlayır və onunla güclü kəsişən (`IoU >= threshold`) qonşu dublikat qutuları sıradan çıxarır.
+
+  - id: prac-adv-cicd-artifact-triad
+    type: multi
+    title: "MLOps CI/CD: Reproducible Model Buraxılışı üçün Artefakt Üçlüyü"
+    prompt: |
+      6 ay əvvəl production-a çıxmış bir ML/LLM modelinin davranışını dəqiq yenidən yaratmaq (reproduce etmək) və auditdən keçirmək üçün yalnız `git commit` hash-i kifayət etmir. Tam təkrarlana bilən buraxılış qeydində hansı elementlər mütləq versiyalanmalıdır? Doğru olanları seç.
+    skills: [prod-cicd, prod-docker-config]
+    category: production
+    difficulty: 1
+    hints:
+      - "Eyni Python kodu fərqli təlim datası və ya fərqli model çəkisi/prompt ilə tamam fərqli nəticə verir."
+      - "Reproducibility = Kod + Data/Eval dəsti + Model çəkiləri/Prompt + Asılılıq mühiti."
+    options:
+      - id: a
+        text: "Tətbiq və təlim kodunun dəqiq Git commit SHA identifikatoru"
+        feedback: "Bəli — preprocessing, postprocessing və serving məntiqini müəyyən edir."
+      - id: b
+        text: "Təlim və Golden Evaluation datasetlərinin versiyası / SHA-256 məzmun xülasəsi (hash)"
+        feedback: "Bəli — hansı data üzərində öyrədildiyini və hansı benchmark-dan keçdiyini sübut edir."
+      - id: c
+        text: "Model çəkilərinin (checkpoint / LoRA adapter) və sistem prompt şablonunun dəqiq versiyası"
+        feedback: "Bəli — inference zamanı qərar verən parametrləri müəyyən edir."
+      - id: d
+        text: "Developer-in istifadə etdiyi monitorun ekran parlaqlığı"
+        feedback: "Xeyr — bunun modelin riyazi davranışına heç bir dəxli yoxdur."
+    answers: [a, b, c]
+    explanation: "MLOps-da təkrarlana bilənlik (reproducibility) Kod SHA + Data Hash + Model/Prompt Versiyası üçlüyünün birlikdə qeydə alınmasını tələb edir."

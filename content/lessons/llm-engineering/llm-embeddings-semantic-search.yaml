@@ -1,0 +1,354 @@
+id: llm-embeddings-semantic-search
+track: llm-engineering
+module: retrieval-rag
+title: "Embedding-lər, Cosine Similarity və Hybrid Search (Semantik + Leksik axtarış)"
+summary: "Mətnlərin sıx vektor fəzasında (dense embeddings) necə təmsil olunduğunu, cosine similarity ilə top-k axtarışı, BM25 leksik axtarışı ilə semantik axtarışın fərqini və niyə hybrid search lazım olduğunu öyrənəcəksən."
+level: core
+estimated_minutes: [50, 70]
+prerequisites: [llm-tokens-structured-output, math-vectors-dot-product]
+next: llm-rag-pipeline-evaluation
+skills: [llm-embeddings, vectors-dot-product]
+objectives:
+  - "Embedding modelinin mətni yüksək ölçülü semantik vektor fəzasına necə çevirdiyini izah etmək"
+  - "Cosine similarity düsturu ilə sorğu vektoruna ən yaxın top-k sənədi tapmaq"
+  - "Leksik (BM25/keyword) axtarış, semantik axtarış və hybrid search arasındakı mühəndislik seçimini etmək"
+  - "Fərqli embedding modellərinin vektorlarının niyə eyni indeksdə qarışdırıla bilmədiyini əsaslandırmaq"
+why_it_matters: |
+  İstifadəçi axtarış xanasına `"kartımdan pul tutuldu amma sifariş ləğv olundu"` yazanda, bazadakı rəsmi təlimatda `"uğursuz tranzaksiya zamanı məbləğin geri qaytarılması (refund)"` ifadəsi işlənə bilər. Adi açar söz (`ILIKE` və ya keyword) axtarışı burada sıfır nəticə qaytarır, çünki ortaq söz demək olar ki, yoxdur.
+
+  Digər tərəfdən, istifadəçi `"ERR-4092"` və ya `"AZ-99812"` müqavilə nömrəsini axtaranda təkcə embedding axtarışı uğursuz ola bilər. Həm məna yaxınlığını (embeddings), həm də dəqiq identifikatorları (lexical BM25) birləşdirən **hybrid search** müasir RAG və axtarış sistemlərinin onurğa sütunudur.
+terms:
+  - term: Embedding
+    definition: "Mətnin mənasını əks etdirən sabit ölçülü həqiqi ədədlər vektoru ($v \\in \\mathbb{R}^d$, məsələn $d=768$ və ya $1536$)."
+  - term: Cosine similarity
+    definition: "İki vektor arasındakı bucağın kosinusu: $\\cos(\\theta) = \\frac{u \\cdot v}{\\|u\\|_2 \\|v\\|_2}$. Uzunluqdan asılı olmayaraq istiqamət yaxınlığını ölçür ($[-1, 1]$)."
+  - term: Semantic search (Dense retrieval)
+    definition: "Sorğu və sənədlərin embedding vektorları arasındakı həndəsi yaxınlığa (cosine similarity / dot product) əsaslanan axtarış."
+  - term: Lexical search (BM25 / Sparse retrieval)
+    definition: "Dəqiq söz və simvol üst-üstə düşməsinə, nadir sözlərin çəkisinə (TF-IDF / BM25) əsaslanan açar söz axtarışı."
+  - term: Hybrid search
+    definition: "Leksik (BM25) və semantik (embedding) axtarış nəticələrini birləşdirən (məs. Reciprocal Rank Fusion ilə) axtarış arxitekturası."
+  - term: Re-indexing
+    definition: "Embedding modeli dəyişdikdə bütün sənəd bazasının yeni modellə yenidən vektorlaşdırılıb indeksə yazılması."
+sections:
+  - id: embeddings-and-hybrid
+    kind: explanation
+    title: "Semantik vektor fəzası, Cosine Similarity və Hybrid Search"
+    body: |
+      ### 1. Mətnlərdən həndəsi fəzaya: Embeddings
+      Embedding modeli mətni qəbul edib sabit uzunluqlu sıx vektora ($v \in \mathbb{R}^d$) çevirən neyron şəbəkədir. Bu model elə öyrədilib ki, **oxşar mənalı cümlələr vektor fəzasında bir-birinə yaxın istiqamətə** düşsün — hətta fərqli sözlərdən istifadə etsələr belə.
+
+      İki vektorun ($u$ və $v$) nə qədər oxşar istiqamətə baxdığını **cosine similarity** ilə ölçürük:
+
+      $$\text{sim}(u, v) = \cos(\theta) = \frac{u \cdot v}{\|u\|_2 \, \|v\|_2} = \frac{\sum_{i=1}^{d} u_i v_i}{\sqrt{\sum_{i=1}^{d} u_i^2} \, \sqrt{\sum_{i=1}^{d} v_i^2}}$$
+
+      - $\text{sim}(u, v) = 1.0$: eyni istiqamət (maksimum oxşarlıq)
+      - $\text{sim}(u, v) = 0.0$: ortoqonal (əlaqəsiz)
+      - Əgər vektorlar əvvəlcədən vahid uzunluğa normallaşdırılıbsa ($\|u\|_2 = \|v\|_2 = 1$), cosine similarity sadəcə **dot product**-a ($u \cdot v$) bərabər olur.
+
+      ### 2. Leksik (BM25) vs Semantik vs Hybrid Search
+      Heç bir axtarış üsulu təkbaşına hər sorğu tipində mükəmməl deyil:
+
+      | Sorğu növü | Nümunə | Leksik (BM25) | Semantik (Embedding) |
+      |---|---|---|---|
+      | **Parafraz / konsept** | `"işdən çıxanda kompensasiya"` vs `"əmək müqaviləsinə xitam müavinəti"` | Zəif (fərqli sözlər) | **Güclü** (eyni məna) |
+      | **Dəqiq kod / ID / SKU** | `"ERR-4092"`, `"SKU-8841-B"`, `"Qanun maddə 74.2"` | **Güclü** (dəqiq uyğunluq) | Zəif (ümumi "xəta kodu" kimi görür) |
+      | **Nadir termin / ad** | `"Pyodide"`, `"Qarabağ FK"` | **Güclü** | Orta / modeldən asılı |
+
+      **Hybrid Search** hər iki axtarışı paralel işə salır və siyahıları birləşdirir (məsələn, **Reciprocal Rank Fusion — RRF** düsturu ilə: $\text{score}(d) = \frac{1}{k + \text{rank}_{\text{bm25}}(d)} + \frac{1}{k + \text{rank}_{\text{vec}}(d)}$). Beləliklə, həm dəqiq kodlar, həm də məna parafrazları tapılır.
+
+      ### 3. Niyə fərqli embedding modellərini qarışdırmaq olmaz?
+      Hər embedding modeli özünəməxsus koordinat sisteminə malikdir. `Model A` ilə hesablanmış sənəd vektorunu `Model B` ilə hesablanmış sorğu vektoru ilə müqayisə etmək — hətta ölçüləri ($d=768$) eyni olsa belə — **tamamilə mənasız rəqəmlər** verir. Embedding modelini (və ya onun versiyasını) dəyişəndə bütün bazanı **re-index** etməlisən.
+  - id: library-analogy
+    kind: analogy
+    title: "Mental model: mövzu xəritəsi vs barkod skaneri"
+    body: |
+      Böyük bir kitabxanada kitab axtardığını düşün:
+
+      - **Semantik axtarış (Embedding) = Mövzu üzrə rəf xəritəsi:** Kitabxanaçı hər kitabın məzmununu oxuyub onu otağın müəyyən koordinatına qoyub. *"Pul idarəetməsi"* küncünə getsən, orada *"Şəxsi büdcə"*, *"Maliyyə savadlılığı"* və *"Sərmayə əsasları"* kitablarını yan-yana tapacaqsan — adlarında eyni söz olmasa da.
+      - **Leksik axtarış (BM25) = Barkod və inventar kataloqu:** Əgər sənə konkret `"ISBN-9952-44-102"` nömrəli kitab lazımdırsa, mövzu rəflərini gəzmək işə yaramır; birbaşa kataloqdan həmin barkodu axtarırsan.
+      - **Hybrid search:** Həm barkod kataloqunu, həm də mövzu xəritəsini eyni vaxtda yoxlayan ağıllı axtarış masasıdır.
+      - **Model uyğunsuzluğu:** Bir kitabxananın rəf nömrələrini başqa binadakı kitabxananın xəritəsi ilə axtarmağa bənzəyir — rəf `3B` birində tarix, digərində kimya şöbəsidir.
+  - id: hybrid-search-diagram
+    kind: diagram
+    title: "Hybrid Search axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        Q["İstifadəçi sorğusu"] --> L["BM25 Leksik İndeks"]
+        Q --> E["Embedding Model v1"]
+        E --> V["Vector DB (Cosine Top-K)"]
+        L --> F["Rank Fusion (RRF)"]
+        V --> F
+        F --> R["Birləşdirilmiş Top-K Nəticə"]
+      ```
+
+      Vacib qayda: Sorğunu vektorlaşdıran `Embedding Model v1` sənədləri indeksləyən modellə **eyni model və eyni versiya** olmalıdır.
+  - id: worked-cosine-topk
+    kind: worked_example
+    title: "3 ölçülü vektorlarla Cosine Similarity və Top-K hesabı"
+    body: |
+      Tutaq ki, kiçik 3 ölçülü fəzada sorğu vektorumuz $q = [1, 1, 0]$-dır. Bazada 3 sənəd var:
+      - `doc_a` (ödəniş problemi): $a = [2, 2, 0]$
+      - `doc_b` (qismən əlaqəli): $b = [1, 0, 1]$
+      - `doc_c` (tam əlaqəsiz): $c = [0, 0, 3]$
+
+      Əvvəlcə sorğu vektorunun uzunluğunu (L2 norm) tapaq:
+
+      $$\|q\|_2 = \sqrt{1^2 + 1^2 + 0^2} = \sqrt{2} \approx 1.4142$$
+
+      İndi hər sənədlə cosine similarity hesablayaq:
+
+      **1. `doc_a` ($a = [2, 2, 0]$):**
+      - $q \cdot a = 1(2) + 1(2) + 0(0) = 4$
+      - $\|a\|_2 = \sqrt{4 + 4 + 0} = \sqrt{8} = 2\sqrt{2}$
+      - $\text{sim}(q, a) = \frac{4}{\sqrt{2} \cdot 2\sqrt{2}} = \frac{4}{4} = 1.0$ (uzunluğu 2 dəfə böyük olsa da, istiqamət eynidir!)
+
+      **2. `doc_b` ($b = [1, 0, 1]$):**
+      - $q \cdot b = 1(1) + 1(0) + 0(1) = 1$
+      - $\|b\|_2 = \sqrt{1 + 0 + 1} = \sqrt{2}$
+      - $\text{sim}(q, b) = \frac{1}{\sqrt{2} \cdot \sqrt{2}} = 0.5$
+
+      **3. `doc_c` ($c = [0, 0, 3]$):**
+      - $q \cdot c = 0$, deməli $\text{sim}(q, c) = 0.0$
+
+      **Top-$k=2$ sıralaması:** `["doc_a", "doc_b"]`.
+  - id: code-top-k
+    kind: code
+    title: "Kod: Təmiz Python ilə Cosine Similarity və Top-K axtarışı"
+    body: |
+      ```python
+      import math
+
+
+      def cosine_similarity(u: list[float], v: list[float]) -> float:
+          """İki eyni uzunluqlu vektor arasında cosine similarity hesablayır."""
+          if len(u) != len(v):
+              raise ValueError(f"Dimension mismatch: {len(u)} != {len(v)}")
+
+          dot = sum(a * b for a, b in zip(u, v))
+          norm_u = math.sqrt(sum(a * a for a in u))
+          norm_v = math.sqrt(sum(b * b for b in v))
+
+          if norm_u == 0.0 or norm_v == 0.0:
+              return 0.0
+          return dot / (norm_u * norm_v)
+
+
+      def top_k_similar(query_vec: list[float], docs: list[dict], k: int) -> list[str]:
+          """Sorğu vektoruna ən yaxın top-k sənəd ID-sini azalan ardıcıllıqla qaytarır."""
+          if k <= 0 or not docs:
+              return []
+
+          scored = [
+              (cosine_similarity(query_vec, doc["vec"]), doc["id"])
+              for doc in docs
+          ]
+          # Ən yüksək similarity birinci gəlir
+          scored.sort(key=lambda item: item[0], reverse=True)
+          return [doc_id for _, doc_id in scored[:k]]
+
+
+      docs_index = [
+          {"id": "refund-policy", "vec": [0.8, 0.6, 0.0]},
+          {"id": "password-reset", "vec": [0.0, 0.1, 0.99]},
+          {"id": "card-charge-issue", "vec": [0.75, 0.65, 0.05]},
+      ]
+      print(top_k_similar([0.8, 0.6, 0.0], docs_index, k=2))
+      # ['refund-policy', 'card-charge-issue']
+      ```
+
+      Vacib detallar:
+      - **Ölçü (dimension) yoxlaması:** `len(u) != len(v)` fərqli embedding modellərinin təsadüfən qarışdırılmasını dərhal tutur.
+      - **Sıfır vektor qorunması:** `norm_u == 0.0` halında `ZeroDivisionError` əvəzinə təhlükəsiz `0.0` qaytarılır.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Sorğu və indeks üçün fərqli embedding modelləri işlətmək**
+      Sənədləri `text-embedding-3-small` ilə indeksləyib, axtarış zamanı başqa modellə sorğu vektoru yaratmaq (və ya model versiyasını yeniləyib köhnə indeksi saxlamaq) axtarış keyfiyyətini səssizcə sıfıra endirir. Model adını indeksin metadata-sında saxla və uyğunluğu yoxla.
+
+      **2. Normallaşdırılmamış vektorlarda sadəcə dot product işlətmək**
+      Uzun sənədlərin və ya fərqli modellərin vektor uzunluğu ($\|v\|_2$) fərqli ola bilər. Vektorları L2 normasına bölmədən dot product hesablasan, istiqaməti yaxın olan yox, sadəcə ədədləri böyük olan vektor qalib gələcək.
+
+      **3. Dəqiq kod və ID axtarışında yalnız embedding-ə güvənmək**
+      Müştəri dəstək sistemində sifariş nömrəsi, məhsul kodu və ya qanun maddəsi axtarılırsa, təkcə vector search yanlış sənədlər gətirəcək. Belə sistemlərdə mütləq metadata filteri və ya BM25 hybrid search istifadə et.
+
+      **4. Bütün kitabı tək bir embedding vektoruna sıxmaq**
+      50 səhifəlik sənədi tək bir vektora çevirsən, konkret bir cümlənin mənası ümumi ortalama içində itir. Sənədlər məntiqi parçalara (chunks) bölünərək vektorlaşdırılmalıdır (növbəti dərs).
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri və məhdudiyyətlər"
+    body: |
+      - **Vektor ölçüsü ($d$) vs yaddaş və sürət:** $d=3072$ ölçülü vektor $d=768$ ilə müqayisədə 4 dəfə çox RAM və disk tutur, axtarışı yavaşladır, amma dəqiqlik artımı çox vaxt cüzi olur. Milyonlarla sənəddə daha kiçik ölçü və ya Matryoshka (kəsilə bilən) embedding-lər daha sərfəlidir.
+      - **Çoxdilli (Multilingual) vs İngilisdilli embedding modelləri:** Azərbaycan dilindəki mətnlər üçün yalnız ingilis dilində öyrədilmiş köhnə embedding modelləri zəif nəticə verir. Multilingual embedding modeli seçmək və öz Azərbaycan dilindəki test sorğularınla (`Recall@k`) yoxlamaq şərtdir.
+      - **Exact KNN vs Approximate Nearest Neighbors (ANN / HNSW):** 10,000 sənədə qədər bütün vektorları bir-bir yoxlamaq (exact search) millisaniyələr çəkir. Milyonlarla sənəddə isə HNSW və ya IVF kimi təqribi indekslər lazımdır (kiçik recall itkisi hesabına böyük sürət qazancı).
+mastery_criteria:
+  - "İki vektor arasında cosine similarity dəyərini həm əl ilə, həm də Python kodunda sıfır-norma və ölçü yoxlaması ilə hesablaya bilirsən"
+  - "Konkret axtarış ssenarisində nə vaxt leksik (BM25), nə vaxt semantik və nə vaxt hybrid search lazım olduğunu əsaslandıra bilirsən"
+  - "Embedding modelinin dəyişdirilməsinin niyə tam re-indexing tələb etdiyini izah edirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-llmemb-cosine-scale
+      type: mcq
+      title: "Vektorun uzunluğu və Cosine Similarity"
+      prompt: "Əgər $u = [1, 2]$ və $v = [3, 6]$ vektorları verilərsə, onlar arasındakı cosine similarity nəyə bərabərdir?"
+      skills: [vectors-dot-product, llm-embeddings]
+      category: math
+      options:
+        - id: a
+          text: "1.0"
+          feedback: "Doğrudur. $v = 3u$ olduğu üçün hər iki vektor eyni müsbət istiqamətə baxır ($\\cos(0^\\circ) = 1.0$)."
+        - id: b
+          text: "3.0"
+          feedback: "Cosine similarity həmişə $[-1, 1]$ aralığında olur, 1-dən böyük ola bilməz."
+        - id: c
+          text: "0.33"
+          feedback: "Cosine similarity vektorların uzunluq nisbətini yox, aralarındakı bucağın kosinusunu ölçür."
+      answer: a
+      explanation: "Cosine similarity vektorları öz L2 uzunluqlarına böldüyü üçün müsbət skalyara vurulma ($v = 3u$) nəticəni dəyişmir: istiqamət eynidir, ona görə 1.0 alınır."
+    - id: q-llmemb-model-mix
+      type: mcq
+      title: "Embedding modelinin yenilənməsi"
+      prompt: "Bazada 500,000 sənəd `EmbedModel-v1` ($d=768$) ilə indekslənib. Komanda daha yeni `EmbedModel-v2` ($d=768$) modelinə keçmək istəyir. Ölçülər eyni olduğu üçün yalnız yeni gələn sorğuları `v2` ilə vektorlaşdırıb köhnə indeksdə axtarış etmək olarmı?"
+      skills: [llm-embeddings]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Bəli, hər iki model 768 ölçülü vektor qaytardığı üçün koordinatlar uyğundur"
+          feedback: "Xeyr — ölçülərin eyni olması koordinat oxlarının eyni mənanı daşıması demək deyil."
+        - id: b
+          text: "Xeyr, fərqli modellərin vektor fəzaları uyğunsuz olduğu üçün bütün 500,000 sənəd v2 ilə yenidən indekslənməlidir (re-indexing)"
+          feedback: "Doğrudur. Hər modelin öyrəndiyi həndəsi fəza fərqlidir; sorğu və sənədlər mütləq eyni modellə vektorlaşdırılmalıdır."
+        - id: c
+          text: "Bəli, amma yalnız cosine similarity əvəzinə Euclidean distance işlədildikdə"
+          feedback: "Məsafə metrikasını dəyişmək iki fərqli vektor fəzasını uyğunlaşdırmır."
+      answer: b
+      explanation: "İki fərqli embedding modelinin çıxış koordinatları tamamilə fərqli fəzalara aiddir. Model dəyişdikdə bütün sənəd bazası yenidən vektorlaşdırılmalıdır."
+    - id: q-llmemb-hybrid-usecases
+      type: multi
+      title: "Hybrid Search nə vaxt üstündür?"
+      prompt: "Hansı axtarış ssenarilərində təkcə semantik (embedding) axtarış kifayət etmir və leksik (BM25) komponenti olan **Hybrid Search** kritik üstünlük verir? Doğru olanları seç."
+      skills: [llm-embeddings]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "İstifadəçi konkret xəta kodunu ('ORA-01555') və ya məhsul artikulunu ('SKU-7741') axtaranda"
+          feedback: "Bəli — dəqiq simvol və kod uyğunluğu üçün BM25 əvəzsizdir."
+        - id: b
+          text: "İstifadəçi həm ümumi problemi təsvir edir, həm də konkret müqavilə nömrəsini ('AZ-2025-881') qeyd edəndə"
+          feedback: "Bəli — hybrid search həm mənanı, həm də dəqiq nömrəni birlikdə tutur."
+        - id: c
+          text: "Hüquqi sənədlərdə konkret maddə nömrəsi və nadir texniki terminlər axtarılanda"
+          feedback: "Bəli — nadir terminlər və maddə nömrələri leksik axtarışla dəqiq tapılır."
+        - id: d
+          text: "Sənədlərin hamısı şəkillərdən ibarət olduqda və heç bir mətn və ya OCR olmadıqda"
+          feedback: "Xeyr — mətn olmadıqda BM25 işləyə bilməz."
+      answers: [a, b, c]
+      explanation: "Dəqiq identifikatorlar, xəta kodları, maddə nömrələri və nadir terminlər olan hər bir mətn axtarışında BM25 + Embedding (Hybrid Search) təkbaşına embedding axtarışından daha etibarlıdır."
+exercises:
+  - id: ex-llmemb-top-k-similar
+    type: code
+    title: "top_k_similar axtarış funksiyasını yaz"
+    prompt: |
+      Sorğu vektoruna (`query_vec`) cosine similarity baxımından ən yaxın `k` sənədin ID-sini qaytaran `top_k_similar(query_vec: list[float], docs: list[dict], k: int) -> list[str]` funksiyasını yaz.
+
+      **Müqavilə:**
+      - `docs` siyahısındakı hər element `{"id": str, "vec": list[float]}` formatındadır.
+      - Nəticə ən yüksək cosine similarity-dən ən aşağıya doğru sıralanmış `id` siyahısı (`list[str]`) olmalıdır.
+      - `k <= 0` və ya `docs` boşdursa `[]` qaytar.
+      - Əgər `query_vec` və ya hər hansı sənəd vektorunun uzunluğu (`len`) fərqlidirsə, `ValueError` qaldır.
+      - Əgər vektorlardan birinin L2 norması `0` olarsa (hamısı `0.0`), həmin cüt üçün similarity `0.0` qəbul edilməlidir (sıfıra bölmə xətası verməməlidir).
+    skills: [llm-embeddings, vectors-dot-product]
+    category: python
+    difficulty: 2
+    hints:
+      - "Əvvəlcə köməkçi `_cosine(u, v)` funksiyası yaz: `len(u) != len(v)` olduqda `raise ValueError(...)`."
+      - "`norm_u = math.sqrt(sum(x * x for x in u))`. Əgər `norm_u == 0 or norm_v == 0` olarsa `0.0` qaytar."
+      - "Bütün sənədləri `(score, doc['id'])` kimi hesabla, `reverse=True` ilə sırala və ilk `k` elementin ID-sini qaytar."
+    starter_code: |
+      import math
+
+      def top_k_similar(query_vec: list[float], docs: list[dict], k: int) -> list[str]:
+          # TODO: cosine similarity hesabla və ən yaxın top-k doc id siyahısını qaytar
+          pass
+    tests:
+      - name: "Ən yaxın top-2 sənədi düzgün ardıcıllıqla tapır"
+        code: |
+          docs = [
+              {"id": "d1", "vec": [1.0, 0.0, 0.0]},
+              {"id": "d2", "vec": [0.0, 1.0, 0.0]},
+              {"id": "d3", "vec": [0.9, 0.1, 0.0]},
+          ]
+          res = top_k_similar([1.0, 0.0, 0.0], docs, k=2)
+          assert res == ["d1", "d3"], f"Gözlənilən ['d1', 'd3'], alınan {res}"
+      - name: "k <= 0 və sıfır vektor hallarını təhlükəsiz idarə edir"
+        code: |
+          docs = [
+              {"id": "zero", "vec": [0.0, 0.0]},
+              {"id": "pos", "vec": [2.0, 2.0]},
+          ]
+          assert top_k_similar([1.0, 1.0], docs, k=0) == []
+          assert top_k_similar([1.0, 1.0], docs, k=2) == ["pos", "zero"]
+          assert top_k_similar([0.0, 0.0], docs, k=1) == ["zero"]
+      - name: "Ölçü uyğunsuzluğunda ValueError qaldırır"
+        code: |
+          try:
+              top_k_similar([1.0, 2.0], [{"id": "bad", "vec": [1.0, 2.0, 3.0]}], k=1)
+              assert False, "Fərqli vektor ölçüsü üçün ValueError qaldırılmalı idi"
+          except ValueError:
+              pass
+    solution: |
+      import math
+
+      def _cosine(u: list[float], v: list[float]) -> float:
+          if len(u) != len(v):
+              raise ValueError("Vector dimensions must match")
+          dot = sum(a * b for a, b in zip(u, v))
+          nu = math.sqrt(sum(a * a for a in u))
+          nv = math.sqrt(sum(b * b for b in v))
+          if nu == 0.0 or nv == 0.0:
+              return 0.0
+          return dot / (nu * nv)
+
+      def top_k_similar(query_vec: list[float], docs: list[dict], k: int) -> list[str]:
+          if k <= 0 or not docs:
+              return []
+          scored = [(_cosine(query_vec, d["vec"]), d["id"]) for d in docs]
+          scored.sort(key=lambda item: item[0], reverse=True)
+          return [doc_id for _, doc_id in scored[:k]]
+    explanation: |
+      Funksiya hər sənəd üçün ölçü uyğunluğunu yoxlayır, sıfır-norma vektorlarını qoruyaraq cosine similarity hesablayır və ən yüksək bal toplayan ilk `k` sənədin ID-sini qaytarır.
+  - id: ex-llmemb-hybrid-choice
+    type: mcq
+    title: "Axtarış arxitekturası seçimi"
+    prompt: |
+      Texniki dəstək komandası mühəndislər üçün daxili bilik bazası qurur. Mühəndislər bəzən `"serverdə yaddaş dolanda nə etməli"` kimi ümumi suallar verir, bəzən isə loglarda gördükləri `"ERR_CONN_RESET_504"` kodunu birbaşa axtarırlar.
+
+      Yalnız embedding əsaslı vector search quraşdırıldıqdan sonra mühəndislər şikayət edir ki, konkret xəta kodlarını axtaranda sistem tamamilə başqa xəta sənədlərini gətirir. Ən düzgün mühəndislik həlli hansıdır?
+    skills: [llm-embeddings]
+    category: llm-architecture
+    difficulty: 1
+    hints:
+      - "Dense embedding modelləri mənaca yaxın sözləri yaxşı tapır, lakin `ERR_CONN_RESET_504` kimi nadir hərf-rəqəm kodlarını ümumi vektor fəzasında bulanıqlaşdıra bilir."
+      - "Dəqiq açar sözləri BM25, konseptual sualları isə Vector Search tapır — hər ikisini birləşdirən arxitektura hansıdır?"
+    options:
+      - id: a
+        text: "BM25 leksik axtarışı ilə embedding axtarışını birləşdirən Hybrid Search (məs. RRF ilə) tətbiq etmək"
+        feedback: "Doğrudur. BM25 dəqiq xəta kodlarını ('ERR_CONN_RESET_504'), embedding isə konseptual sualları tapır."
+      - id: b
+        text: "Embedding axtarışını tamamilə silib yalnız SQL LIKE '%query%' saxlamaq"
+        feedback: "Bu halda dəqiq kodlar tapılsa da, parafraz və konseptual suallar nəticəsiz qalacaq."
+      - id: c
+        text: "LLM-in temperature parametrini 1.5-ə qaldırmaq"
+        feedback: "Temperature generasiya mərhələsinə aiddir, axtarış (retrieval) indeksindəki problemi həll etmir."
+    answer: a
+    explanation: "Həm təbii dildə parafrazları, həm də dəqiq texniki identifikatorları dəstəkləmək üçün standart həll BM25 + Vector Search birləşməsindən ibarət Hybrid Search arxitekturasıdır."
+references:
+  - title: "Weaviate — Hybrid Search Explained"
+    url: https://weaviate.io/blog/hybrid-search-explained
+    note: "BM25 və dense vector axtarışının RRF ilə birləşdirilməsi"
+  - title: "Massive Text Embedding Benchmark (MTEB) Leaderboard"
+    url: https://huggingface.co/spaces/mteb/leaderboard
+    note: "Müxtəlif dillər və tapşırıqlar üzrə embedding modellərinin müqayisəsi"

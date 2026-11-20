@@ -1,0 +1,22 @@
+node_modules/
+dist/
+data/*.sqlite*
+data/local-secrets.json
+data/backups/
+.env
+.env.*
+!.env.example
+# Local environment and secrets
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs
+*.log
+logs/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/

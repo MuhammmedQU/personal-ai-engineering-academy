@@ -1,0 +1,334 @@
+# Onboarding diagnostic.
+# Self-ratings are recorded but NEVER treated as mastery. Practical checks are
+# auto-graded and combined with the self-rating to produce strong / partial /
+# missing areas and an initial study plan.
+areas:
+  - id: python
+    title: Python və proqram məntiqi
+    description: Funksiyalar, data structures, xəta idarəsi, kod oxumaq.
+    self_rating_prompt: Python-da funksiyalar, list/dict, exceptions ilə nə qədər müstəqil işləyirsən?
+    related_modules: [python-engineering]
+  - id: software
+    title: Software engineering (Git, testing, APIs, SQL)
+    description: Testlər, HTTP API-lər, versiya nəzarəti, verilənlər bazaları.
+    self_rating_prompt: pytest, HTTP API çağırışları, Git və SQL ilə təcrübən necədir?
+    related_modules: [http-apis, git-debugging-logging, sql-databases]
+  - id: math
+    title: Math (linear algebra, calculus, probability)
+    description: Vektorlar, matrislər, törəmə, gradient, şərti ehtimal.
+    self_rating_prompt: Dot product, matrix multiplication, törəmə və Bayes qaydasını nə qədər rahat tətbiq edirsən?
+    related_modules: [linear-algebra, calculus-optimization, probability-statistics]
+  - id: classical-ml
+    title: Classical ML
+    description: Data splitting, leakage, overfitting, metriklər, alqoritmlər.
+    self_rating_prompt: Train/test split, leakage, precision/recall və overfitting anlayışlarını praktikada nə qədər tətbiq edə bilirsən?
+    related_modules: [ml-foundations, ml-evaluation, ml-generalization]
+  - id: deep-learning
+    title: Deep learning
+    description: Tensors, neural networks, loss, backpropagation.
+    self_rating_prompt: Neural network-ün necə öyrəndiyini (forward, loss, backprop) və PyTorch training loop-u nə qədər bilirsən?
+    related_modules: [neural-network-basics]
+  - id: llm
+    title: LLM engineering
+    description: API, structured output, embeddings, RAG, tool calling.
+    self_rating_prompt: LLM API, structured output, embeddings və RAG ilə nə qədər işləmisən?
+    related_modules: [llm-foundations, retrieval-rag, tools-agents]
+  - id: deployment
+    title: Deployment və production
+    description: Docker, environment variables, monitoring.
+    self_rating_prompt: Modeli və ya API-ni deploy etmək, Docker, env variables və monitoring ilə təcrübən necədir?
+    related_modules: [serving-deployment, observability]
+
+goals:
+  - id: broad-ai-engineering
+    label: Geniş AI Engineering bünövrəsi (tövsiyə olunan)
+    focus_modules: [python-engineering, linear-algebra, ml-foundations, llm-foundations, serving-deployment]
+  - id: llm-apps
+    label: LLM tətbiqləri qurmaq (RAG, agents, fine-tuning)
+    focus_modules: [llm-foundations, retrieval-rag, tools-agents, llm-ops-safety]
+  - id: ml-engineering
+    label: ML engineering (model qurmaq və qiymətləndirmək)
+    focus_modules: [ml-foundations, ml-evaluation, ml-generalization, ml-algorithms, neural-network-basics]
+  - id: production
+    label: Production / MLOps
+    focus_modules: [serving-deployment, observability, cicd-versioning]
+  - id: robotics-cv
+    label: Robotics, drones, computer vision
+    focus_modules: [linear-algebra, calculus-optimization, neural-network-basics, computer-vision, robotics-autonomy]
+  - id: startup
+    label: AI startup / məhsul qurmaq
+    focus_modules: [product-discovery-mvp, product-validation, llm-foundations]
+
+checks:
+  # ---- python ----
+  - area: python
+    question:
+      id: diag-py-dict-get
+      type: text
+      title: Output-u proqnozlaşdır
+      prompt: |
+        ```python
+        counts = {}
+        for w in ["a", "b", "a"]:
+            counts[w] = counts.get(w, 0) + 1
+        print(counts["a"])
+        ```
+        Nə çap olunacaq?
+      skills: [py-data-structures]
+      category: predict-output
+      accepted: ["2"]
+      explanation: "`get(w, 0)` açar yoxdursa 0 qaytarır; 'a' iki dəfə sayılır."
+  - area: python
+    question:
+      id: diag-py-mutable-default
+      type: mcq
+      title: Bu kodda problem nədir?
+      prompt: |
+        ```python
+        def add(x, items=[]):
+            items.append(x)
+            return items
+        ```
+      skills: [py-functions]
+      category: debug
+      options:
+        - id: a
+          text: Problem yoxdur
+          feedback: Default list çağırışlar arasında paylaşılır.
+        - id: b
+          text: Default list bütün çağırışlar arasında paylaşılır
+          feedback: Doğru — `items=[]` funksiya təyin olunan anda bir dəfə yaranır; bunun əvəzinə `items=None` işlədilməlidir.
+        - id: c
+          text: append list qaytarmır, ona görə None qayıdır
+          feedback: Funksiya `items` qaytarır, `append`-in nəticəsini yox.
+      answer: b
+      explanation: Python-da default argument obyektləri funksiya çağırılanda yox, təyin olunanda bir dəfə yaradılır və bütün çağırışlar arasında paylaşılır.
+  # ---- software ----
+  - area: software
+    question:
+      id: diag-sw-retry
+      type: mcq
+      title: Hansı HTTP cavabı retry üçün ən uyğundur?
+      prompt: API client yazırsan. Aşağıdakı cavablardan hansı **avtomatik retry** üçün ən məqbul namizəddir?
+      skills: [http-apis]
+      category: concept
+      options:
+        - id: a
+          text: 400 Bad Request
+          feedback: Sorğu səhvdir; təkrar göndərmək eyni nəticəni verəcək.
+        - id: b
+          text: 401 Unauthorized
+          feedback: Açar səhvdir; retry kömək etməz.
+        - id: c
+          text: 503 Service Unavailable
+          feedback: Doğru — müvəqqəti server problemi; backoff ilə retry məqbuldur.
+      answer: c
+      explanation: 5xx (xüsusilə 502/503/504) və 429 müvəqqəti ola bilər; 4xx əksər hallarda client səhvidir.
+  - area: software
+    question:
+      id: diag-sw-test
+      type: mcq
+      title: Yaxşı unit test
+      prompt: "`average(xs)` funksiyası üçün hansı test ən çox dəyər qatır, əgər artıq `average([1,2,3]) == 2` testi varsa?"
+      skills: [py-testing]
+      category: concept
+      options:
+        - id: a
+          text: "`average([2,4,6]) == 4`"
+          feedback: Bu, artıq yoxlanan eyni davranışı təkrarlayır.
+        - id: b
+          text: Boş list üçün nə baş verdiyini yoxlayan test
+          feedback: Doğru — edge case davranışı çox vaxt müəyyən edilməmiş qalır.
+        - id: c
+          text: Funksiyanın 1 ms-dən tez işlədiyini yoxlayan test
+          feedback: Unit test üçün etibarsız və az dəyərli.
+      answer: b
+      explanation: Testlər yeni davranış sinfini əhatə etdikdə dəyər qatır.
+  # ---- math ----
+  - area: math
+    question:
+      id: diag-math-dot
+      type: numeric
+      title: Dot product
+      prompt: "$a = [1, 2, 3]$, $b = [4, 0, -1]$. $a \\cdot b$ neçədir?"
+      skills: [vectors-dot-product]
+      category: math
+      answer: 1
+      tolerance: 0
+      explanation: "Dot product uyğun komponentlərin hasillərinin cəmidir: $1 \\cdot 4 + 2 \\cdot 0 + 3 \\cdot (-1) = 4 + 0 - 3 = 1$."
+  - area: math
+    question:
+      id: diag-math-shape
+      type: text
+      title: Matrix shape
+      prompt: Shape-i `(32, 128)` olan matrisi shape-i `(128, 10)` olan matrisə vursaq, nəticənin shape-i nə olar? `(a, b)` formatında yaz.
+      skills: [matrices-shapes]
+      category: math
+      accepted: ["(32, 10)", "(32,10)", "32x10", "32, 10"]
+      explanation: (m, n) @ (n, p) → (m, p). Daxili ölçülər (128) uyğun gəlir və yox olur.
+  - area: math
+    question:
+      id: diag-math-gd
+      type: numeric
+      title: Bir gradient descent addımı
+      prompt: "$L(w) = w^2$, hazırda $w = 3$, learning rate $\\eta = 0.1$. Bir gradient descent addımından sonra $w$ neçə olar?"
+      skills: [gradient-descent]
+      category: math
+      answer: 2.4
+      tolerance: 0.001
+      explanation: "Əvvəlcə törəməni tapırıq: $dL/dw = 2w = 2(3) = 6$. Sonra gradient-in əksinə addım atırıq: $w_{\\text{new}} = 3 - 0.1 \\cdot 6 = 2.4$."
+  - area: math
+    question:
+      id: diag-math-bayes
+      type: mcq
+      title: Base rate
+      prompt: Xəstəlik əhalinin 1%-də var. Test xəstələrin 99%-ni tapır, sağlamların isə 5%-ni səhvən müsbət göstərir. Test müsbətdirsə, xəstə olma ehtimalı təxminən nə qədərdir?
+      skills: [probability-bayes]
+      category: math
+      options:
+        - id: a
+          text: Təxminən 99%
+          feedback: Bu, testin həssaslığıdır (P(+|xəstə)), soruşulan P(xəstə|+) deyil.
+        - id: b
+          text: Təxminən 17%
+          feedback: Doğru — 0.0099 / (0.0099 + 0.0495) ≈ 0.167.
+        - id: c
+          text: Təxminən 50%
+          feedback: Hesabla — sağlamların sayı çox böyükdür.
+      answer: b
+      explanation: Nadir hadisələrdə false positive-lər true positive-ləri üstələyə bilər.
+  # ---- classical ML ----
+  - area: classical-ml
+    question:
+      id: diag-ml-leakage
+      type: mcq
+      title: Data leakage
+      prompt: Kimsə bütün datasetə `StandardScaler().fit_transform(X)` tətbiq edib, sonra train/test-ə bölüb. Problem nədir?
+      skills: [ml-data-leakage]
+      category: concept
+      options:
+        - id: a
+          text: Problem yoxdur, scaling sadəcə ölçünü dəyişir
+          feedback: Scaler test datasının mean/std-ni də "görüb".
+        - id: b
+          text: Test datasının statistikası training prosesinə sızıb (leakage)
+          feedback: Doğru — scaler yalnız train datası üzərində fit olunmalıdır.
+        - id: c
+          text: StandardScaler yalnız classification üçündür
+          feedback: Belə məhdudiyyət yoxdur.
+      answer: b
+      explanation: Bütün preprocessing statistikaları yalnız training hissəsindən öyrənilməlidir (Pipeline bunu avtomatlaşdırır).
+  - area: classical-ml
+    question:
+      id: diag-ml-precision
+      type: numeric
+      title: Precision
+      prompt: Model 40 nümunəni "müsbət" adlandırıb; onlardan 30-u həqiqətən müsbətdir. Precision neçədir? (0 ilə 1 arası onluq kəsr)
+      skills: [ml-classification-metrics]
+      category: ml-metric
+      answer: 0.75
+      tolerance: 0.001
+      explanation: "Precision modelin müsbət dediyi nümunələrin neçə faizinin həqiqətən müsbət olduğunu ölçür: $\\text{Precision} = \\text{TP} / (\\text{TP} + \\text{FP}) = 30 / 40 = 0.75$."
+  # ---- deep learning ----
+  - area: deep-learning
+    question:
+      id: diag-dl-zero-grad
+      type: mcq
+      title: Training loop
+      prompt: PyTorch training loop-unda `optimizer.zero_grad()` çağırılmasa nə olar?
+      skills: [dl-training-loop]
+      category: concept
+      options:
+        - id: a
+          text: Gradient-lər addımlar arasında toplanır (accumulate), yeniləmələr səhv olur
+          feedback: Doğru — PyTorch `.backward()` zamanı yeni gradient-i köhnə `.grad` üzərinə əlavə edir, ona görə hər addımdan əvvəl sıfırlamaq lazımdır.
+        - id: b
+          text: Model heç öyrənmir, çünki gradient sıfırdır
+          feedback: Əksinə, gradient-lər toplanıb böyüyür.
+        - id: c
+          text: Heç nə — PyTorch avtomatik sıfırlayır
+          feedback: Avtomatik sıfırlamır; bu qəsdən dizayn qərarıdır.
+      answer: a
+      explanation: "PyTorch-da `.backward()` gradient-i köhnə `.grad` dəyərinin üzərinə toplayır (gradient accumulation üçün); sıfırlamasanız addımlar korlanır."
+  # ---- llm ----
+  - area: llm
+    question:
+      id: diag-llm-rag
+      type: mcq
+      title: RAG
+      prompt: RAG sistemi səhv cavab verir. İlk yoxlamalı olduğun şey hansıdır?
+      skills: [llm-rag, llm-evaluation]
+      category: llm-architecture
+      options:
+        - id: a
+          text: Daha böyük model seçmək
+          feedback: Səbəbi bilmədən model dəyişmək bahalı və çox vaxt faydasızdır.
+        - id: b
+          text: Retrieval mərhələsinin düzgün sənəd parçalarını gətirib-gətirmədiyi
+          feedback: Doğru — kontekstdə cavab yoxdursa, generation onu tapa bilməz.
+        - id: c
+          text: Temperature-u 0-a endirmək
+          feedback: Bu, faktiki səhvi düzəltmir.
+      answer: b
+      explanation: RAG sistemində problemi əvvəlcə retrieval (düzgün sənəd tapılıbmı?) və generation (tapılan kontekstdən düzgün cavab yazılıbmı?) hissələrinə ayırmaq lazımdır.
+  - area: llm
+    question:
+      id: diag-llm-structured
+      type: mcq
+      title: Structured output
+      prompt: Model JSON qaytarmalıdır. Production kodda ən etibarlı yanaşma hansıdır?
+      skills: [llm-structured-output]
+      category: llm-architecture
+      options:
+        - id: a
+          text: Promptda "yalnız JSON qaytar" yazıb nəticəyə etibar etmək
+          feedback: Model bəzən formatı pozur və ya sahələri unudur.
+        - id: b
+          text: Cavabı schema ilə validasiya etmək, səhv olarsa məhdud sayda retry və ya xəta qaytarmaq
+          feedback: Doğru — LLM çıxışı etibarsız xarici məlumat kimi schema yoxlamasından keçməli və bounded retry ilə qorunmalıdır.
+        - id: c
+          text: Regex ilə JSON-u mətndən kəsmək və birbaşa istifadə etmək
+          feedback: Format və məzmun yoxlanılmır.
+      answer: b
+      explanation: Modelin çıxışını etibarsız xarici input kimi qəbul edib schema validator + məhdud retry/fallback ilə emal etmək lazımdır.
+  # ---- deployment ----
+  - area: deployment
+    question:
+      id: diag-dep-secrets
+      type: mcq
+      title: API key harada saxlanmalıdır?
+      prompt: LLM provider API key-i olan web tətbiq qurursan. Açar harada olmalıdır?
+      skills: [prod-docker-config]
+      category: production
+      options:
+        - id: a
+          text: Frontend JavaScript kodunda, istifadəçi birbaşa provider-ə müraciət etsin
+          feedback: Açar brauzerdə hər kəsə görünür.
+        - id: b
+          text: Server-side environment variable-da; frontend yalnız öz backend-inə müraciət edir
+          feedback: Doğru — API açarı heç vaxt brauzer bundle-ına və ya Git tarixçəsinə düşməməli, yalnız server mühitində oxunmalıdır.
+        - id: c
+          text: Git repository-də config.py faylında
+          feedback: Repo tarixçəsində açar əbədi qalır.
+      answer: b
+      explanation: API açarları və gizli dəyərlər (secrets) yalnız server-side mühit dəyişənlərində və ya şifrələnmiş lokal secret store-da saxlanmalıdır.
+  - area: deployment
+    question:
+      id: diag-dep-p95
+      type: mcq
+      title: Latency metric
+      prompt: API-nin ortalama latency-si 200 ms-dir. Bu niyə kifayət qədər məlumat deyil?
+      skills: [prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: Ortalama yavaş sorğuların quyruğunu (tail) gizlədə bilər; p95/p99 lazımdır
+          feedback: Doğru — sorğuların 95%-i 100 ms, 5%-i isə 3000 ms çəkə bilər və ortalama bunu gizlədir.
+        - id: b
+          text: Ortalama həmişə median-a bərabərdir
+          feedback: Əyri paylanmada fərqlidir.
+        - id: c
+          text: Latency vacib metrik deyil
+          feedback: İstifadəçi təcrübəsi üçün çox vacibdir.
+      answer: a
+      explanation: İstifadəçilərin 5%-i 3 saniyə gözləyə bilər, ortalama (mean) isə hələ də 200 ms kimi yaxşı görünər — ona görə p95 və p99 izlənilir.

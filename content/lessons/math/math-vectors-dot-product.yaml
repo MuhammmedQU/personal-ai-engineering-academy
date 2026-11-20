@@ -1,0 +1,358 @@
+id: math-vectors-dot-product
+track: math
+module: linear-algebra
+title: Vektorlar, dot product, L2 norm və cosine similarity
+summary: ML və LLM sistemlərində obyektlərin (sənədlərin, şəkillərin, istifadəçilərin) ədədi vektor kimi necə təsvir olunduğunu və iki vektor arasındakı oxşarlığın dot product və cosine similarity ilə necə ölçüldüyünü öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: []
+next: math-matrices-shapes
+skills: [vectors-dot-product]
+objectives:
+  - Vektoru həm həndəsi ox, həm də ML feature/embedding siyahısı kimi izah etmək
+  - İki vektorun skalyar hasilini (dot product) və L2 normasını (uzunluğunu) əl ilə və kodla hesablamaq
+  - Cosine similarity düsturunu tətbiq etmək və nə üçün uzunluqdan (magnitude) asılı olmadığını əsaslandırmaq
+  - Sıfır vektoru (zero vector) və ölçü uyğunsuzluğu (dimension mismatch) hallarını kodda təhlükəsiz idarə etmək
+why_it_matters: |
+  Kompüter nə *"Bakı haqqında məqalə"* mətnini, nə də bir müştərinin alış-veriş vərdişini birbaşa başa düşür. AI sistemlərində hər şey əvvəlcə ədədlər siyahısına — **vektora** (embedding və ya feature vector) çevrilir.
+
+  RAG (Retrieval-Augmented Generation) sistemində istifadəçi sual verəndə sistem həmin sualı `1536` ölçülü vektora çevirir və bazadakı milyonlarla sənəd vektoru ilə **dot product** və ya **cosine similarity** hesablayaraq ən yaxın mənalı sənədləri tapır. Bu üç düstur müasir semantik axtarışın və neyron şəbəkələrinin təməl daşıdır.
+terms:
+  - term: Vector (vektor)
+    definition: "Sıralı ədədlər siyahısı $\\mathbf{x} = [x_1, x_2, \\dots, x_n]$; hər mövqe bir xüsusiyyəti (feature) və ya koordinatı təmsil edir."
+  - term: Dimension (ölçü)
+    definition: Vektordakı elementlərin sayı ($n$). Məsələn, `[3, 4]` vektoru 2-ölçülüdür ($\mathbb{R}^2$).
+  - term: Dot product (skalyar hasil)
+    definition: Eyni ölçülü iki vektorun uyğun elementlərinin hasilləri cəmi; nəticə tək bir ədəddir (scalar).
+  - term: L2 norm (Euclidean norm)
+    definition: Vektorun başlanğıc nöqtəsindən ($0$) məsafəsi və ya öz uzunluğu; $\|\mathbf{a}\|_2 = \sqrt{\sum a_i^2}$.
+  - term: Unit vector (vahid vektor)
+    definition: L2 norması (uzunluğu) $1.0$-a bərabər olan vektor ($\|\mathbf{u}\|_2 = 1$).
+  - term: Cosine similarity
+    definition: İki vektor arasındakı bucağın kosinusu ($[-1, 1]$ aralığında); vektorların uzunluğunu yox, yalnız **istiqamət oxşarlığını** ölçür.
+sections:
+  - id: vectors-and-formulas
+    kind: explanation
+    title: Vektorlar, Dot Product, L2 Norm və Cosine Similarity
+    body: |
+      ML-də bir obyektin xüsusiyyətlərini sıralı ədədlər siyahısı — **vektor** kimi yazırıq. Məsələn, bir evi $\mathbf{x} = [85, 3, 12]$ (`[sahə_m2, otaq_sayı, mərkəzdən_km]`) kimi təsvir edə bilərik.
+
+      **1. Dot Product (Skalyar hasil):**
+      Eyni $n$ ölçülü $\mathbf{a} = [a_1, \dots, a_n]$ və $\mathbf{b} = [b_1, \dots, b_n]$ vektorlarının dot product-ı:
+
+      $$\mathbf{a} \cdot \mathbf{b} = \sum_{i=1}^{n} a_i b_i = a_1 b_1 + a_2 b_2 + \dots + a_n b_n$$
+
+      Simvollar:
+      - $\mathbf{a}, \mathbf{b}$ — uzunluğu $n$ olan iki vektor
+      - $a_i, b_i$ — vektorların $i$-ci mövqedəki elementləri
+      - $n$ — vektorların ölçüsü (element sayı)
+
+      *Kiçik nümunə:* $\mathbf{a} = [3, 4]$ və $\mathbf{b} = [6, 8]$ üçün $\mathbf{a} \cdot \mathbf{b} = 3 \cdot 6 + 4 \cdot 8 = 18 + 32 = 50$.
+
+      **2. L2 Norm (Vektorun uzunluğu):**
+      Pifaqor teoreminin $n$ ölçüyə ümumiləşməsidir:
+
+      $$\|\mathbf{a}\|_2 = \sqrt{\sum_{i=1}^{n} a_i^2} = \sqrt{\mathbf{a} \cdot \mathbf{a}}$$
+
+      Simvollar:
+      - $\|\mathbf{a}\|_2$ — $\mathbf{a}$ vektorunun L2 norması (mənfi olmayan skalyar ədəd)
+      - $a_i^2$ — hər elementin kvadratı
+
+      *Kiçik nümunə:* $\mathbf{a} = [3, 4]$ üçün $\|\mathbf{a}\|_2 = \sqrt{3^2 + 4^2} = \sqrt{9 + 16} = \sqrt{25} = 5$.
+
+      **3. Cosine Similarity (İstiqamət oxşarlığı):**
+      Dot product həm vektorların istiqamətindən, həm də uzunluğundan asılıdır. Uzunluq təsirini aradan qaldırmaq üçün dot product-ı hər iki vektorun uzunluqları hasilinə bölürük:
+
+      $$\text{cos\_sim}(\mathbf{a}, \mathbf{b}) = \cos(\theta) = \frac{\mathbf{a} \cdot \mathbf{b}}{\|\mathbf{a}\|_2 \, \|\mathbf{b}\|_2}$$
+
+      Simvollar:
+      - $\theta$ — iki vektor arasındakı bucaq
+      - $\mathbf{a} \cdot \mathbf{b}$ — vektorların skalyar hasili
+      - $\|\mathbf{a}\|_2, \|\mathbf{b}\|_2$ — hər iki vektorun L2 uzunluğu
+
+      Nəticə həmişə $[-1, 1]$ aralığındadır:
+      - **$+1.0$:** Tam eyni istiqamətə baxırlar ($\theta = 0^\circ$).
+      - **$0.0$:** Bir-birinə perpendikulyardırlar (ortoqonal, $\theta = 90^\circ$, heç bir əlaqə yoxdur).
+      - **$-1.0$:** Tam əks istiqamətə baxırlar ($\theta = 180^\circ$).
+  - id: compass-flashlight-analogy
+    kind: analogy
+    title: "Mental model: kompas istiqaməti vs fənərin parlaqlığı"
+    body: |
+      Təsəvvür et ki, iki nəfər əlində fənərlə qaranlıqda müəyyən hədəfə işıq salır:
+
+      - Birinci adamın əlində kiçik cib fənəri var: $\mathbf{a} = [3, 4]$ (uzunluğu $5$).
+      - İkinci adamın əlində eyni hədəfə yönəlmiş ikiqat güclü projektor var: $\mathbf{b} = [6, 8]$ (uzunluğu $10$).
+
+      Əgər *"Onlar eyni yerə baxırmı?"* sualını veririksə, fənərin gücü (uzunluğu) bizi çaşdırmamalıdır.
+      RAG sistemində də 1 cümləlik qısa xülasə ilə 10 abzaslıq uzun məqalə eyni mövzudadırsa, uzun məqalədə sözlər çox təkrarlandığı üçün onun xam vektoru daha uzun ola bilər. **Cosine similarity** hər iki vektoru əvvəlcə vahid uzunluğa ($1.0$) gətirir və yalnız **kompas istiqamətlərini** müqayisə edir.
+  - id: cosine-geometry-diagram
+    kind: diagram
+    title: Həndəsi baxış və hesab axını
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Vektor a = [3, 4]"] --> D["a · b = 3*6 + 4*8 = 50"]
+        B["Vektor b = [6, 8]"] --> D
+        A --> NA["||a||₂ = √(9+16) = 5"]
+        B --> NB["||b||₂ = √(36+64) = 10"]
+        D --> CS["cos_sim = 50 / (5 * 10) = 1.0"]
+        NA --> CS
+        NB --> CS
+      ```
+  - id: worked-three-vectors
+    kind: worked_example
+    title: Addım-addım 3 sənəd vektorunun müqayisəsi
+    body: |
+      Üç kiçik 2-ölçülü vektoru (`[idman_balı, texnologiya_balı]`) müqayisə edək:
+      - Sorğu: $\mathbf{a} = [3, 4]$
+      - Sənəd 1 (eyni nisbət, daha uzun): $\mathbf{b} = [6, 8]$
+      - Sənəd 2 (perpendikulyar): $\mathbf{c} = [-4, 3]$
+
+      **Addım 1 — L2 normalar:**
+      - $\|\mathbf{a}\|_2 = \sqrt{3^2 + 4^2} = \sqrt{25} = 5$
+      - $\|\mathbf{b}\|_2 = \sqrt{6^2 + 8^2} = \sqrt{100} = 10$
+      - $\|\mathbf{c}\|_2 = \sqrt{(-4)^2 + 3^2} = \sqrt{25} = 5$
+
+      **Addım 2 — Dot product və Cosine similarity:**
+
+      | Cütlük | Dot product ($\mathbf{x} \cdot \mathbf{y}$) | Normlar hasili | Cosine similarity | Yozum |
+      |---|---|---|---|---|
+      | $(\mathbf{a}, \mathbf{b})$ | $3(6) + 4(8) = 50$ | $5 \cdot 10 = 50$ | $50 / 50 = \mathbf{1.0}$ | Tam eyni istiqamət! |
+      | $(\mathbf{a}, \mathbf{c})$ | $3(-4) + 4(3) = 0$ | $5 \cdot 5 = 25$ | $0 / 25 = \mathbf{0.0}$ | Ortoqonal ($90^\circ$ bucaq) |
+
+      **Edge case — Sıfır vektoru:** Əgər $\mathbf{z} = [0, 0]$ olarsa, $\|\mathbf{z}\|_2 = 0$ olur və məxrəcdə $0$-a bölmə yaranır! Kodda bunu açıq yoxlayıb `ValueError` qaldırmaq (və ya müqavilədən asılı olaraq `0.0` qaytarmaq) lazımdır.
+  - id: code-walkthrough
+    kind: code
+    title: Kod — təmiz Python ilə dot_product, l2_norm və cosine_similarity
+    body: |
+      ```python
+      import math
+
+
+      def dot_product(a: list[float], b: list[float]) -> float:
+          """Compute dot product of two equal-length non-empty vectors."""
+          if len(a) != len(b) or len(a) == 0:
+              raise ValueError("vectors must be non-empty and have equal length")
+          return float(sum(x * y for x, y in zip(a, b)))
+
+
+      def l2_norm(a: list[float]) -> float:
+          """Compute Euclidean (L2) norm of a vector."""
+          if len(a) == 0:
+              raise ValueError("vector must not be empty")
+          return math.sqrt(sum(x * x for x in a))
+
+
+      def cosine_similarity(a: list[float], b: list[float]) -> float:
+          """Compute cosine similarity; raise ValueError on zero-norm vector."""
+          dot = dot_product(a, b)
+          norm_a = l2_norm(a)
+          norm_b = l2_norm(b)
+          if norm_a == 0.0 or norm_b == 0.0:
+              raise ValueError("cosine similarity is undefined for zero vectors")
+          return dot / (norm_a * norm_b)
+      ```
+
+      Vacib detallar:
+      - `zip(a, b)` funksiyası fərqli uzunluqlu list-lərdə **səssizcə qısa olana görə kəsir**! Ona görə `if len(a) != len(b): raise ValueError(...)` yoxlamasını `zip`-dən əvvəl yazmaq mütləqdir.
+      - Sıfır vektor (`[0.0, 0.0]`) üçün `norm == 0.0` yoxlaması `ZeroDivisionError` əvəzinə aydın `ValueError` verir.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. `zip(a, b)`-nin uzunluqları yoxladığını zənn etmək**
+      `zip([1, 2, 3], [4, 5])` heç bir xəta vermədən `[(1, 4), (2, 5)]` qaytarır və 3-cü elementi səssizcə atır! Python 3.10+ versiyasında `zip(a, b, strict=True)` və ya açıq `len(a) != len(b)` yoxlaması istifadə et.
+
+      **2. Sıfır vektorunda `ZeroDivisionError`**
+      Boş mətn və ya bütün sözləri filtrdən kəsilmiş sənəd `[0, 0, ..., 0]` vektoru verə bilər. Məxrəcdə `norm_a == 0 or norm_b == 0` halını həmişə yoxla.
+
+      **3. Dot product ilə element-wise (Hadamard) vurmanı qarışdırmaq**
+      $[a_1 b_1, a_2 b_2]$ vektor qaytarır (element-wise hasil). Dot product isə bunların **cəmini** — tək bir skalyar ədəd qaytarır.
+
+      **4. L2 normada kvadrat kökü (`sqrt`) unutmaq**
+      $\sum a_i^2$ uzunluğun kvadratıdır ($\|\mathbf{a}\|_2^2$). Kvadrat kök almasan cosine similarity məxrəci səhv çıxacaq.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs
+    body: |
+      - **Əvvəlcədən normallaşdırma (Pre-normalization):** Əgər bazadakı 1 milyon embedding vektorunun hamısını saxlamazdan əvvəl öz L2 normasına bölüb **unit vector** ($\|\mathbf{u}\|_2 = 1$) halına gətirsən, onda $\|\mathbf{a}\|_2 \cdot \|\mathbf{b}\|_2 = 1 \cdot 1 = 1$ olur. Bu halda **Cosine Similarity = Dot Product**! Beləliklə, axtarış zamanı kök almaq və bölmə əməliyyatlarına ehtiyac qalmır, sürət 2-3 dəfə artır.
+      - **Saf Python vs NumPy:** Öyrənmək üçün `sum(x * y for x, y in zip(a, b))` əladır. Production-da isə 1536 ölçülü milyonlarla vektor üçün C/SIMD səviyyəsində işləyən `numpy.dot` və ya `FAISS`/`Qdrant` istifadə olunur (100x–1000x daha sürətli).
+mastery_criteria:
+  - İki vektorun dot product, L2 norm və cosine similarity dəyərini əl ilə və kodla dəqiq hesablaya bilirsən
+  - Ölçü uyğunsuzluğu və sıfır vektoru sərhəd hallarını tutan təmiz funksiya yaza bilirsən
+  - Vektorun miqyasını (scale) artırdıqda dot product və cosine similarity-nin necə dəyişdiyini izah edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mathvec-dot-calc
+      type: numeric
+      title: Dot product hesabı
+      prompt: "$\\mathbf{a} = [2, -1, 4]$ və $\\mathbf{b} = [3, 5, 2]$ vektorlarının skalyar hasilini ($\\mathbf{a} \\cdot \\mathbf{b}$) hesabla."
+      skills: [vectors-dot-product]
+      category: math
+      answer: 9
+      tolerance: 0.01
+      hints:
+        - "$2 \\cdot 3 + (-1) \\cdot 5 + 4 \\cdot 2$ cəmini hesabla."
+      explanation: "$\\mathbf{a} \\cdot \\mathbf{b} = (2)(3) + (-1)(5) + (4)(2) = 6 - 5 + 8 = 9$."
+    - id: q-mathvec-scale-invariance
+      type: mcq
+      title: Vektoru 3-ə vurduqda cosine similarity necə dəyişir?
+      prompt: "İki sıfır olmayan $\\mathbf{a}$ və $\\mathbf{b}$ vektorunun cosine similarity dəyəri $0.8$-dir. Əgər $\\mathbf{a}$ vektorunun bütün elementlərini müsbət $3$ ədədinə vursaq ($3\\mathbf{a}$), yeni $\\text{cos\\_sim}(3\\mathbf{a}, \\mathbf{b})$ neçə olar?"
+      skills: [vectors-dot-product]
+      category: concept
+      options:
+        - id: a
+          text: "2.4 (3 dəfə artar)"
+          feedback: Cosine similarity heç vaxt 1.0-dan böyük ola bilməz; həm surət, həm də məxrəc 3-ə vurulduğu üçün ixtisar gedir.
+        - id: b
+          text: "0.8 (dəyişməz)"
+          feedback: Doğru. Müsbət skalyara vurmaq vektorun uzunluğunu 3 dəfə artırır, amma istiqamətini dəyişmir.
+        - id: c
+          text: "0.267 (3 dəfə azalar)"
+          feedback: Surətdəki dot product da 3 dəfə artdığı üçün məxrəcdəki 3 ilə ixtisar olunur.
+      answer: b
+      explanation: "Müsbət $c > 0$ üçün $\\frac{(c\\mathbf{a})\\cdot\\mathbf{b}}{\\|c\\mathbf{a}\\|_2 \\|\\mathbf{b}\\|_2} = \\frac{c(\\mathbf{a}\\cdot\\mathbf{b})}{c\\|\\mathbf{a}\\|_2 \\|\\mathbf{b}\\|_2} = \\text{cos\\_sim}(\\mathbf{a}, \\mathbf{b}) = 0.8$."
+    - id: q-mathvec-orthogonal
+      type: mcq
+      title: Dot product sıfır olduqda
+      prompt: "Sıfır olmayan iki vektor üçün $\\mathbf{a} \\cdot \\mathbf{b} = 0$ olarsa, bu vektorlar haqqında nə demək olar?"
+      skills: [vectors-dot-product]
+      category: math
+      options:
+        - id: a
+          text: Eyni istiqamətə baxırlar ($\theta = 0^\circ$)
+          feedback: Eyni istiqamətdə $\cos(0^\circ) = 1$, dot product maksimum müsbət olur.
+        - id: b
+          text: Bir-birinə ortoqonaldırlar (perpendikulyar, $\theta = 90^\circ$) və cosine similarity $0.0$-dır
+          feedback: Doğru. $\cos(90^\circ) = 0$ olduğu üçün ortoqonal vektorların skalyar hasili sıfırdır.
+        - id: c
+          text: Əks istiqamətə baxırlar ($\theta = 180^\circ$)
+          feedback: Əks istiqamətdə $\cos(180^\circ) = -1$, dot product mənfi olur.
+      answer: b
+      explanation: "Sıfır olmayan vektorların skalyar hasilinin $0$ olması onların aralarındakı bucağın $90^\\circ$ (ortoqonal) olduğunu göstərir."
+    - id: q-mathvec-unit-vectors
+      type: mcq
+      title: Unit vektorların xassəsi
+      prompt: "Əgər $\\mathbf{u}$ və $\\mathbf{v}$ artıq L2-normallaşdırılmış **unit vektorlardırsa** ($\\|\\mathbf{u}\\|_2 = 1$ və $\\|\\mathbf{v}\\|_2 = 1$), onların cosine similarity dəyəri nəyə bərabərdir?"
+      skills: [vectors-dot-product]
+      category: concept
+      options:
+        - id: a
+          text: Birbaşa onların dot product-ına ($\mathbf{u} \cdot \mathbf{v}$)
+          feedback: Doğru. Məxrəc $1 \cdot 1 = 1$ olduğu üçün $\text{cos\_sim}(\mathbf{u}, \mathbf{v}) = \mathbf{u} \cdot \mathbf{v}$.
+        - id: b
+          text: Həmişə 1.0-a
+          feedback: Hər birinin öz uzunluğu 1-dir, amma aralarındakı bucaq fərqli ola bilər.
+        - id: c
+          text: "0.0-a"
+          feedback: Yalnız perpendikulyar olduqda 0.0 olar.
+      answer: a
+      explanation: "Məxrəc $\\|\\mathbf{u}\\|_2 \\|\\mathbf{v}\\|_2 = 1 \\cdot 1 = 1$ olduğu üçün unit vektorlarda cosine similarity elə dot product-ın özüdür."
+exercises:
+  - id: ex-mathvec-dot-and-cosine
+    type: code
+    title: dot_product və cosine_similarity funksiyalarını yaz
+    prompt: |
+      Embedding axtarış modulu üçün iki funksiyanı tamamla:
+
+      1. `dot_product(a: list[float], b: list[float]) -> float`:
+         - Əgər `a` və ya `b` boşdursa, yaxud uzunluqları fərqlidirsə → `ValueError` qaldır.
+         - Skalyar hasili `float` kimi qaytar.
+
+      2. `cosine_similarity(a: list[float], b: list[float]) -> float`:
+         - Əgər uzunluqlar fərqlidirsə və ya boşdursa → `ValueError` qaldır.
+         - Əgər vektorlardan hər hansı birinin L2 norması `0.0`-dırsa (məsələn `[0.0, 0.0]`) → `ValueError` qaldır.
+         - $\frac{\mathbf{a}\cdot\mathbf{b}}{\|\mathbf{a}\|_2 \|\mathbf{b}\|_2}$ dəyərini `float` kimi qaytar.
+    skills: [vectors-dot-product]
+    category: math
+    difficulty: 2
+    hints:
+      - "`if not a or len(a) != len(b): raise ValueError(...)` yoxlamasını `dot_product`-ın əvvəlində yaz."
+      - "`norm_a = math.sqrt(dot_product(a, a))` və `norm_b = math.sqrt(dot_product(b, b))` kimi öz funksiyandan istifadə edə bilərsən!"
+      - "`if norm_a == 0.0 or norm_b == 0.0: raise ValueError(...)` yoxlamağı unutma."
+    starter_code: |
+      import math
+
+
+      def dot_product(a: list[float], b: list[float]) -> float:
+          # TODO: ölçü yoxlaması və skalyar hasil
+          return 0.0
+
+
+      def cosine_similarity(a: list[float], b: list[float]) -> float:
+          # TODO: sıfır vektor yoxlaması və cosine similarity
+          return 0.0
+    tests:
+      - name: "[3, 4] və [6, 8] üçün dot product və cosine similarity"
+        code: |
+          import math
+          assert dot_product([3.0, 4.0], [6.0, 8.0]) == 50.0
+          assert math.isclose(cosine_similarity([3.0, 4.0], [6.0, 8.0]), 1.0, abs_tol=1e-6)
+      - name: Ortoqonal və əks istiqamətli vektorlar
+        code: |
+          import math
+          assert math.isclose(cosine_similarity([3.0, 4.0], [-4.0, 3.0]), 0.0, abs_tol=1e-6)
+          assert math.isclose(cosine_similarity([1.0, -2.0], [-2.0, 4.0]), -1.0, abs_tol=1e-6)
+      - name: Fərqli uzunluqlu və ya boş vektorlar ValueError verir
+        code: |
+          for fn in (dot_product, cosine_similarity):
+              for va, vb in [([], []), ([1.0], [1.0, 2.0]), ([1.0, 2.0, 3.0], [1.0, 2.0])]:
+                  try:
+                      fn(va, vb)
+                      assert False, f"{fn.__name__}({va}, {vb}) üçün ValueError gözlənilirdi"
+                  except ValueError:
+                      pass
+      - name: Sıfır vektoru cosine_similarity-də ValueError verir
+        code: |
+          for va, vb in [([0.0, 0.0], [1.0, 2.0]), ([1.0, 2.0], [0.0, 0.0])]:
+              try:
+                  cosine_similarity(va, vb)
+                  assert False, f"({va}, {vb}) üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      import math
+
+
+      def dot_product(a: list[float], b: list[float]) -> float:
+          if not a or len(a) != len(b):
+              raise ValueError("vectors must be non-empty and of equal length")
+          return float(sum(x * y for x, y in zip(a, b)))
+
+
+      def cosine_similarity(a: list[float], b: list[float]) -> float:
+          dot = dot_product(a, b)
+          norm_a = math.sqrt(dot_product(a, a))
+          norm_b = math.sqrt(dot_product(b, b))
+          if norm_a == 0.0 or norm_b == 0.0:
+              raise ValueError("zero vector has undefined cosine similarity")
+          return dot / (norm_a * norm_b)
+    explanation: |
+      `dot_product(a, a)` elə $\sum a_i^2$ olduğu üçün L2 normanı `math.sqrt(dot_product(a, a))` ilə tapmaq həm kodu qısa saxlayır, həm də ölçü yoxlamasını avtomatik təmin edir.
+  - id: ex-mathvec-numeric-cosine
+    type: numeric
+    title: Cosine similarity-ni əl ilə hesabla
+    prompt: |
+      İki vektor verilib: $\mathbf{a} = [3, 4]$ və $\mathbf{b} = [5, 12]$.
+      1. $\mathbf{a} \cdot \mathbf{b}$ skalyar hasilini tap.
+      2. $\|\mathbf{a}\|_2$ və $\|\mathbf{b}\|_2$ uzunluqlarını tap ($3\text{-}4\text{-}5$ və $5\text{-}12\text{-}13$ düzbucaqlı üçbucaqlarını xatırla!).
+      3. $\text{cos\_sim}(\mathbf{a}, \mathbf{b})$ dəyərini onluq kəsrlə hesabla.
+    skills: [vectors-dot-product]
+    category: math
+    difficulty: 2
+    answer: 0.9692
+    tolerance: 0.005
+    hints:
+      - "$\\mathbf{a} \\cdot \\mathbf{b} = 3 \\cdot 5 + 4 \\cdot 12 = 15 + 48 = 63$."
+      - "$\\|\\mathbf{a}\\|_2 = \\sqrt{9 + 16} = 5$, $\\|\\mathbf{b}\\|_2 = \\sqrt{25 + 144} = \\sqrt{169} = 13$."
+      - "$63 / (5 \\cdot 13) = 63 / 65 \\approx 0.9692$."
+    explanation: |
+      $\mathbf{a} \cdot \mathbf{b} = 63$, $\|\mathbf{a}\|_2 = 5$, $\|\mathbf{b}\|_2 = 13$. Cosine similarity $= \frac{63}{5 \cdot 13} = \frac{63}{65} \approx 0.96923$.
+references:
+  - title: 3Blue1Brown — Vectors, what even are they? (Essence of Linear Algebra)
+    url: https://www.3blue1brown.com/lessons/vectors
+    note: Vektorlar və skalyar hasil üzrə vizual intuisiya
+  - title: Wikipedia — Cosine similarity
+    url: https://en.wikipedia.org/wiki/Cosine_similarity
+    note: Mətn və embedding axtarışında cosine similarity tərifləri

@@ -1,0 +1,353 @@
+id: sw-git-debugging-structured-logging
+track: software-engineering
+module: git-debugging-logging
+title: "Git Workflow, Sistemli Debugging (git bisect) və Structured Logging"
+summary: "Komandada təhlükəsiz Git feature-branch axınını, merge conflict həllini, git bisect ilə O(log N) addımda bug-lı commit-i tapmağı, sistemli hipotez-test debugging metodunu və request_id ilə korrelyasiyalı structured JSON logging-i öyrənəcəksən."
+level: foundation
+estimated_minutes: [50, 75]
+prerequisites: [py-generators-streaming-pipelines]
+next: sw-sql-relational-analytics
+skills: [git-workflow, debugging, prod-monitoring]
+objectives:
+  - "Atomar commit-lər, feature branch, Pull Request yoxlama siyahısı və təhlükəsiz merge conflict həlli ilə komanda iş axınını qurmaq"
+  - "`git bisect` və ikili axtarış (binary search, $O(\\log_2 N)$) ilə reqressiya yaradan ilk commit-i tapmaq"
+  - "Təsadüfi kod dəyişikliyi əvəzinə 4 addımlı sistemli debugging (minimal reproduksiya → qatın təcridi → invariant yoxlaması → reqressiya testi) tətbiq etmək"
+  - "`print()` əvəzinə Python `logging` səviyyələrini (`DEBUG`..`CRITICAL`) və `request_id` kontekstli structured JSON logları qurmaq"
+why_it_matters: |
+  AI layihələrində ən qorxulu an belə başlayır: *"Dünən RAG sisteminin dəqiqliyi 88% idi, bu gün 62%-ə düşüb, arada 60 commit var və production-da bəzi sorğular 500 verir, amma konsolda sadəcə `Error occurred` yazılıb!"*
+
+  Peşəkar mühəndis bu vəziyyətdə təşvişə düşüb kodu təsadüfi qurcalamır:
+  1. **Structured Logging** vasitəsilə uğursuz sorğunun `request_id`, `model_version`, `latency_ms` və `error_type` sahələrini saniyələr içində süzür.
+  2. **`git bisect`** ilə 64 commit arasından dəqiqliyi salan dəqiq commit-i 64 yox, cəmi $\log_2(64) = 6$ test addımında tapır.
+  3. **Sistemli debugging** ilə səhvi əvvəlcə uğursuz unit testə çevirir, yalnız bundan sonra təmiz bir **feature branch** və **Pull Request** ilə düzəldir.
+terms:
+  - term: Atomic commit
+    definition: "Yalnız bir məntiqi dəyişikliyi ehtiva edən, bütün testlərdən keçən və lazım gəldikdə təkbaşına geri qaytarıla (`git revert`) bilən commit."
+  - term: Merge conflict
+    definition: "İki fərqli branch-in eyni faylın eyni sətirlərini fərqli şəkildə dəyişməsi nəticəsində Git-in avtomatik birləşdirə bilməyib mühəndis qərarı tələb etməsi."
+  - term: git bisect
+    definition: "Sonuncu yaxşı (good) və ilk pis (bad) commit arasında ikili axtarış (binary search) apararaq bug-ı gətirən ilk commit-i $O(\\log_2 N)$ addımda tapan Git aləti."
+  - term: Minimal reproduction (MRE)
+    definition: "Xətanı hər dəfə deterministik olaraq təkrarlayan ən kiçik data, sabit random seed və ən qısa kod parçası."
+  - term: Structured logging
+    definition: "Logların sərbəst mətn əvəzinə maşın tərəfindən axtarıla bilən açar-dəyər / JSON formatında (`{\"level\": \"ERROR\", \"request_id\": \"req-91\", \"latency_ms\": 412}`) yazılması."
+  - term: Correlation ID (request_id)
+    definition: "Bir istifadəçi sorğusuna girişdə verilən və həmin sorğunun keçdiyi bütün servis/funksiya loglarına əlavə edilən unikal identifikator."
+sections:
+  - id: git-bisect-and-logging-explained
+    kind: explanation
+    title: "Git Workflow, İkili Axtarışla Debugging və Structured Logging"
+    body: |
+      ### 1. Təmiz Git Workflow və Merge Conflict Həlli
+      Birbaşa `main` branch-inə kod yazmaq komandada production-ı sındırmağın ən qısa yoludur. Standart mühəndis axını:
+      - `main`-dən qısaömürlü **feature/fix branch** aç (`git switch -c fix/empty-chunk-crash`).
+      - Kiçik, **atomar commit**-lər et ("7 faylda həm refactoring, həm prompt dəyişikliyi, həm bugfix" YOX).
+      - **Merge Conflict** yarandıqda (`<<<<<<< HEAD ... ======= ... >>>>>>> main`) heç vaxt kor-koranə "yalnız mənimkini saxla" seçmə: hər iki tərəfin məqsədini oxu, birləşdir, markerləri sil və **mütləq `pytest` işə sal**.
+
+      ### 2. `git bisect` — Tarixçədə İkili Axtarış ($O(\log_2 N)$)
+      Tutaq ki, `c0` commit-ində hər şey işləyirdi (`good`), `c127` commit-ində isə test düşür (`bad`). 128 commit-i bir-bir yoxlamaq 128 dəfə eval işlətməkdir.
+      `git bisect` ortadakı commit-i (`mid = 64`) seçir:
+      - Əgər `c64` də xətalıdırsa (`bad`), deməli bug `0..64` aralığındadır (`hi = mid - 1`).
+      - Əgər `c64` təmizdirsə (`good`), deməli bug `65..127` aralığındadır (`lo = mid + 1`).
+      Hər addımda axtarış sahəsi yarıya bölünür: $N = 128$ commit üçün cəmi $\log_2(128) = 7$ yoxlama kifayətdir!
+
+      ### 3. `print()` vs Python `logging` və Structured JSON
+      Niyə production kodunda `print()` qadağandır?
+      - `print()`-in ağırlıq dərəcəsi (severity) yoxdur — adi məlumatla kritik çökməni ayıra bilmirsən.
+      - Söndürmək və ya fayla/aqreqatora yönləndirmək üçün kodu dəyişmək lazımdır.
+
+      Python `logging` 5 standart səviyyə təqdim edir:
+      - `DEBUG` (10): Daxili dəyişənlər, prompt şablonunun tam mətni (yalnız lokal/diaqnostika üçün).
+      - `INFO` (20): Normal biznes hadisələri (`"prediction_completed"`, `"index_loaded"`).
+      - `WARNING` (30): Sistem işləyir, amma diqqət tələb olunur (`"rate_limit_retry"`, `"fallback_model_used"`).
+      - `ERROR` (40): Konkret sorğu və ya tapşırıq uğursuz oldu (`"llm_timeout"`, `"invalid_schema"`).
+      - `CRITICAL` (50): Bütöv tətbiq və ya servis dayana bilər (`"db_connection_lost"`, `"gpu_oom"`).
+  - id: flight-recorder-analogy
+    kind: analogy
+    title: "Mental model: Təyyarənin Qara Qutusu və Dedektiv Axtarışı"
+    body: |
+      - **`print("buradayam")` vs Structured Logging:** Təyyarədə pilotun kağıza *"nəsə səs gəldi"* yazması `print()`-dir. **Qara qutu (Flight Data Recorder)** isə hər saniyə dəqiq strukturlu sahələri (`timestamp`, `flight_id`, `altitude_m`, `engine_temp_c`, `level`) qeyd edir — qəzadan sonra mühəndislər `flight_id` ilə bütün zənciri bərpa edir.
+      - **Təsadüfi kod dəyişmə vs Sistemli Debugging:** Xəstəyə analiz vermədən rəfdəki bütün dərmanları növbə ilə içirtmək təsadüfi kod dəyişməkdir ("shotgun debugging"). Sistemli mühəndis isə əvvəlcə simptomu laboratoriyada təkrarlayır (minimal failing test), sonra dəqiq diaqnoz qoyur.
+  - id: debugging-and-bisect-diagram
+    kind: diagram
+    title: "Sistemli Debugging dövrü və git bisect axtarışı"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["1. Minimal Reproduksiya\n(Sabit seed + kiçik input)"] --> B["2. Qatı Təcrid Et\n(git bisect / modul sərhədi)"]
+        B --> C["3. Hipotez & Uğursuz Test\n(Bug-ı tutan pytest yaz)"]
+        C --> D["4. Minimal Fix & PR\n(Test yaşıl olur)"]
+      ```
+
+      Hər düzəlişdən əvvəl **3-cü addımda** uğursuz test yazmaq zəmanət verir ki, həmin bug gələcəkdə bir daha gizlicə geri qayıtmayacaq (regression test).
+  - id: worked-bisect-trace
+    kind: worked_example
+    title: "Addım-addım git bisect: 8 commit içində ilk sınan commit-in tapılması"
+    body: |
+      Fərz edək ki, tarixçədə 8 commit var: `commits = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]`.
+      Həqiqətdə bug `c5`-də daxil edilib, yəni `c0..c4` yaxşıdır (`is_bad = False`), `c5..c7` isə xətalıdır (`is_bad = True`).
+
+      İkili axtarış (`lo = 0`, `hi = 7`, `first_bad = None`) necə işləyir?
+
+      | Addım | `lo` | `hi` | `mid = (lo + hi) // 2` | Yoxlanan commit | `is_bad(commits[mid])` | Qərar |
+      |---|---|---|---|---|---|---|
+      | 1 | 0 | 7 | 3 | `"c3"` | `False` (Good) | Bug sağ tərəfdədir → `lo = 3 + 1 = 4` |
+      | 2 | 4 | 7 | 5 | `"c5"` | `True` (Bad) | Namizəd tapıldı (`first_bad = "c5"`), bəlkə daha əvvəl var? → `hi = 5 - 1 = 4` |
+      | 3 | 4 | 4 | 4 | `"c4"` | `False` (Good) | Sağ tərəfə keç → `lo = 4 + 1 = 5` |
+      | Son | 5 | 4 | — | Dövr bitir (`lo > hi`) | — | Nəticə: **`"c5"`** (cəmi 3 yoxlama ilə!) |
+
+      Diqqət et: `mid = 5` xətalı çıxanda axtarışı dərhal dayandırmırıq (`first_bad = "c5"` yadda saxlayıb `hi = mid - 1` ilə sol qonşunu yoxlayırıq), çünki bizə *hər hansı* xətalı commit yox, **ilk** xətalı commit lazımdır!
+  - id: code-structured-logger-and-bisect
+    kind: code
+    title: "Kod — Structured JSON Logger və Binary Search Commit Finder"
+    body: |
+      ```python
+      import json
+      import logging
+      from typing import Callable
+
+
+      def build_structured_log(
+          level: str,
+          event: str,
+          request_id: str,
+          **context: object,
+      ) -> str:
+          """Create a machine-parseable JSON log line with correlation id."""
+          payload = {
+              "level": level.upper(),
+              "event": event,
+              "request_id": request_id,
+              **context,
+          }
+          return json.dumps(payload, sort_keys=True)
+
+
+      def find_first_bad_commit(
+          commits: list[str],
+          is_bad_fn: Callable[[str], bool],
+      ) -> str | None:
+          """Return the earliest commit where is_bad_fn(commit) is True in O(log N) calls."""
+          lo, hi = 0, len(commits) - 1
+          first_bad: str | None = None
+          while lo <= hi:
+              mid = (lo + hi) // 2
+              if is_bad_fn(commits[mid]):
+                  first_bad = commits[mid]
+                  hi = mid - 1
+              else:
+                  lo = mid + 1
+          return first_bad
+
+
+      history = ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"]
+      culprit = find_first_bad_commit(history, lambda c: int(c[1:]) >= 5)
+      print("İlk xətalı commit:", culprit)  # c5
+
+      log_line = build_structured_log(
+          "ERROR",
+          "llm_schema_validation_failed",
+          request_id="req-8f2a",
+          model="gpt-4o-mini",
+          attempt=2,
+          latency_ms=340,
+      )
+      print(log_line)
+      # {"attempt": 2, "event": "llm_schema_validation_failed", "latency_ms": 340, "level": "ERROR", "model": "gpt-4o-mini", "request_id": "req-8f2a"}
+      ```
+
+      Bu JSON sətiri Datadog, CloudWatch və ya ELK-a düşdükdə `request_id="req-8f2a"` və ya `event="llm_schema_validation_failed" AND latency_ms > 300` sorğusu ilə dərhal tapılır.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Loglara həssas məlumat (PII və API Key) yazmaq**
+      ```python
+      logger.info(f"Calling OpenAI with key={api_key} and user_ssn={ssn}")  # TƏHLÜKƏSİZLİK QƏZASI!
+      ```
+      Loglar mərkəzi serverlərdə aylarla saxlanılır və çoxlu mühəndisin oxuma icazəsi olur. API açarları, şifrələr və fərdi məlumatlar (PII) heç vaxt loglanmamalıdır (və ya maskalanmalıdır).
+
+      **2. `except Exception: pass` ilə xətanı udmaq**
+      Xətanı tutub heç nə loglamadan davam etmək debugging-i mümkünsüz edir. Xətanı tutursansa, ən azı kontekst və traceback ilə (`logger.exception("...")`) qeyd et.
+
+      **3. Eyni anda 3 dəyişəni dəyişib "görək düzəldimi" demək**
+      Həm learning rate-i, həm tokenizer-i, həm də data filterini eyni vaxtda dəyişsən, nəticə düzələndə (və ya daha da pisləşəndə) səbəbin hansı olduğunu bilməyəcəksən. Hər dəfə **yalnız bir hipotezi** yoxla.
+
+      **4. Merge conflict zamanı qarşı tərəfin kodunu araşdırmadan silmək**
+      `git checkout --ours` ilə konfliktli faylı kor-koranə əzmək komanda yoldaşının yazdığı mühüm təhlükəsizlik yoxlamasını səssizcə silə bilər.
+  - id: debugging-tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs"
+    body: |
+      - **Log həcmi vs Müşahidə qabiliyyəti (Observability):** Production-da hər token və hər daxili vektor üçün `DEBUG` səviyyəsində log yazmaq həm disk/şəbəkə I/O-nu yavaşladır, həm də bulud log xərcini minlərlə dollar artırır. Production default-u `INFO` olmalıdır; yalnız xəta zamanı və ya seçilmiş `sample_rate` (məs. sorğuların 1%-i) üçün geniş detal yazılır.
+      - **`git bisect` nə vaxt işləmir?** İkili axtarış tarixçənin **monoton** olmasını (bir nöqtədən əvvəl yaxşı, sonra pis) və testin **deterministik** olmasını tələb edir. Əgər bug yalnız təsadüfi hallarda çıxan race condition-dırsa (flaky test), əvvəlcə random seed-i sabitlənmiş deterministik reproduksiya qurmalısan.
+      - **Kiçik PR-lar vs Böyük PR-lar:** 150 sətirlik fokuslanmış PR 15 dəqiqəyə dərindən yoxlanılır; 2500 sətirlik PR-da isə rəyçi yorulur və ciddi bug-lar gözdən qaçır.
+mastery_criteria:
+  - "`git bisect` məntiqini ikili axtarışla ($O(\\log_2 N)$ çağırışla) kodda implementasiya edə bilirsən"
+  - "Production bug-ını reproduksiya, uğursuz test, feature branch və PR ardıcıllığı ilə sistemli şəkildə həll edə bilirsən"
+  - "Hadisəyə uyğun düzgün `logging` səviyyəsini seçə və `request_id` daxil olan təhlükəsiz structured log qura bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-gitdbg-bisect-calls
+      type: numeric
+      title: "git bisect addım sayı"
+      prompt: "Sonuncu sağlam buraxılışla cari sınmış vəziyyət arasında $N = 1024$ commit var. `git bisect` (ikili axtarış) reqressiya yaradan dəqiq commit-i tapmaq üçün təxminən neçə yoxlama ($\\log_2(1024)$) aparır?"
+      skills: [git-workflow, debugging]
+      category: concept
+      answer: 10
+      tolerance: 1
+      explanation: "$\\log_2(1024) = 10$. Xətti axtarışda 1024 yoxlama lazım olduğu halda, ikili axtarış hər addımda aralığı yarıya bölərək ~10 addımda hədəfi tapır."
+    - id: q-gitdbg-log-level
+      type: mcq
+      title: "Düzgün logging səviyyəsinin seçilməsi"
+      prompt: "RAG servisində əsas LLM provayderi `429 Rate Limit` verdiyi üçün sistem avtomatik olaraq ehtiyat (fallback) modelə keçdi və istifadəçiyə düzgün cavab qaytardı. Bu hadisə hansı səviyyədə loglanmalıdır?"
+      skills: [prod-monitoring]
+      category: production
+      options:
+        - id: a
+          text: "`DEBUG`"
+          feedback: "`DEBUG` production-da adətən bağlı olur; provayderin limitə dirənməsi isə mühəndislərin görməli olduğu siqnaldır."
+        - id: b
+          text: "`WARNING`"
+          feedback: "Doğru! Sorğu uğurla tamamlanıb (ona görə `ERROR` deyil), lakin gözlənilməz vəziyyət baş verib və ehtiyat yola keçilib."
+        - id: c
+          text: "`CRITICAL`"
+          feedback: "`CRITICAL` bütün sistemin çökdüyü hallar üçündür."
+      answer: b
+      explanation: "Sistem özünü bərpa edib istifadəçiyə cavab verə bilibsə, amma normal axından kənara çıxılıbsa (retry, fallback, deprecated istifadə), bu `WARNING` səviyyəsidir."
+    - id: q-gitdbg-merge-conflict
+      type: mcq
+      title: "Merge conflict necə həll edilməlidir?"
+      prompt: "Feature branch-ini yenilənmiş `main` ilə birləşdirərkən `evaluator.py` faylında merge conflict yarandı. Ən təhlükəsiz mühəndis addımı hansıdır?"
+      skills: [git-workflow]
+      category: concept
+      options:
+        - id: a
+          text: "`git push --force origin main` ilə öz versiyanı birbaşa `main` üzərinə yazmaq"
+          feedback: "Bu, komanda yoldaşlarının `main`-dəki işini silər və tarixçəni pozar!"
+        - id: b
+          text: "Konflikt markerləri (`<<<<<<<`, `=======`, `>>>>>>>`) arasındakı hər iki dəyişikliyi təhlil edib düzgün məntiqi birləşdirmək, markerləri silmək və testləri (`pytest`) işə salmaq"
+          feedback: "Doğru! Hər iki tərəfin niyyəti qorunur və testlərlə təsdiqlənir."
+        - id: c
+          text: "Konflikt markerlərini faylın içində saxlayıb birbaşa commit etmək"
+          feedback: "Markerlər Python-da `SyntaxError` yaradacaq."
+      answer: b
+      explanation: "Merge conflict avtomatik birləşdirilə bilməyən üst-üstə düşən dəyişiklikdir. Hər iki tərəfin kodu oxunmalı, markerlər təmizlənməli və test dəsti işə salınmalıdır."
+    - id: q-gitdbg-structured-log-fields
+      type: multi
+      title: "Production structured log-da nə olmalıdır?"
+      prompt: "Production-da işləyən AI API-nin structured JSON loglarında hansı sahələrin olması yaxşı mühəndislik praktikasıdır? Hamısını seç."
+      skills: [prod-monitoring, debugging]
+      category: production
+      options:
+        - id: a
+          text: "`request_id` (sorğunu bütün mərhələlərdə izləmək üçün korrelyasiya identifikatoru)"
+          feedback: "Bəli — eyni sorğunun retrieval, prompt və LLM loglarını birləşdirməyin yeganə yoludur."
+        - id: b
+          text: "`latency_ms` və `model_version` (performans və model reqressiyasını ölçmək üçün)"
+          feedback: "Bəli — hansı model versiyasının gecikmə yaratdığını dərhal göstərir."
+        - id: c
+          text: "İstifadəçinin açıq şifrəsi və OpenAI `sk-...` gizli API açarı"
+          feedback: "Xeyr! Gizli açarlar və həssas fərdi məlumatlar heç vaxt loglara yazılmamalıdır."
+        - id: d
+          text: "`level` və `event` (hadisənin ağırlıq dərəcəsi və standart adı)"
+          feedback: "Bəli — avtomatik alert və axtarış filtrləri bu sahələr üzərində qurulur."
+      answers: [a, b, d]
+      explanation: "Yaxşı structured log diaqnostika üçün lazım olan metadataya (`request_id`, `event`, `level`, `latency_ms`, `model_version`) malik olur və gizli məlumatları (secrets/PII) qətiyyən sızdırmır."
+exercises:
+  - id: ex-gitdbg-bisect-first-bad
+    type: code
+    title: "git bisect alqoritmini yaz: find_first_bad_commit"
+    prompt: |
+      Xronoloji sıralanmış `commits: list[str]` siyahısında bug-ı daxil edən **ilk** commit-i ikili axtarışla (binary search) tapan `find_first_bad_commit(commits, is_bad_fn)` funksiyasını yaz.
+
+      **Müqavilə (Contract):**
+      1. `commits` siyahısında müəyyən indeksdən əvvəlki bütün commit-lər sağlamdır (`is_bad_fn(c) == False`), həmin indeksdən başlayaraq sonrakı bütün commit-lər xətalıdır (`is_bad_fn(c) == True`).
+      2. Əgər siyahı boşdursa və ya heç bir commit xətalı deyilsə, `None` qaytar.
+      3. Funksiya xətti axtarış ($O(N)$) **etməməlidir**: `is_bad_fn` funksiyasını ən çoxu $\lfloor \log_2(N) \rfloor + 1$ dəfə çağırmalıdır (testlərdə çağırış sayğacı yoxlanılır!).
+    skills: [git-workflow, debugging]
+    category: python
+    difficulty: 2
+    hints:
+      - "`lo = 0`, `hi = len(commits) - 1` və `first_bad = None` dəyişənləri ilə başla."
+      - "`while lo <= hi:` dövründə `mid = (lo + hi) // 2` hesabla və `is_bad_fn(commits[mid])`-i yalnız BİR dəfə çağır."
+      - "Əgər `is_bad_fn(commits[mid])` `True`-dursa, `first_bad = commits[mid]` yadda saxla və daha əvvəlki xətalı commit-i yoxlamaq üçün `hi = mid - 1` et; əks halda `lo = mid + 1` et."
+    starter_code: |
+      from typing import Callable
+
+      def find_first_bad_commit(
+          commits: list[str],
+          is_bad_fn: Callable[[str], bool],
+      ) -> str | None:
+          # TODO: O(log N) ikili axtarış ilə ilk bad commit-i tap
+          return None
+    tests:
+      - name: "Ortadakı ilk bad commit-i düzgün tapır"
+        code: |
+          commits = [f"c{i}" for i in range(10)]
+          res = find_first_bad_commit(commits, lambda c: int(c[1:]) >= 6)
+          assert res == "c6", f"Gözlənilən 'c6', alınan {res}"
+      - name: "O(log N) çağırış limiti: 1024 commit üçün ən çoxu 11 yoxlama edir"
+        code: |
+          commits = [f"c{i}" for i in range(1024)]
+          calls = [0]
+          def tracked_is_bad(c: str) -> bool:
+              calls[0] += 1
+              return int(c[1:]) >= 713
+          res = find_first_bad_commit(commits, tracked_is_bad)
+          assert res == "c713", f"Gözlənilən 'c713', alınan {res}"
+          assert calls[0] <= 11, f"Çox sayda is_bad_fn çağırışı edildi ({calls[0]} > 11) — xətti axtarış yox, binary search istifadə et!"
+      - name: "Sərhəd halları: ilk commit xətalıdır, heç biri xətalı deyil, boş siyahı"
+        code: |
+          assert find_first_bad_commit(["a", "b", "c"], lambda _: True) == "a"
+          assert find_first_bad_commit(["a", "b", "c"], lambda _: False) is None
+          assert find_first_bad_commit([], lambda _: True) is None
+    solution: |
+      from typing import Callable
+
+      def find_first_bad_commit(
+          commits: list[str],
+          is_bad_fn: Callable[[str], bool],
+      ) -> str | None:
+          lo, hi = 0, len(commits) - 1
+          first_bad: str | None = None
+          while lo <= hi:
+              mid = (lo + hi) // 2
+              if is_bad_fn(commits[mid]):
+                  first_bad = commits[mid]
+                  hi = mid - 1
+              else:
+                  lo = mid + 1
+          return first_bad
+    explanation: |
+      İkili axtarış hər addımda `[lo, hi]` intervalını yarıya bölür. `is_bad_fn(commits[mid])` doğru olduqda `first_bad` yenilənir və daha erkən indeksdəki xətalı commit-i axtarmaq üçün `hi = mid - 1` edilir.
+  - id: ex-gitdbg-workflow-order
+    type: order
+    title: "Production bug-ının sistemli həlli və Git axını"
+    prompt: "Production loglarında aşkarlanan bug-ı komanda standartlarına uyğun təcrid edib düzəltmək üçün addımları düzgün ardıcıllıqla düz."
+    skills: [git-workflow, debugging]
+    category: debug
+    difficulty: 1
+    hints:
+      - "Kodu dəyişməzdən əvvəl loglardan (`request_id`) problemi tapmalı, təmiz branch açmalı və xətanı təkrarlayan uğursuz test yazmalısan."
+      - "Yalnız bütün testlər yaşıl olduqdan sonra atomar commit edib Pull Request açırsan."
+    items:
+      - id: s1
+        text: "Structured loglarda `request_id` ilə xətalı sorğunun input-unu və traceback-ini tapmaq"
+      - id: s2
+        text: "`main`-dən yeni `fix/...` branch-i açmaq və xətanı deterministik təkrarlayan uğursuz (failing) `pytest` testi yazmaq"
+      - id: s3
+        text: "Kök səbəbi aradan qaldıran minimal düzəlişi yazmaq və həm yeni, həm də mövcud testlərin keçdiyini yoxlamaq"
+      - id: s4
+        text: "Dəyişikliyi aydın mesajla atomar commit etmək və komanda baxışı üçün Pull Request açmaq"
+    answer: [s1, s2, s3, s4]
+    explanation: |
+      Sistemli mühəndislik axını: **Müşahidə et (`request_id` logu)** → **Təcrid et və uğursuz testlə sübut et (fix branch + failing test)** → **Minimal düzəlişlə testi yaşıllaşdır** → **Atomar commit və PR ilə təhvil ver**.
+references:
+  - title: "Git Documentation — git-bisect"
+    url: https://git-scm.com/docs/git-bisect
+    note: "İkili axtarışla reqressiya tapan git bisect əmrinin rəsmi bələdçisi"
+  - title: "Python Logging HOWTO"
+    url: https://docs.python.org/3/howto/logging.html
+    note: "Python standart kitabxanasında logging səviyyələri və handler arxitekturası"

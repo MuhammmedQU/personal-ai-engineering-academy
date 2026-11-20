@@ -1,0 +1,432 @@
+id: product-problem-mvp-costs
+track: product
+module: product-discovery-mvp
+title: "AI Məhsul Kəşfi, Qərəzsiz Müsahibələr (The Mom Test), MVP və Unit Economics"
+summary: "\"Problem axtaran AI wrapper\" tələsindən qaçmağı, The Mom Test qaydaları ilə real istifadəçi ağrısını tapmağı, ölçülə bilən MVP çərçivəsi qurmağı və hər aktiv istifadəçiyə düşən aylıq LLM/infrastruktur xərcini (unit economics) hesablamağı öyrənəcəksən."
+level: foundation
+estimated_minutes: [45, 65]
+prerequisites: []
+next: product-validation-iteration
+skills: [product-discovery, product-mvp-economics]
+objectives:
+  - "Konkret, yüksək sürtünməli istifadəçi problemini 'texnologiya naminə AI wrapper' ideyasından ayırmaq"
+  - "İstifadəçi müsahibələrində yönləndirici gələcək suallar əvəzinə keçmiş davranış və mövcud workaround sualları (The Mom Test) vermək"
+  - "MVP əhatə dairəsini (scope), açıq non-goal siyahısını və ölçülə bilən uğur meyarını müəyyənləşdirmək"
+  - "Aktiv istifadəçi başına aylıq inference və infrastruktur xərcini (unit economics) və marjanı hesablamaq"
+why_it_matters: |
+  AI startaplarının və daxili şirkət layihələrinin əksəriyyəti modelin zəifliyinə görə yox, **heç kimin pul və ya vaxt ödəmək istəmədiyi bir şeyi qurduğuna** və ya **unit economics-in mənfiyə getdiyinə** görə bağlanır.
+
+  Dostlarından *"Sənədləri xülasələşdirən AI qururuq, işlədərsən?"* soruşanda hamı nəzakətlə *"Əlbəttə, əla fikirdir!"* deyir — amma məhsul çıxanda heç kim qeydiyyatdan keçmir. Digər tərəfdən, istifadəçidən ayda $\$10$ abunə haqqı alıb, arxada hər istifadəçi üçün $\$24$ LLM API pulu ödəyən məhsul nə qədər çox böyüyərsə, bir o qədər tez müflis olur.
+terms:
+  - term: The Mom Test
+    definition: "İnsanların sənə nəzakət xətrinə yalan danışa bilməyəcəyi müsahibə üsulu: gələcək fərziyyələr ('İşlədərdinmi?') əvəzinə yalnız keçmiş faktlar və mövcud həllər soruşulur."
+  - term: Workaround (Mövcud dolama həll)
+    definition: "İstifadəçinin problemi həll etmək üçün hazırda Excel, əl işi, freelancer və ya başqa alətlərlə sərf etdiyi real vaxt və pul. Workaround yoxdursa, problem kifayət qədər ağrılı olmaya bilər."
+  - term: MVP (Minimum Viable Product)
+    definition: "İstifadəçiyə əsas dəyəri verən və hipotezi real davranışla ölçməyə kifayət edən ən kiçik işlək məhsul versiyası."
+  - term: Build vs Buy vs API
+    definition: "Sıfırdan öz modelini öyrətmək (Build), hazır SaaS almaq (Buy) və ya hazır LLM API üzərində iş axını qurmaq (API) qərarı."
+  - term: Unit Economics
+    definition: "Məhsulun tək bir vahidi (məs. 1 aktiv istifadəçi və ya 1 emal olunmuş sənəd) üzrə gəlir ilə birbaşa xərclərin (LLM inference + server + dəstək) fərqi."
+  - term: Gross Margin (Ümumi marja)
+    definition: "$\\frac{\\text{Revenue} - \\text{COGS}}{\\text{Revenue}}$. Burada COGS (Cost of Goods Sold) birbaşa xidmət xərcləridir (tokenlər, GPU/hosting)."
+sections:
+  - id: problem-discovery-economics
+    kind: explanation
+    title: "Problem Kəşfi, The Mom Test, MVP Çərçivəsi və Unit Economics"
+    body: |
+      ### 1. "AI Wrapper" tələsi vs Yüksək sürtünməli problem
+      *"Gəlin hüquqşünaslar üçün AI çatbot quraq"* — bu, problem deyil, qeyri-müəyyən arzu siyahısıdır. Yaxşı məhsul kəşfi konkret, təkrarlanan və bahalı bir darboğazdan başlayır:
+      - **Zəif ifadə:** *"HR-lar üçün AI köməkçi."*
+      - **Güclü problem ifadəsi:** *"50+ işçisi olan şirkətlərdə HR mütəxəssisi hər ay əmək müqaviləsi əlavələrini Word-də əl ilə yoxlamağa 18 saat sərf edir və rəqəm səhvləri cərimə riski yaradır."*
+
+      ### 2. The Mom Test: İstifadəçi müsahibəsində 3 Qızıl Qayda
+      Rob Fitzpatrick-in *The Mom Test* yanaşmasına görə, hətta öz anan belə səni incitməmək üçün ideyana *"Çox gözəldir!"* deyəcək. Ona görə:
+      1. **Öz ideyandan yox, onların həyatından danış:** *"Belə bir AI qursaq alarsan?"* sualı qadağandır.
+      2. **Ümumi fikirləri yox, keçmişdəki son konkret hadisəni soruş:** *"Adətən müqavilələri necə yoxlayırsan?"* əvəzinə *"Keçən həftə sonuncu müqaviləni hazırlayanda addım-addım nə etdin? Nə qədər vaxt apardı?"*
+      3. **Mövcud workaround və büdcəni axtar:** Əgər insan problemdən şikayətlənir, amma onu həll etmək üçün indiyə qədər heç bir cəhd etməyibsə (nə Excel cədvəli qurub, nə kiməsə pul ödəyib), sabah sənin məhsuluna da pul ödəməyəcək.
+
+      ### 3. MVP Scope və Build vs Buy vs API
+      MVP-də məqsəd ən mürəkkəb arxitekturanı qurmaq deyil, ən az mühəndis saatı ilə istifadəçi dəyərini sübut etməkdir:
+      - **İlk gündən öz modelini öyrətmə (No premature fine-tuning):** Əvvəlcə hazır LLM API + sadə deterministik workflow ilə 10 real müştərinin problemini həll et.
+      - **Non-goals (Nəyi ETMƏYƏCƏYİK):** MVP-də çoxdilli interfeys, mobil tətbiq, SSO, xüsusi fine-tuned model kimi şeyləri açıq şəkildə `non-goals` siyahısına sal.
+      - **Ölçülə bilən uğur meyarı:** *"İstifadəçilər bəyəndi"* metrik deyil. *"İstifadəçilərin 60%-i ilk həftədə ən azı 5 sənəd emal etdi və redaktə vaxtı 20 dəqiqədən 3 dəqiqəyə düşdü"* — bu, mühəndis metrikasıdır.
+
+      ### 4. AI Məhsulunun Unit Economics riyaziyyatı
+      Klassik SaaS-da əlavə 1 istifadəçinin marjinal xərci sıfıra yaxındır. AI məhsulunda isə hər sorğu real pul (token + GPU) xərcləyir!
+
+      Ayda $U$ aktiv istifadəçi, hər istifadəçinin orta hesabla $Q$ sorğusu (retry və sistem promptları daxil!), hər sorğuda $N_{\text{in}}$ giriş və $N_{\text{out}}$ çıxış tokeni varsa:
+
+      $$\text{Cost}_{\text{query}} = \frac{N_{\text{in}}}{10^6} \cdot p_{\text{in}} + \frac{N_{\text{out}}}{10^6} \cdot p_{\text{out}}$$
+
+      $$\text{Cost}_{\text{total}} = U \cdot Q \cdot \text{Cost}_{\text{query}} + \text{Cost}_{\text{fixed\_infra}}$$
+
+      $$\text{Cost}_{\text{per\_user}} = \frac{\text{Cost}_{\text{total}}}{U}$$
+
+      Sağlam abunə qiyməti ($\text{Price}_{\text{user}}$) $\text{Cost}_{\text{per\_user}}$-dən ən azı **3–5 dəfə böyük** olmalıdır (65%–80% gross margin), çünki ağır istifadəçilər (power users), uğursuz retry-lar və ödəniş komissiyaları marjanı yeyir.
+  - id: painkiller-vs-vitamin-analogy
+    kind: analogy
+    title: "Mental model: ağrıkəsici vs vitamin və limitsiz restoran bileti"
+    body: |
+      - **Vitamin vs Ağrıkəsici:** Vitamin (*"Gündəlik motivasiya mətnləri yazan AI"*) xoşdur, amma almasan da həyat davam edir. Ağrıkəsici (*"Hər gün 3 saat aparan faktura üzləşdirməsini 2 dəqiqəyə endirən alət"*) isə dərhal hiss olunan ağrını kəsir və büdcəsi hazırdır.
+      - **Unit Economics = Limitsiz (All-you-can-eat) suşi restoranı:** Giriş biletini $\$15$ qoymusan, amma hər müştəri orta hesabla $\$22$-lıq balıq yeyirsə, qapıda növbə nə qədər uzansa, bir o qədər tez batacaqsan. Hər boşqabın (sorğunun) maya dəyərini əvvəlcədən hesablamalı və ya kvota qoymalısan.
+  - id: discovery-to-mvp-diagram
+    kind: diagram
+    title: "İdeyadan Ölçülə Bilən MVP-yə Qərar Axını"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Konkret İş Axını Darboğazı"] --> B["The Mom Test (Keçmiş davranış + Workaround)"]
+        B --> C{"Real ağrı və büdcə var?"}
+        C -- "Xeyr" --> D["İdeyanı dəyiş (Kod yazma!)"]
+        C -- "Bəli" --> E["Unit Economics Hesabı (Cost per User)"]
+        E --> F["Minimal MVP (Hazır API + Dar Scope)"]
+        F --> G["Uğur Metrikası (Retention & Vaxt Qənaəti)"]
+      ```
+
+      Kod yazmaq (`F`) yalnız problem (`B-C`) və iqtisadiyyat (`E`) təsdiqləndikdən sonra başlayır.
+  - id: worked-unit-economics
+    kind: worked_example
+    title: "Aylıq Unit Economics və Qiymət Qərarı nümunəsi"
+    body: |
+      Tutaq ki, mühasiblər üçün müqavilə yoxlayan B2B AI aləti planlaşdırırsan:
+      - Aktiv istifadəçi sayı: $U = 200$ mühasib
+      - Hər istifadəçi ayda orta hesabla $Q = 150$ sorğu göndərir (ümumi $30\,000$ sorğu)
+      - Hər sorğuda (RAG konteksti + retry əmsalı daxil): $N_{\text{in}} = 4\,000$ token, $N_{\text{out}} = 500$ token
+      - Model qiyməti: $p_{\text{in}} = \$2.50 / 10^6$, $p_{\text{out}} = \$10.00 / 10^6$
+      - Sabit aylıq server və baza xərci: $\text{Cost}_{\text{fixed}} = \$120.00$
+
+      **1. Bir sorğunun LLM xərci:**
+
+      $$\text{Cost}_{\text{query}} = \frac{4000}{10^6} \times 2.50 + \frac{500}{10^6} \times 10.00 = 0.010 + 0.005 = \$0.015$$
+
+      **2. Aylıq ümumi LLM xərci:**
+
+      $$\text{Cost}_{\text{LLM}} = 200 \times 150 \times 0.015 = \$450.00$$
+
+      **3. Ümumi aylıq xərc və 1 istifadəçiyə düşən maya dəyəri:**
+
+      $$\text{Cost}_{\text{total}} = 450.00 + 120.00 = \$570.00$$
+
+      $$\text{Cost}_{\text{per\_user}} = \frac{570.00}{200} = \$2.85 / \text{istifadəçi}$$
+
+      **Biznes nəticəsi:** İstifadəçi başına maya dəyəri $\$2.85$-dır. Əgər aylıq abunəni $\$19$ təyin etsən (ayda 150 sorğu limiti ilə), gross margin $\frac{19 - 2.85}{19} \approx 85\%$ olur — bu, sağlam və dayanıqlı modeldir.
+  - id: code-unit-cost-calculator
+    kind: code
+    title: "Kod: Aylıq Unit Economics Kalkulyatoru"
+    body: |
+      ```python
+      def estimate_monthly_unit_cost(
+          users: int,
+          queries_per_user: int,
+          avg_in_tokens: int,
+          avg_out_tokens: int,
+          price_in_per_1m: float,
+          price_out_per_1m: float,
+          fixed_infra_usd: float,
+      ) -> dict[str, float]:
+          """AI məhsulunun aylıq LLM və infrastruktur xərcini və istifadəçi başına maya dəyərini hesablayır."""
+          if users <= 0:
+              raise ValueError("users must be a positive integer")
+
+          numeric_params = [
+              queries_per_user,
+              avg_in_tokens,
+              avg_out_tokens,
+              price_in_per_1m,
+              price_out_per_1m,
+              fixed_infra_usd,
+          ]
+          if any(x < 0 for x in numeric_params):
+              raise ValueError("counts, prices, and infra costs cannot be negative")
+
+          total_queries = users * queries_per_user
+          cost_per_query = (
+              (avg_in_tokens / 1_000_000.0) * price_in_per_1m
+              + (avg_out_tokens / 1_000_000.0) * price_out_per_1m
+          )
+          llm_cost_usd = total_queries * cost_per_query
+          total_usd = llm_cost_usd + fixed_infra_usd
+          cost_per_user_usd = total_usd / users
+
+          return {
+              "llm_cost_usd": round(float(llm_cost_usd), 2),
+              "total_usd": round(float(total_usd), 2),
+              "cost_per_user_usd": round(float(cost_per_user_usd), 4),
+          }
+
+
+      print(
+          estimate_monthly_unit_cost(
+              users=200,
+              queries_per_user=150,
+              avg_in_tokens=4000,
+              avg_out_tokens=500,
+              price_in_per_1m=2.50,
+              price_out_per_1m=10.00,
+              fixed_infra_usd=120.0,
+          )
+      )
+      # {'llm_cost_usd': 450.0, 'total_usd': 570.0, 'cost_per_user_usd': 2.85}
+      ```
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Yönləndirici fərziyyə sualları vermək ("Belə AI qursaq işlədərsən?")**
+      İnsanlar gələcək barədə nikbin yalan danışırlar. Yalnız keçmişdə baş vermiş faktlar, hazırda xərclənən saatlar və mövcud workaround-lar həqiqi sübutdur.
+
+      **2. İstifadəçi dəyərini sübut etməmiş model fine-tune etmək və ya mürəkkəb mikroservis qurmaq**
+      Heç bir müştərinin işlətmədiyi məhsul üçün 3 həftə GPU-da model fine-tune etmək ən bahalı vaxt itkisidir. Əvvəlcə hazır API + sadə interfeyslə dəyəri sübut et.
+
+      **3. Qiymət qoyarkən yalnız istifadəçinin yazdığı 20 sözdən ibarət sualı hesablamaq**
+      Real sorğuda 20 sözlük sualın arxasında 1500 tokenlik system prompt, 3000 tokenlik RAG konteksti, çoxaddımlı tool calling və uğursuz retry-lar dayanır. Xərci həmişə tam sorğu zənciri üzrə hesabla.
+
+      **4. Sabit aylıq qiymətlə (10 USD/ay) tam "limitsiz" (unlimited) istifadə vermək**
+      Avtomatik skript qoşan tək bir "power user" ayda 500 USD-lik token işlədib bütün digər müştərilərin gəlirini sıfırlaya bilər. Həmişə aydın kvota (rate limit / fair-use cap) və ya pilləli tarif tətbiq et.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik və Məhsul seçimləri"
+    body: |
+      - **Hazır API vs Open-Weights Self-Hosting:** Aşağı və orta trafikdə (ayda bir neçə min sorğu) hazır API (OpenAI, Anthropic, Gemini) yalnız işlətdiyin token qədər pul alır. 24/7 işləyən xüsusi GPU serveri (300–1500 USD/ay) isə gecə heç kim sorğu göndərməyəndə də pul yazır. Self-hosting yalnız yüksək, sabit trafikdə və ya sərt data-rezidentlik (məlumatın ölkədən/şirkətdən çıxmaması) tələbində sərfəli olur.
+      - **Dəqiqlik vs Xərc (Model Routing):** Sorğuların 80%-i sadədir və ucuz kiçik modellə həll olunur; yalnız 20% mürəkkəb sorğuları bahalı böyük modelə yönləndirmək (model routing) keyfiyyəti saxlayaraq unit cost-u 60%–75% azalda bilər.
+mastery_criteria:
+  - "Verilmiş müsahibə suallarından hansının yönləndirici (leading), hansının isə The Mom Test qaydalarına uyğun olduğunu seçə və düzəldə bilirsən"
+  - "MVP üçün aydın problem ifadəsi, ölçülə bilən uğur meyarı və non-goal siyahısı yaza bilirsən"
+  - "Aylıq aktiv istifadəçi, sorğu həcmi, token qiymətləri və sabit infrastruktur xərcinə əsasən unit cost hesablaya bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-prodmvp-mom-test
+      type: mcq
+      title: "The Mom Test qaydasına uyğun müsahibə sualı"
+      prompt: "Hüquqşünaslar üçün müqavilə yoxlayan AI aləti üzərində araşdırma aparırsan. *The Mom Test* prinsiplərinə görə aşağıdakı suallardan hansı **ən düzgün** müsahibə sualıdır?"
+      skills: [product-discovery]
+      category: concept
+      options:
+        - id: a
+          text: "'Müqavilələrdəki riskləri 10 saniyəyə tapan süni intellekt qursaq, ayda 29 dollar ödəyərdinizmi?'"
+          feedback: "Xeyr — bu, yönləndirici və fərziyyəvi gələcək sualıdır; müsahib nəzakət xətrinə 'bəli' deyəcək."
+        - id: b
+          text: "'Keçən həftə yoxladığınız sonuncu müqaviləni xatırlayın: onu necə yoxladınız, nə qədər vaxt apardı və ən çox harada ilişdiniz?'"
+          feedback: "Doğrudur. Bu sual keçmişdə baş vermiş konkret hadisəni, sərf olunan real vaxtı və mövcud prosesi üzə çıxarır."
+        - id: c
+          text: "'Sizcə süni intellekt hüquq sahəsini dəyişəcəkmi?'"
+          feedback: "Ümumi fəlsəfi fikirlər məhsul qərarı üçün yararsızdır."
+      answer: b
+      explanation: "The Mom Test gələcək vədləri deyil, keçmişdəki son konkret təcrübəni, sərf olunan vaxtı və mövcud workaround-ları soruşmağı tələb edir."
+    - id: q-prodmvp-build-vs-api
+      type: mcq
+      title: "MVP mərhələsində Build vs API qərarı"
+      prompt: "Yeni yaranmış 2 nəfərlik komanda müştəri rəylərini mövzulara ayıran B2B məhsul ideyasını ilk 15 müştəri ilə yoxlamaq istəyir. Ən rasional ilk texniki addım hansıdır?"
+      skills: [product-discovery, product-mvp-economics]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "İlk 3 ay ərzində 50,000 sətir data toplayıb sıfırdan öz 7B parametrli modelini fine-tune etmək və GPU klasteri icarəyə götürmək"
+          feedback: "Xeyr — hələ müştəri dəyəri təsdiqlənməmiş ağır model öyrətmək və 24/7 GPU saxlamaq büdcəni və vaxtı yandırır."
+        - id: b
+          text: "Hazır LLM API + strukturlaşdırılmış JSON çıxışı ilə 1 həftəyə minimal MVP qurub, 15 müştərinin real istifadəsini və ödəmə istəyini ölçmək"
+          feedback: "Doğrudur. Hazır API ilkin sabit xərci sıfıra endirir və hipotezi günlər içində real istifadəçilərlə yoxlamağa imkan verir."
+        - id: c
+          text: "Mobil tətbiq, SSO və 12 dildə tərcümə hazır olana qədər heç bir müştəriyə göstərməmək"
+          feedback: "Bunlar MVP üçün klassik non-goal-lardır."
+      answer: b
+      explanation: "MVP mərhələsində əsas risk 'modeli qura bilərikmi?' yox, 'bu problemi həll edən məhsulu istifadə edib pul ödəyəcəklərmi?' sualıdır. Hazır API bu riski ən sürətli və ucuz yoxlamaq yoludur."
+    - id: q-prodmvp-unit-economics-risks
+      type: multi
+      title: "AI Unit Economics riskləri"
+      prompt: "AI məhsulunda istifadəçi başına həqiqi maya dəyərinin (COGS) ilkin sadə hesablamadan qat-qat yüksək çıxmasına hansı amillər səbəb olur? Doğru olanları seç."
+      skills: [product-mvp-economics]
+      category: production
+      options:
+        - id: a
+          text: "Hər sorğuda istifadəçinin qısa sualı ilə yanaşı uzun system prompt, RAG sənəd parçaları və söhbət tarixçəsinin göndərilməsi"
+          feedback: "Bəli — gizli kontekst tokenləri istifadəçinin yazdığı mətndən 10–50 dəfə böyük ola bilər."
+        - id: b
+          text: "Sxem doğrulaması uğursuz olduqda edilən retry sorğuları və çoxaddımlı alət çağırışları"
+          feedback: "Bəli — tək bir istifadəçi klikinin arxasında 3–5 ayrı LLM API çağırışı dayana bilər."
+        - id: c
+          text: "Limitsiz (unlimited) abunə planında bir neçə 'power user'-in orta istifadəçidən 50 dəfə çox sorğu göndərməsi"
+          feedback: "Bəli — kvotasız planlarda ağır istifadəçilər ümumi marjanı mənfiyə sala bilər."
+        - id: d
+          text: "Kodda dəyişən adlarının qısa yazılması"
+          feedback: "Python dəyişən adlarının uzunluğu LLM API token xərcinə təsir etmir."
+      answers: [a, b, c]
+      explanation: "System/RAG konteksti, çoxaddımlı/retry çağırışları və kvotasız ağır istifadəçilər AI unit economics-də ən çox unudulan xərc mənbələridir."
+exercises:
+  - id: ex-prodmvp-unit-cost
+    type: code
+    title: "estimate_monthly_unit_cost funksiyasını yaz"
+    prompt: |
+      AI məhsulunun aylıq xərcini və 1 aktiv istifadəçiyə düşən maya dəyərini hesablayan `estimate_monthly_unit_cost` funksiyasını yaz:
+
+      ```python
+      def estimate_monthly_unit_cost(
+          users: int,
+          queries_per_user: int,
+          avg_in_tokens: int,
+          avg_out_tokens: int,
+          price_in_per_1m: float,
+          price_out_per_1m: float,
+          fixed_infra_usd: float,
+      ) -> dict[str, float]:
+      ```
+
+      **Müqavilə:**
+      1. `users <= 0` olarsa və ya digər parametrlərdən hər hansı biri mənfi (`< 0`) olarsa, `ValueError` qaldır.
+      2. Aylıq ümumi sorğu sayı: `total_queries = users * queries_per_user`.
+      3. Bir sorğunun LLM xərci: `(avg_in_tokens / 1_000_000) * price_in_per_1m + (avg_out_tokens / 1_000_000) * price_out_per_1m`.
+      4. `llm_cost_usd = total_queries * cost_per_query`.
+      5. `total_usd = llm_cost_usd + fixed_infra_usd`.
+      6. `cost_per_user_usd = total_usd / users`.
+      7. Bu lüğəti qaytar:
+         `{"llm_cost_usd": round(float(llm_cost_usd), 2), "total_usd": round(float(total_usd), 2), "cost_per_user_usd": round(float(cost_per_user_usd), 4)}`
+    skills: [product-mvp-economics, product-discovery]
+    category: python
+    difficulty: 1
+    hints:
+      - "Əvvəlcə `if users <= 0: raise ValueError(...)` və `if any(x < 0 for x in [...]): raise ValueError(...)` yoxla."
+      - "1 milyon tokenə bölmək üçün `1_000_000.0` istifadə et."
+      - "Yuvarlaqlaşdırma tələblərinə diqqət et: `llm_cost_usd` və `total_usd` üçün `2`, `cost_per_user_usd` üçün `4` onluq rəqəm."
+    starter_code: |
+      def estimate_monthly_unit_cost(
+          users: int,
+          queries_per_user: int,
+          avg_in_tokens: int,
+          avg_out_tokens: int,
+          price_in_per_1m: float,
+          price_out_per_1m: float,
+          fixed_infra_usd: float,
+      ) -> dict[str, float]:
+          # TODO: aylıq LLM xərci, ümumi xərc və istifadəçi başına xərci hesabla
+          pass
+    tests:
+      - name: "200 istifadəçili B2B ssenarisini dəqiq hesablayır"
+        code: |
+          res = estimate_monthly_unit_cost(
+              users=200,
+              queries_per_user=150,
+              avg_in_tokens=4000,
+              avg_out_tokens=500,
+              price_in_per_1m=2.50,
+              price_out_per_1m=10.00,
+              fixed_infra_usd=120.0,
+          )
+          assert res == {
+              "llm_cost_usd": 450.0,
+              "total_usd": 570.0,
+              "cost_per_user_usd": 2.85,
+          }, f"Alınan: {res}"
+      - name: "Sıfır sorğu olduqda yalnız sabit infrastruktur xərci bölünür"
+        code: |
+          res = estimate_monthly_unit_cost(100, 0, 1000, 200, 2.0, 8.0, 50.0)
+          assert res == {"llm_cost_usd": 0.0, "total_usd": 50.0, "cost_per_user_usd": 0.5}
+      - name: "Səhv və ya mənfi parametrlər ValueError qaldırır"
+        code: |
+          for bad_args in [
+              (0, 10, 100, 100, 1.0, 1.0, 10.0),
+              (-5, 10, 100, 100, 1.0, 1.0, 10.0),
+              (10, -1, 100, 100, 1.0, 1.0, 10.0),
+              (10, 10, 100, 100, 1.0, 1.0, -20.0),
+          ]:
+              try:
+                  estimate_monthly_unit_cost(*bad_args)
+                  assert False, f"ValueError qaldırılmalı idi: {bad_args}"
+              except ValueError:
+                  pass
+    solution: |
+      def estimate_monthly_unit_cost(
+          users: int,
+          queries_per_user: int,
+          avg_in_tokens: int,
+          avg_out_tokens: int,
+          price_in_per_1m: float,
+          price_out_per_1m: float,
+          fixed_infra_usd: float,
+      ) -> dict[str, float]:
+          if users <= 0:
+              raise ValueError("users must be > 0")
+          if any(
+              x < 0
+              for x in [
+                  queries_per_user,
+                  avg_in_tokens,
+                  avg_out_tokens,
+                  price_in_per_1m,
+                  price_out_per_1m,
+                  fixed_infra_usd,
+              ]
+          ):
+              raise ValueError("parameters cannot be negative")
+
+          total_queries = users * queries_per_user
+          per_query = (
+              (avg_in_tokens / 1_000_000.0) * price_in_per_1m
+              + (avg_out_tokens / 1_000_000.0) * price_out_per_1m
+          )
+          llm_cost = total_queries * per_query
+          total = llm_cost + fixed_infra_usd
+          per_user = total / users
+
+          return {
+              "llm_cost_usd": round(float(llm_cost), 2),
+              "total_usd": round(float(total), 2),
+              "cost_per_user_usd": round(float(per_user), 4),
+          }
+    explanation: |
+      Funksiya əvvəlcə biznes baxımından mənasız girişləri (`users <= 0`, mənfi qiymət/token) rədd edir, sonra həm dəyişən LLM xərcini, həm də sabit infrastruktur yükünü birləşdirərək 1 istifadəçinin maya dəyərini tapır.
+  - id: ex-prodmvp-margin-numeric
+    type: numeric
+    title: "İstifadəçi başına aylıq maya dəyərini (Unit Cost) hesabla"
+    prompt: |
+      Bir AI startapının **500 aktiv istifadəçisi** var.
+      - Hər istifadəçi ayda **100 sorğu** göndərir.
+      - Hər sorğunun orta LLM xərci **0.02 USD** (2 sent) təşkil edir.
+      - Aylıq sabit server və verilənlər bazası xərci **250 USD**-dir.
+
+      1 aktiv istifadəçiyə düşən ümumi aylıq maya dəyəri (`cost_per_user_usd`) neçə ABŞ dollarıdır?
+    skills: [product-mvp-economics]
+    category: math
+    difficulty: 1
+    answer: 2.5
+    tolerance: 0.01
+    unit: "USD"
+    hints:
+      - "Bir istifadəçinin aylıq LLM xərci: 100 sorğu × 0.02 USD = 2.00 USD."
+      - "Bir istifadəçiyə düşən sabit server xərci: 250 USD / 500 istifadəçi = 0.50 USD."
+      - "Cəmi = 2.00 + 0.50"
+    explanation: "500 istifadəçinin ümumi LLM xərci $500 \\times 100 \\times 0.02 = \\$1000$. Sabit xərclə birlikdə ümumi xərc $\\$1000 + \\$250 = \\$1250$. İstifadəçi başına maya dəyəri $\\$1250 / 500 = \\$2.50$."
+  - id: ex-prodmvp-mom-test-audit
+    type: multi
+    title: "Problem Discovery: 'The Mom Test' meyarlarına uyğun müsahibə suallarını seç"
+    prompt: |
+      Hüquqşünaslar üçün müqavilə yoxlayan AI aləti qurmaq istəyirsən. Müştəri müsahibəsində **qərəzsiz, keçmiş faktlara əsaslanan** (The Mom Test qaydalarına uyğun) suallar hansılardır? Doğru olanların hamısını seç.
+    skills: [product-discovery]
+    category: concept
+    difficulty: 1
+    hints:
+      - "Gələcək fərziyyələr ('Alardınızmı?', 'Bəyənərdinizmi?') haqqında suallar yalançı kompliment yaradır."
+      - "Keçmişdə baş vermiş konkret hadisəni, sərf olunan vaxtı və hazırda ödənilən pulu soruşan sualları seç."
+    options:
+      - id: a
+        text: "Keçən həftə sonuncu müqaviləni yoxlayanda hansı addımlar nə qədər vaxtınızı aldı və hansı alətlərdən istifadə etdiniz?"
+        feedback: "Doğrudur! Keçmişdə baş vermiş konkret iş axınını və real vaxt sərfini öyrənir."
+      - id: b
+        text: "Biz süni intellektlə müqavilə yoxlayan möhtəşəm tətbiq qururuq — hazır olanda ayda 50 USD ödəyib alardınızmı?"
+        feedback: "Xeyr — bu həm yönləndirici tərifdir (pitch), həm də gələcək fərziyyə soruşur."
+      - id: c
+        text: "Bu problemi həll etmək üçün indiyə qədər hansı proqramları sınamısınız və ya nə qədər büdcə ayırmısınız?"
+        feedback: "Doğrudur! Əgər müştəri indiyə qədər heç bir həll axtarmayıbsa, problem onun üçün prioritet olmaya bilər."
+      - id: d
+        text: "Sizcə süni intellekt gələcəkdə hüquq sahəsini dəyişəcəkmi?"
+        feedback: "Xeyr — ümumi fəlsəfi fikir soruşur, konkret məhsul ehtiyacını sübut etmir."
+    answers: [a, c]
+    explanation: "'The Mom Test' qaydasına görə yalnız keçmiş davranış, mövcud iş axını və artıq xərclənən vaxt/büdcə haqqında suallar real problem siqnalı verir."
+references:
+  - title: "Rob Fitzpatrick — The Mom Test (Key Principles)"
+    url: https://www.momtestbook.com/
+    note: "Qərəzsiz istifadəçi müsahibələri və problem kəşfi üzrə klassik bələdçi"
+  - title: "Andreessen Horowitz (a16z) — Navigating the High Cost of AI Compute"
+    url: https://a16z.com/navigating-the-high-cost-of-ai-compute/
+    note: "AI məhsullarında inference xərcləri, model seçimi və unit economics"

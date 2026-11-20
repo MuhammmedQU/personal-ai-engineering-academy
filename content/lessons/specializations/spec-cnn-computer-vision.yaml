@@ -1,0 +1,426 @@
+id: spec-cnn-computer-vision
+track: specializations
+module: computer-vision
+title: "CNN və Computer Vision — Konvolyusiya, Bounding Box, IoU və Object Detection"
+summary: "Şəkilləri düz vektor kimi MLP-yə ötürməyin niyə fəza strukturunu məhv etdiyini, 2D konvolyusiyanın lokal reseptiv sahə və çəki paylaşımı ilə necə işlədiyini, eləcə də Object Detection-da IoU, NMS və mAP mexanizmlərini öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [dl-neuron-forward-backprop, ml-classification-metrics]
+next: null
+skills: [spec-computer-vision, dl-architectures, ml-classification-metrics]
+objectives:
+  - "Şəkli düz vektor (flatten) halına salıb sıx (dense) MLP-yə verməyin fəza strukturunu niyə itirdiyini və parametr sayını necə partlatdığını izah etmək"
+  - "2D Konvolyusiyada kernel, padding və stride parametrlərindən istifadə edərək çıxış feature-map ölçüsünü hesablamaq"
+  - "Object Detection-da bounding box koordinatlarını və Intersection over Union (IoU) metrikini riyazi və proqramatik olaraq hesablamaq"
+  - "Non-Maximum Suppression (NMS) alqoritminin təkrarlanan qutuları necə təmizlədiyini və mAP (mean Average Precision) intuisiyasını izah etmək"
+why_it_matters: |
+  Sənaye keyfiyyətə nəzarət kameralarından tutmuş avtonom dronların maneə aşkarlamasına və tibbi MRT analizinə qədər real dünya AI sistemləri piksellərlə danışır.
+  Əgər sən $1024 \times 1024$ ölçülü RGB şəkli adi tam-əlaqəli (MLP) şəbəkəyə versən, təkcə ilk gizli qatda milyardlarla parametr yaranar, model həm GPU yaddaşını partladar, həm də obyekt şəkil daxilində 5 piksel sağa sürüşən kimi tamamilə fərqli çıxış verər.
+
+  **Convolutional Neural Networks (CNN)** və **Object Detection** arxitekturaları bu problemi iki fundamental mühəndislik prinsipi ilə həll edir:
+  - **Lokal reseptiv sahə və çəki paylaşımı (weight sharing):** eyni kiçik filtr bütün şəkil boyu sürüşərək həm parametr sayını kəskin azaldır, həm də yerdəyişməyə qarşı dayanıqlılıq (*translation equivariance*) yaradır.
+  - **Həndəsi qiymətləndirmə (IoU və NMS):** təkcə "şəkildə maşın var" demək kifayət deyil; onun dəqiq koordinatlarını tapmaq, üst-üstə düşən yüzlərlə namizəd qutunu təmizləmək və dəqiqliyi IoU/mAP ilə ölçmək lazımdır.
+terms:
+  - term: Local Receptive Field (Lokal reseptiv sahə)
+    definition: "Hər bir konvolyusiya neyronunun bütün şəklə deyil, yalnız kiçik bir piksel qonşuluğuna (məsələn, $3 \\times 3$ pəncərəyə) baxması."
+  - term: Weight Sharing (Çəki paylaşımı)
+    definition: "Eyni kernel (filtr) çəkilərinin şəklin bütün mövqelərində təkrar istifadə edilməsi; parametr sayını kəskin azaldır və obyekti şəklin istənilən yerində tanımağa imkan verir."
+  - term: Feature Map (Əlamət xəritəsi)
+    definition: "Konvolyusiya filtrinin giriş şəkli üzərində sürüşdürülməsi nəticəsində alınan 2D aktivasiya matrisi."
+  - term: Padding və Stride
+    definition: "Padding ($P$) şəklin kənarlarına əlavə edilən sıfır çərçivə qalınlığıdır; Stride ($S$) isə filtrin hər addımda neçə piksel sürüşdüyünü göstərir."
+  - term: Bounding Box
+    definition: "Obyektin şəkil üzərindəki yerini göstərən düzbucaqlı çərçivə; adətən $[x_{\\min}, y_{\\min}, x_{\\max}, y_{\\max}]$ koordinatları ilə ifadə olunur."
+  - term: Intersection over Union (IoU)
+    definition: "Proqnozlaşdırılan qutu ilə həqiqi (ground-truth) qutunun kəsişmə sahəsinin onların birləşmə sahəsinə nisbəti ($[0, 1]$ aralığında)."
+  - term: Non-Maximum Suppression (NMS)
+    definition: "Eyni obyekt ətrafında yaranan çoxsaylı üst-üstə düşən bounding box-lardan ən yüksək confidence skorlu olanı saxlayıb, onunla yüksək IoU-ya malik dublikatları silən post-processing alqoritmi."
+  - term: mAP (mean Average Precision)
+    definition: "Müxtəlif IoU hədlərində və bütün siniflər üzrə Precision-Recall əyrisinin altındakı sahənin (AP) ortalaması; Object Detection modellərinin əsas keyfiyyət metriki."
+sections:
+  - id: why-cnn-and-detection
+    kind: explanation
+    title: "Niyə MLP şəkillərdə uğursuz olur? 2D Konvolyusiya və Object Detection"
+    body: |
+      ### 1. Şəkli düz vektor (flatten) etməyin iki böyük fəlakəti
+      Tutaq ki, kameradan $224 \times 224$ ölçülü, 3 kanallı (RGB) şəkil gəlir. Bu şəkildə $224 \times 224 \times 3 = 150\,528$ ədəd rəqəm var.
+      Əgər bunu düz vektor halına salıb sadəcə $1000$ neyronlu sıx (dense / MLP) qata bağlasaq:
+      - **Parametr partlayışı:** Təkcə birinci qatda $150\,528 \times 1000 \approx 150.5\text{ milyon}$ çəki (weight) yaranır! Model dərhal overfit edir və yaddaşı doldurur.
+      - **Fəza strukturunun itməsi:** Şəkildə $(10, 10)$ pikselinin dərhal altında $(11, 10)$ pikseli yerləşir — onlar birlikdə kənar (edge) və ya tekstura əmələ gətirir. Vektoru düzləşdirəndə qonşuluq əlaqəsi məhv olur; obyekt 2 piksel sağa sürüşsə, aktivləşən giriş indeksləri tamamilə dəyişir.
+
+      ### 2. 2D Konvolyusiya və Çıxış Ölçüsü Düsturu
+      **2D Konvolyusiya** şəklin üzərində $K \times K$ ölçülü kiçik bir filtr (kernel) sürüşdürür. Hər mövqedə filtr çəkiləri ilə uyğun piksel pəncərəsinin element-ba-element hasili toplanır (dot product).
+      - **Local receptive field:** Hər çıxış pikseli yalnız $K \times K$ lokal qonşuluğa baxır.
+      - **Weight sharing:** Bütün şəkil boyu **eyni** $K \times K$ filtr çəkiləri istifadə olunur ($3 \times 3 \times 3$ RGB filtr üçün cəmi $27$ çəki + $1$ bias!).
+
+      Giriş hündürlüyü $H_{\text{in}}$ olan xəritəyə $K$ ölçülü kernel, $P$ padding və $S$ stride tətbiq etdikdə çıxış feature-map ölçüsü ($H_{\text{out}}$) belə hesablanır:
+
+      $$H_{\text{out}} = \left\lfloor \frac{H_{\text{in}} - K + 2P}{S} \right\rfloor + 1$$
+
+      Simvollar:
+      - $H_{\text{in}}$ — giriş xəritəsinin hündürlüyü (və ya eni $W_{\text{in}}$),
+      - $K$ — konvolyusiya kernelinin (filtrinin) ölçüsü,
+      - $P$ — hər tərəfdən əlavə olunan sıfır çərçivənin (padding) qalınlığı,
+      - $S$ — filtrin sürüşmə addımı (stride),
+      - $\lfloor \cdot \rfloor$ — aşağı yuvarlaqlaşdırma (floor / tam bölmə).
+
+      ### 3. Object Detection: Bounding Box, IoU, NMS və mAP
+      Təsnifat (Classification) bütün şəklə bir etiket verir. **Object Detection** isə şəkildəki hər bir obyekt üçün həm sinif ehtimalı, həm də **Bounding Box** $[x_{\min}, y_{\min}, x_{\max}, y_{\max}]$ qaytarır.
+
+      İki qutunun ($A$ və $B$) nə dərəcədə üst-üstə düşdüyünü **Intersection over Union (IoU)** ölçür:
+
+      $$\text{IoU}(A, B) = \frac{\text{Area}(A \cap B)}{\text{Area}(A) + \text{Area}(B) - \text{Area}(A \cap B)}$$
+
+      - $\text{IoU} = 1.0$: qutular tam üst-üstə düşür.
+      - $\text{IoU} = 0.0$: qutular heç kəsişmir.
+      - Standart olaraq $\text{IoU} \ge 0.5$ (və ya $0.75$) olduqda tapıntı **True Positive (TP)** sayılır.
+
+      Detektorlar eyni obyektin ətrafında onlarla bir-birinə yaxın qutu proqnozlaşdırır. **Non-Maximum Suppression (NMS)** alqoritmi:
+      1. Qutuları confidence skoruna görə azalan sıra ilə düzür.
+      2. Ən yüksək skorlu qutunu seçib saxlayır.
+      3. Həmin qutu ilə $\text{IoU} > \tau_{\text{nms}}$ (məsələn, $0.45$) olan bütün digər eyni-sinif qutularını dublikat kimi silir.
+      4. Qalan qutular üçün prosesi təkrarlayır.
+
+      Nəhayət, **mAP (mean Average Precision)** müxtəlif confidence hədlərində Precision və Recall balansını (PR əyrisinin sahəsini) bütün siniflər və IoU hədləri (məsələn, COCO-da $\text{IoU} \in [0.50 : 0.05 : 0.95]$) üzrə ortalayaraq modelin ümumi keyfiyyətini tək ədədlə ifadə edir.
+  - id: flashlight-stencil-analogy
+    kind: analogy
+    title: "Mental model: Fənər şüası və şəffaf xəritə vərəqləri"
+    body: |
+      - **MLP vs Konvolyusiya — Fənər şüası (Flashlight):** Təsəvvür et ki, qaranlıq otaqda divardakı yazını oxumaq istəyirsən. MLP bütün divarın hər nöqtəsinə eyni anda milyonlarla ayrı naqil bağlamağa çalışır. Konvolyusiya isə əlindəki **kiçik fənəri** (kernel) divar boyu soldan-sağa, yuxarıdan-aşağıya sürüşdürmək kimidir. Fənər eyni fənərdir (weight sharing), hər dəfə kiçik bir sahəni işıqlandırır (local receptive field) və həmin hissədə axtardığı naxışı (məsələn, şaquli xətti) görəndə parlaq siqnal verir.
+      - **IoU — Şəffaf vərəqdə iki möhür:** Müəllim xəritədə xəzinənin yerini yaşıl düzbucaqlı ilə işarələyib (ground truth). Sən isə öz təxminini qırmızı düzbucaqlı ilə çəkmisən (prediction). İki vərəqi üst-üstə qoyub işığa tutursan: hər iki rəngin üst-üstə düşdüyü tünd hissə **Intersection** (kəsişmə), ümumilikdə rənglənmiş bütün sahə isə **Union** (birləşmə) sahəsidir. Kəsişmənin birləşməyə nisbəti sənin təxmininin nə qədər sərrast olduğunu deyir.
+      - **NMS — Qrup fotosunda eyni adamı 5 dəfə işarələmək:** Dostların eyni maşının üzərinə 5 fərqli stiker yapışdırıb. Ən dəqiq və əmin stikeri saxlayıb, onun üstünə düşən digər 4 dublikat stikeri qoparmaq NMS-in gördüyü işdir.
+  - id: cnn-detection-pipeline
+    kind: diagram
+    title: "Konvolyusiya xəritəsindən IoU və NMS qərarına qədər axın"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Giriş Şəkli (H_in x W_in x C)"] --> B["2D Conv (Kernel K, Pad P, Stride S)"]
+        B --> C["Feature Map (H_out x W_out x F)"]
+        C --> D["Detection Head: Namizəd Qutular + Confidence"]
+        D --> E["IoU Hesablanması (Qutular arası kəsişmə / birləşmə)"]
+        E --> F["NMS (Yüksək IoU-lu dublikatların silinməsi)"]
+        F --> G["Yekun Deteksiyalar (mAP ilə qiymətləndirmə)"]
+      ```
+
+      Bu axında ilk mərhələ fəza ölçülərini nəzarətli şəkildə kiçildərək (downsampling) semantik əlamətləri çıxarır, ikinci mərhələ isə həndəsi kəsişmə (IoU) vasitəsilə artıq namizədləri təmizləyir.
+  - id: worked-conv-and-iou
+    kind: worked_example
+    title: "Addım-addım hesablama: Feature Map ölçüsü və Bounding Box IoU"
+    body: |
+      ### Hissə 1: 2D Konvolyusiya çıxış ölçüsünün hesablanması
+      **Verilənlər:** Giriş şəkli $H_{\text{in}} = 32$, kernel $K = 3$, padding $P = 1$, stride $S = 2$.
+
+      Düsturu tətbiq edək:
+
+      $$H_{\text{out}} = \left\lfloor \frac{32 - 3 + 2(1)}{2} \right\rfloor + 1 = \left\lfloor \frac{31}{2} \right\rfloor + 1 = 15 + 1 = 16$$
+
+      Deməli, $32 \times 32$ ölçülü xəritə $K=3, P=1, S=2$ konvolyusiyasından sonra dəqiq iki dəfə kiçilərək $16 \times 16$ olur.
+      *(Qeyd: Əgər $S = 1$ olsaydı, $\lfloor 31/1 \rfloor + 1 = 32$ alınardı — buna "same padding" deyilir).*
+
+      ---
+
+      ### Hissə 2: İki Bounding Box üçün IoU hesablanması
+      Formatımız $[x_{\min}, y_{\min}, x_{\max}, y_{\max}]$ şəklindədir.
+      - Həqiqi qutu (Ground Truth): $A = [2, 2, 10, 10]$
+      - Proqnoz qutusu (Prediction): $B = [6, 6, 14, 14]$
+
+      **Addım 1 — Hər bir qutunun öz sahəsi:**
+      - $\text{Area}(A) = (10 - 2) \times (10 - 2) = 8 \times 8 = 64$
+      - $\text{Area}(B) = (14 - 6) \times (14 - 6) = 8 \times 8 = 64$
+
+      **Addım 2 — Kəsişmə (Intersection) düzbucaqlısının koordinatları:**
+      - $x_{\text{left}} = \max(2, 6) = 6$
+      - $y_{\text{top}} = \max(2, 6) = 6$
+      - $x_{\text{right}} = \min(10, 14) = 10$
+      - $y_{\text{bottom}} = \min(10, 14) = 10$
+
+      Kəsişmənin eni və hündürlüyü (mənfi olmamaq üçün $\max(0, \dots)$ götürülür):
+      - $w_{\cap} = \max(0, 10 - 6) = 4$
+      - $h_{\cap} = \max(0, 10 - 6) = 4$
+      - $\text{Area}(A \cap B) = 4 \times 4 = 16$
+
+      **Addım 3 — Birləşmə (Union) sahəsi və IoU:**
+      - $\text{Area}(A \cup B) = \text{Area}(A) + \text{Area}(B) - \text{Area}(A \cap B) = 64 + 64 - 16 = 112$
+      - $\text{IoU}(A, B) = \frac{16}{112} = \frac{1}{7} \approx 0.1429$
+
+      | Ölçü | Hesablama | Nəticə |
+      |---|---|---|
+      | $\text{Area}(A)$ | $(10-2) \times (10-2)$ | $64$ |
+      | $\text{Area}(B)$ | $(14-6) \times (14-6)$ | $64$ |
+      | $\text{Area}(A \cap B)$ | $\max(0, 10-6) \times \max(0, 10-6)$ | $16$ |
+      | $\text{Area}(A \cup B)$ | $64 + 64 - 16$ | $112$ |
+      | $\text{IoU}(A, B)$ | $16 / 112$ | $0.1429$ |
+  - id: code-conv-iou-nms
+    kind: code
+    title: "Python ilə Conv2D ölçü, IoU və sadə NMS implementasiyası"
+    body: |
+      ```python
+      def conv2d_output_size(in_size: int, kernel: int, padding: int, stride: int) -> int:
+          """Compute 1D spatial output dimension of a 2D convolution layer."""
+          if in_size <= 0 or kernel <= 0 or padding < 0 or stride <= 0:
+              raise ValueError("Invalid convolution parameters.")
+          effective_in = in_size + 2 * padding
+          if effective_in < kernel:
+              raise ValueError("Kernel size cannot exceed padded input size.")
+          return (effective_in - kernel) // stride + 1
+
+
+      def compute_iou(box_a: list[float], box_b: list[float]) -> float:
+          """Compute IoU between two boxes in [x1, y1, x2, y2] format."""
+          ax1, ay1, ax2, ay2 = box_a
+          bx1, by1, bx2, by2 = box_b
+
+          inter_x1 = max(ax1, bx1)
+          inter_y1 = max(ay1, by1)
+          inter_x2 = min(ax2, bx2)
+          inter_y2 = min(ay2, by2)
+
+          inter_w = max(0.0, inter_x2 - inter_x1)
+          inter_h = max(0.0, inter_y2 - inter_y1)
+          inter_area = inter_w * inter_h
+
+          area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+          area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+          union_area = area_a + area_b - inter_area
+
+          if union_area <= 0.0:
+              return 0.0
+          return inter_area / union_area
+
+
+      def simple_nms(boxes: list[list[float]], scores: list[float], iou_threshold: float) -> list[int]:
+          """Return indices of kept boxes after Non-Maximum Suppression."""
+          order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+          keep: list[int] = []
+          while order:
+              best = order.pop(0)
+              keep.append(best)
+              order = [
+                  idx for idx in order
+                  if compute_iou(boxes[best], boxes[idx]) <= iou_threshold
+              ]
+          return keep
+
+
+      print("Conv out:", conv2d_output_size(32, 3, 1, 2))  # 16
+      print("IoU:", round(compute_iou([2, 2, 10, 10], [6, 6, 14, 14]), 4))  # 0.1429
+      ```
+
+      Kodda diqqət edilməli 3 mühüm mühəndislik detalı:
+      1. `max(0.0, inter_x2 - inter_x1)` ifadəsi kəsişməyən qutularda mənfi en və mənfi hündürlüyün bir-birinə vurularaq **yalnış müsbət sahə** verməsinin qarşısını alır.
+      2. `effective_in < kernel` yoxlaması kernelin şəkildən böyük olduğu məntiqsiz konfiqurasiyaları erkən mərhələdə (`ValueError`) tutur.
+      3. `simple_nms` funksiyası əvvəlcə ən yüksək skorlu qutunun indeksini götürür, sonra onunla yüksək IoU-ya malik olan bütün namizədləri siyahıdan çıxarır.
+  - id: common-cv-mistakes
+    kind: mistakes
+    title: "Computer Vision-da ən çox edilən səhvlər"
+    body: |
+      **1. Kəsişməyən qutularda mənfi fərqlərin hasilindən müsbət sahə almaq**
+      ```python
+      # YALNIŞ:
+      inter_area = (min(ax2, bx2) - max(ax1, bx1)) * (min(ay2, by2) - max(ay1, by1))
+      ```
+      Əgər $A$ qutusu həm $X$, həm də $Y$ oxu üzrə $B$-dən tamamilə uzaqdırsa, hər iki mötərizə mənfi olur (məsələn, $-5 \times -4 = +20$) və kod kəsişməyən qutular üçün müsbət IoU qaytarır! Həmişə hər ox üzrə `max(0.0, ...)` tətbiq edilməlidir.
+
+      **2. Koordinat formatlarını qarışdırmaq (`[x1, y1, x2, y2]` vs `[x_center, y_center, w, h]`)**
+      YOLO modelləri adətən mərkəz və ölçü (`cx, cy, w, h`, özü də `[0, 1]` aralığında normallaşdırılmış) qaytarır, Pascal VOC və PyTorch `torchvision.ops.box_iou` isə künc koordinatları (`x1, y1, x2, y2`) gözləyir. Formatı çevirmədən IoU hesablamaq tamamilə səhv metrik verir.
+
+      **3. Data Augmentation zamanı şəkli çevirib, bounding box-ları yeniləməmək**
+      Təsnifatda şəkli üfüqi çevirmək (horizontal flip) etiketi dəyişmir. Amma Object Detection-da şəkli güzgü kimi çevirəndə sol küncdəki maşın sağ küncə keçir! Əgər $x_{\text{new}} = W - x_{\text{old}}$ transformasiyasını qutulara tətbiq etməsən, model yanlış yerdə obyekt axtarmağı öyrənəcək.
+
+      **4. Union sahəsini sadəcə `area_a + area_b` kimi götürmək**
+      Kəsişmə sahəsini çıxmağı unutduqda ($\text{Area}(A) + \text{Area}(B)$), iki eyni qutunun IoU-su $1.0$ əvəzinə $0.5$ çıxır.
+  - id: cv-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: Gecikmə, Görmə sahəsi və NMS hədləri"
+    body: |
+      - **Böyük Kernel ($7 \times 7$) vs Ardıcıl Kiçik Kernellər ($3 \times 3$):** Üç ədəd ardıcıl $3 \times 3$ konvolyusiya qatı eyni $7 \times 7$ effektiv reseptiv sahəni əhatə edir, lakin $C$ kanal üçün $7^2 C^2 = 49 C^2$ əvəzinə cəmi $3 \times 3^2 C^2 = 27 C^2$ parametr tələb edir və araya əlavə qeyri-xətti aktivasiyalar (ReLU) salır.
+      - **Stride vs Pooling:** Böyük stride ($S=2$) hesablamanı dərhal 4 dəfə ($2 \times 2$) azaldır, lakin kiçik obyektlərin (məsələn, uzaqdakı piyada və ya dron görüntüsündə kiçik maneə) detallarını itirə bilər. Kiçik obyekt deteksiyasında yüksək giriş həlli (resolution) və FPN (Feature Pyramid Network) vacibdir.
+      - **NMS IoU həddi ($\tau_{\text{nms}}$) dilemması:** Həddi çox aşağı qoysan (məsələn, $0.2$), sıx izdihamda yan-yana dayanan iki həqiqi insanın birinin qutusu silinəcək (False Negative). Həddi çox yüksək qoysan (məsələn, $0.85$), tək obyektin üzərində bir neçə dublikat qutu qalacaq (False Positive).
+      - **CNN vs Vision Transformer (ViT):** ViT qlobal diqqət (self-attention) sayəsində nəhəng datasetlərdə yüksək dəqiqlik verir, lakin CNN-in daxili fəza induktiv meyli (*inductive bias*) daha az data və edge cihazlarda daha aşağı gecikmə (latency) üçün hələ də əvəzolunmazdır.
+mastery_criteria:
+  - "İstənilən $H_{\\text{in}}, K, P, S$ kombinasiyası üçün çıxış feature-map ölçüsünü dəqiq hesablayır və yanlış parametrləri tutur"
+  - "İki bounding box üçün kəsişmə, birləşmə və IoU dəyərini kənar hallar (kəsişməmə, tam üst-üstə düşmə) daxil olmaqla düzgün proqramlaşdırır"
+  - "NMS və mAP-da IoU həddinin dəyişməsinin Precision və Recall-a təsirini izah edir"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-speccv-conv-output
+      type: numeric
+      title: "2D Konvolyusiya çıxış ölçüsü"
+      prompt: |
+        Giriş feature-map ölçüsü $H_{\text{in}} = 64$, kernel ölçüsü $K = 5$, padding $P = 2$ və stride $S = 2$ olarsa, çıxış hündürlüyü $H_{\text{out}}$ neçə olar?
+      skills: [spec-computer-vision, dl-architectures]
+      category: math
+      answer: 32
+      tolerance: 0
+      hints:
+        - "Düstur: floor((H_in - K + 2*P) / S) + 1"
+        - "(64 - 5 + 4) // 2 + 1 ifadəsini hesabla."
+      explanation: "$H_{\\text{out}} = \\lfloor (64 - 5 + 2 \\times 2) / 2 \\rfloor + 1 = \\lfloor 63 / 2 \\rfloor + 1 = 31 + 1 = 32$."
+    - id: q-speccv-weight-sharing
+      type: mcq
+      title: "CNN-də çəki paylaşımının (weight sharing) rolu"
+      prompt: "2D konvolyusiya qatında eyni kernel çəkilərinin bütün şəkil boyu sürüşdürülməsi (weight sharing) hansı əsas üstünlüyü təmin edir?"
+      skills: [dl-architectures, spec-computer-vision]
+      category: concept
+      options:
+        - id: a
+          text: "Parametr sayını kəskin azaldır və əlamətlərin şəklin harasında yerləşməsindən asılı olmayaraq aşkarlanmasını (translation equivariance) təmin edir"
+          feedback: "Doğrudur! Eyni filtr şəklin həm sol yuxarı, həm də sağ aşağı küncündə eyni kənar və ya naxışı tanıya bilir."
+        - id: b
+          text: "Şəklin rəng kanallarını avtomatik olaraq ağ-qara (grayscale) formata çevirir"
+          feedback: "Yanlışdır. Konvolyusiya bütün giriş kanalları üzrə işləyir və çıxışda istənilən sayda feature map yarada bilər."
+        - id: c
+          text: "Non-Maximum Suppression (NMS) mərhələsinə ehtiyacı tamamilə aradan qaldırır"
+          feedback: "Yanlışdır. Çəki paylaşımı əlamət çıxarılması üçündür; deteksiya qutularının təmizlənməsi yenə də NMS və ya uyğun post-processing tələb edir."
+      answer: a
+      explanation: "Weight sharing sayəsində parametr sayı giriş şəklinin ölçüsündən ($H \\times W$) deyil, yalnız kernel ölçüsündən ($K \\times K \\times C_{\\text{in}} \\times C_{\\text{out}}$) asılı olur."
+    - id: q-speccv-nms-crowd
+      type: mcq
+      title: "NMS həddinin sıx obyektlərə təsiri"
+      prompt: "Küçə kamerasında yan-yana sıx yeriyən piyadaları aşkarlayan modeldə NMS IoU həddini ($\\tau_{\\text{nms}}$) çox aşağı (məsələn, $0.15$) təyin etsən hansı problem yaranar?"
+      skills: [spec-computer-vision, ml-classification-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: "Bir-birinə yaxın dayanan həqiqi piyadaların qutuları bir-birini silər və Recall aşağı düşər (False Negative artar)"
+          feedback: "Doğrudur! İki fərqli piyadanın qutusu $0.25$ IoU ilə kəsişdikdə, $\\tau_{\\text{nms}} = 0.15$ onları eyni obyektin dublikatı sayıb birini siləcək."
+        - id: b
+          text: "Hər piyadanın üzərində 10-dan çox dublikat qutu qalar"
+          feedback: "Bu, NMS həddi çox yüksək (məsələn, $0.95$) olduqda baş verir."
+        - id: c
+          text: "Konvolyusiya qatlarının parametr sayı iki dəfə artar"
+          feedback: "NMS post-processing mərhələsidir, şəbəkənin çəkilərinə təsir etmir."
+      answer: a
+      explanation: "Aşağı $\\tau_{\\text{nms}}$ aqressiv təmizləmə deməkdir: bir-birinə azca toxunan fərqli obyektlər də silinir, nəticədə Recall pisləşir."
+    - id: q-speccv-iou-edge-cases
+      type: multi
+      title: "IoU metrikinin xassələri"
+      prompt: "Intersection over Union (IoU) haqqında aşağıdakı fikirlərdən hansılar **doğrudur**? Hamısını seç."
+      skills: [spec-computer-vision, ml-classification-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: "IoU həmişə $[0.0, 1.0]$ aralığında qiymət alır"
+          feedback: "Bəli, kəsişmə sahəsi heç vaxt birləşmə sahəsindən böyük ola bilməz və mənfi deyil."
+        - id: b
+          text: "IoU miqyasdan asılı deyil (scale-invariant): hər iki qutunun koordinatlarını 2 dəfə böyütsək, IoU dəyişməz"
+          feedback: "Bəli, bütün sahələr $2^2 = 4$ dəfə böyüdüyü üçün nisbət sabit qalır."
+        - id: c
+          text: "İki qutu heç kəsişmədikdə onların bir-birinə nə qədər yaxın və ya uzaq olmasından asılı olmayaraq IoU = 0.0 olur"
+          feedback: "Bəli, məhz bu səbəbdən bəzi müasir detektorlar loss funksiyasında GIoU və ya CIoU istifadə edir."
+        - id: d
+          text: "IoU-nu hesablamaq üçün birləşmə sahəsi sadəcə Area(A) + Area(B) kimi götürülür"
+          feedback: "Xeyr, kəsişmə sahəsi iki dəfə sayılmasın deyə Area(A) + Area(B) - Area(A ∩ B) olmalıdır."
+      answers: [a, b, c]
+      explanation: "IoU $[0, 1]$ aralığındadır, miqyasa nəzərən invariantdır və kəsişməyən bütün qutu cütləri üçün eyni $0.0$ qiymətini verir."
+exercises:
+  - id: ex-speccv-conv-and-iou
+    type: code
+    title: "2D Konvolyusiya çıxış ölçüsü və Bounding Box IoU funksiyalarını yaz"
+    prompt: |
+      Computer Vision boru kəməri üçün iki fundamental köməkçi funksiyanı implementasiya et:
+
+      1. `conv2d_output_size(in_size: int, kernel: int, padding: int, stride: int) -> int`:
+         - Çıxış ölçüsünü $\lfloor (H_{\text{in}} - K + 2P) / S \rfloor + 1$ düsturu ilə hesablayır.
+         - Əgər `in_size <= 0`, `kernel <= 0`, `padding < 0`, `stride <= 0` olarsa və ya `in_size + 2 * padding < kernel` olarsa, `ValueError` qaldırmalıdır.
+
+      2. `compute_iou(box_a: list[float], box_b: list[float]) -> float`:
+         - `[x1, y1, x2, y2]` formatında verilmiş iki qutu üçün IoU dəyərini (`float`) qaytarır.
+         - Qutular kəsişmirsə və ya birləşmə sahəsi `<= 0` olarsa, təhlükəsiz şəkildə `0.0` qaytarmalıdır.
+    skills: [spec-computer-vision, dl-architectures, ml-classification-metrics]
+    category: python
+    difficulty: 2
+    hints:
+      - "`conv2d_output_size` daxilində əvvəlcə parametrlərin işarəsini (`in_size <= 0`, `kernel <= 0`, `padding < 0`, `stride <= 0`) və `in_size + 2 * padding < kernel` şərtini yoxlayıb `ValueError` qaldır."
+      - "`compute_iou` funksiyasında kəsişmə düzbucaqlısının sol-yuxarı küncü üçün `max(ax1, bx1)` və `max(ay1, by1)`, sağ-aşağı küncü üçün isə `min(ax2, bx2)` və `min(ay2, by2)` istifadə et."
+      - "Kəsişmə enini və hündürlüyünü hesablayarkən mənfi ədədlərdən qorunmaq üçün `max(0.0, inter_x2 - inter_x1)` və `max(0.0, inter_y2 - inter_y1)` yazmağı unutma."
+    starter_code: |
+      def conv2d_output_size(in_size: int, kernel: int, padding: int, stride: int) -> int:
+          # TODO: validasiya və çıxış ölçüsü düsturunu yaz
+          return 0
+
+
+      def compute_iou(box_a: list[float], box_b: list[float]) -> float:
+          # TODO: [x1, y1, x2, y2] qutuları üçün IoU hesabla
+          return -1.0
+    tests:
+      - name: "Conv2D standart ölçülər"
+        code: |
+          assert conv2d_output_size(32, 3, 1, 1) == 32
+          assert conv2d_output_size(32, 3, 1, 2) == 16
+          assert conv2d_output_size(224, 7, 3, 2) == 112
+      - name: "Conv2D yanlış parametrlərdə ValueError"
+        code: |
+          for bad in [(0, 3, 1, 1), (32, 0, 1, 1), (32, 3, -1, 1), (32, 3, 1, 0), (2, 5, 0, 1)]:
+              try:
+                  conv2d_output_size(*bad)
+                  assert False, f"ValueError gözlənilirdi: {bad}"
+              except ValueError:
+                  pass
+      - name: "IoU qismən kəsişən və tam üst-üstə düşən qutular"
+        code: |
+          iou_same = compute_iou([0, 0, 10, 10], [0, 0, 10, 10])
+          assert abs(iou_same - 1.0) < 1e-6, f"Tam üst-üstə düşmə 1.0 olmalıdır, alınan: {iou_same}"
+          iou_half = compute_iou([0, 0, 10, 10], [5, 0, 15, 10])
+          assert abs(iou_half - (50.0 / 150.0)) < 1e-6, f"Gözlənilən 0.3333, alınan: {iou_half}"
+      - name: "IoU kəsişməyən qutular (hər iki ox üzrə uzaq)"
+        code: |
+          assert compute_iou([0, 0, 5, 5], [10, 10, 20, 20]) == 0.0
+          assert compute_iou([0, 0, 5, 5], [5, 0, 10, 5]) == 0.0
+    solution: |
+      def conv2d_output_size(in_size: int, kernel: int, padding: int, stride: int) -> int:
+          if in_size <= 0 or kernel <= 0 or padding < 0 or stride <= 0:
+              raise ValueError("Invalid convolution parameters.")
+          padded = in_size + 2 * padding
+          if padded < kernel:
+              raise ValueError("Padded input size is smaller than kernel.")
+          return (padded - kernel) // stride + 1
+
+
+      def compute_iou(box_a: list[float], box_b: list[float]) -> float:
+          ax1, ay1, ax2, ay2 = box_a
+          bx1, by1, bx2, by2 = box_b
+
+          inter_w = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+          inter_h = max(0.0, min(ay2, by2) - max(ay1, by1))
+          inter_area = inter_w * inter_h
+
+          area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+          area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+          union_area = area_a + area_b - inter_area
+
+          if union_area <= 0.0:
+              return 0.0
+          return inter_area / union_area
+    explanation: |
+      `conv2d_output_size` tam bölmə (`//`) ilə düsturu birbaşa tətbiq edir və fiziki olaraq mümkün olmayan parametrlərdə `ValueError` qaldırır. `compute_iou` isə hər ox üzrə kəsişmə uzunluğunu `max(0.0, ...)` ilə qoruyaraq kəsişməyən qutularda `0.0` qaytarır.
+  - id: ex-speccv-iou-numeric
+    type: numeric
+    title: "İki Bounding Box üçün IoU-nu hesabla"
+    prompt: |
+      Formatı $[x_{\min}, y_{\min}, x_{\max}, y_{\max}]$ olan iki bounding box verilib:
+      - `box_a = [0, 0, 10, 10]`
+      - `box_b = [5, 0, 15, 10]`
+
+      Bu iki qutu üçün **Intersection over Union (IoU)** dəyərini hesabla (cavabı onluq kəsrlə, məsələn `0.3333` kimi yaz).
+    skills: [spec-computer-vision, ml-classification-metrics]
+    category: ml-metric
+    difficulty: 1
+    answer: 0.3333
+    tolerance: 0.005
+    hints:
+      - "`box_a`-nın sahəsi $10 \\times 10 = 100$, `box_b`-nin sahəsi də $(15 - 5) \\times 10 = 100$-dür."
+      - "Kəsişmə qutusu `[5, 0, 10, 10]` olur, yəni kəsişmə sahəsi $(10 - 5) \\times 10 = 50$-dir. İndi birləşmə sahəsini ($100 + 100 - 50$) tapıb nisbəti hesabla."
+    explanation: |
+      $\text{Area}(A) = 100$, $\text{Area}(B) = 100$. Kəsişmə qutusu $[5, 0, 10, 10]$ olduğu üçün $\text{Area}(A \cap B) = 5 \times 10 = 50$.
+      Birləşmə sahəsi $\text{Area}(A \cup B) = 100 + 100 - 50 = 150$.
+      Buradan $\text{IoU} = 50 / 150 = 1 / 3 \approx 0.3333$.
+references:
+  - title: "CS231n: Convolutional Neural Networks for Visual Recognition"
+    url: https://cs231n.github.io/convolutional-networks/
+    note: "Stanford CS231n kursunun 2D konvolyusiya, stride və padding üzrə vizual bələdçisi"
+  - title: "PyTorch Torchvision Ops — box_iou and nms"
+    url: https://pytorch.org/vision/stable/ops.html
+    note: "Production Computer Vision sistemlərində standart IoU və NMS funksiyaları"

@@ -1,0 +1,416 @@
+id: spec-recsys-timeseries-forecasting
+track: specializations
+module: recsys-timeseries
+title: "Tövsiyə Sistemləri və Zaman Sıraları — Walk-Forward Validation, Seasonal Naive və Matrix Factorization"
+summary: "Zaman sıralarında təsadüfi train/test bölgüsünün niyə gələcəkdən keçmişə data sızması (leakage) yaratdığını, Walk-Forward (Expanding Window) validasiyasını, Seasonal Naive baseline-ı və Tövsiyə Sistemlərində Collaborative Filtering / dot-product faktorizasiyasını öyrənəcəksən."
+level: advanced
+estimated_minutes: [55, 75]
+prerequisites: [ml-overfitting-regularization, math-vectors-dot-product]
+next: null
+skills: [ml-data-splitting, ml-regression-metrics, vectors-dot-product]
+objectives:
+  - "Zaman sıralarında (Time Series) təsadüfi `train_test_split` və ya `KFold(shuffle=True)` istifadəsinin niyə fəlakətli future-to-past data leakage yaratdığını izah etmək"
+  - "Walk-Forward (Expanding Window) validasiya bölgülərini və Seasonal Naive Baseline ($\\hat{y}_t = y_{t-m}$) proqnozunu proqramlaşdırmaq"
+  - "Tövsiyə sistemlərində (RecSys) istifadəçi və məhsul embedding-lərinin skalyar hasili ($\\hat{r}_{u,i} = \\mathbf{p}_u \\cdot \\mathbf{q}_i$) ilə Matrix Factorization iş prinsipini izah etmək"
+  - "Cold-start problemini, populyarlıq baseline-nı və Precision@K / NDCG@K sıralama metriklərini tətbiq etmək"
+why_it_matters: |
+  E-ticarət platformalarında iki AI sistemi gəlirin əsas hissəsini idarə edir: **Tələbatın Proqnozlaşdırılması (Time Series Forecasting)** və **Fərdi Tövsiyə Sistemləri (Recommendation Systems)**.
+
+  Təcrübəsiz mühəndislərin ən çox uğursuz olduğu sahə də məhz buradır:
+  1. **Zaman Sırasında Gələcək Sızması (Time Travel Leakage):** Mühəndis mağaza satışlarını `train_test_split(shuffle=True)` ilə bölür. Model çərşənbə axşamının satışını proqnozlaşdırarkən həmin həftənin çərşənbə və cümə axşamı satışlarını training-də görür! Notebook-da $R^2 = 0.98$ çıxır, rəhbərlik heyran qalır, amma model production-a çıxan ilk gün gələcək günlər mövcud olmadığı üçün tamamilə çökür.
+  2. **Baseline-sız Mürəkkəb Modellər:** Komanda həftələrlə dərin Transformer zaman sırası modeli öyrədir, halbuki adi **Seasonal Naive** ("bu şənbənin satışı keçən şənbənin satışına bərabər olacaq": $\hat{y}_t = y_{t-7}$) həmin modeli daha aşağı MAE ilə məğlub edir.
+terms:
+  - term: Future-to-Past Data Leakage (Look-ahead Bias)
+    definition: "Modelin öyrədilməsi və ya əlamət çıxarılması zamanı proqnoz anında ($t$) hələ baş verməmiş gələcək ($t+k$) məlumatların təsadüfi bölgü və ya qlobal normallaşdırma vasitəsilə training-ə sızması."
+  - term: Walk-Forward (Expanding Window) Validation
+    definition: "Zaman oxunu qoruyaraq hər növbəti fold-da keçmiş training pəncərəsini genişləndirən (`[0..t]`) və yalnız ondan dərhal sonrakı üfüqü (`[t..t+H]`) test edən zaman sırası validasiyası."
+  - term: Seasonal Naive Baseline
+    definition: "Dövrü (mövsüm uzunluğu) $m$ olan zaman sırasında hər gələcək nöqtəni dəqiq bir mövsüm əvvəlki müşahidə ilə proqnozlaşdıran təməl model ($\\hat{y}_t = y_{t-m}$)."
+  - term: Forecast Horizon (Proqnoz üfüqü)
+    definition: "İndiki zamandan etibarən gələcəyə doğru neçə addım ($H$) proqnoz verildiyini göstərən parametr."
+  - term: Collaborative Filtering və Matrix Factorization
+    definition: "İstifadəçi-məhsul qarşılıqlı əlaqə matrisini aşağı ölçülü istifadəçi vektoru ($\\mathbf{p}_u$) və məhsul vektorunun ($\\mathbf{q}_i$) skalyar hasili ($\\hat{r}_{u,i} = \\mathbf{p}_u \\cdot \\mathbf{q}_i$) kimi faktorizə edən tövsiyə üsulu."
+  - term: Cold-Start Problem
+    definition: "Sistemə yeni qoşulmuş istifadəçi və ya yeni əlavə olunmuş məhsul haqqında keçmiş qarşılıqlı əlaqə tarixçəsi olmadığından Collaborative Filtering-in vektor öyrənə bilməməsi."
+  - term: Precision@K və NDCG@K
+    definition: "Tövsiyə olunan ilk $K$ məhsul içərisində istifadəçiyə uyğun olanların payını (Precision@K) və onların siyahının nə qədər yuxarısında yerləşdiyini (NDCG@K) ölçən sıralama metrikləri."
+sections:
+  - id: timeseries-and-recsys-foundations
+    kind: explanation
+    title: "Zaman Sıralarının Qızıl Qaydası, Seasonal Naive və Matrix Factorization"
+    body: |
+      ### 1. Zaman Sıralarında Qızıl Qayda: Zaman Oxunu Heç VaxtQırma!
+      Klassik cədvəl datasında (məsələn, müştəri profili) sətirlərin müstəqil və eyni paylanmalı (*i.i.d.*) olduğunu fərz edib təsadüfi (`shuffle=True`) bölürük. **Zaman sıralarında isə ardıcıl nöqtələr bir-birindən güclü asılıdır (avtokorrelyasiya).**
+      Əgər `KFold(shuffle=True)` etsən:
+      - $t=10$ gününü testə, $t=9$ və $t=11$ günlərini isə training-ə salmış olursan.
+      - Model sadəcə dünənlə sabahın ortalamasını ($0.5 y_{t-1} + 0.5 y_{t+1}$) öyrənərək testdə $98\%$ $R^2$ göstərir.
+      - Production-da isə bu gün $t=10$-dursa, sabah ($t=11$) hələ yaşanmayıb!
+
+      **Düzgün həll — Walk-Forward (Expanding Window) Validation:**
+      Minimum başlanğıc pəncərəsi $M$ (`min_train_size`) və proqnoz üfüqü $H$ (`horizon`) seçilir:
+      - **Fold 1:** Train $= y[0 : M]$, Validation $= y[M : M + H]$
+      - **Fold 2:** Train $= y[0 : M + H]$, Validation $= y[M + H : M + 2H]$
+      - **Fold 3:** Train $= y[0 : M + 2H]$, Validation $= y[M + 2H : M + 3H]$
+
+      ### 2. Məcburi Təməl: Seasonal Naive Baseline
+      Hər hansı ML və ya Deep Learning zaman sırası modeli qurmazdan əvvəl **Seasonal Naive** baseline-ı hesablanmalıdır. Mövsüm uzunluğu $m$ (məsələn, gündəlik datada həftəlik dövr üçün $m = 7$, saatlıq datada sutkalıq dövr üçün $m = 24$) olduqda:
+
+      $$\hat{y}_{T + h} = y_{T + h - m \cdot \lceil h / m \rceil}$$
+
+      Başqa sözlə, tarixçənin son $m$ addımı (`history[-m:]`) götürülür və proqnoz üfüqü $H$ dolana qədər dövri olaraq təkrarlanır. Əgər mürəkkəb modelin MAE və ya RMSE xətası bu 3 sətirlik baseline-dan yaxşı deyilsə, həmin model production-a buraxılmamalıdır.
+
+      ### 3. Tövsiyə Sistemləri (RecSys): Matrix Factorization və Skalyar Hasil
+      Platformada $U$ istifadəçi və $I$ məhsul (film, kurs, kitab) var. İstifadəçi $u$-nun məhsul $i$-yə marağını proqnozlaşdırmaq üçün hər istifadəçini $d$-ölçülü gizli (latent) əlamət vektoru $\mathbf{p}_u \in \mathbb{R}^d$, hər məhsulu isə $\mathbf{q}_i \in \mathbb{R}^d$ ilə ifadə edirik (**Matrix Factorization**):
+
+      $$\hat{r}_{u,i} = \mathbf{p}_u \cdot \mathbf{q}_i = \sum_{k=1}^d p_{u,k} \, q_{i,k}$$
+
+      Simvollar:
+      - $\mathbf{p}_u$ — istifadəçi $u$-nun gizli zövq vektoru (məsələn, `[elm-kursu marağı, qısa-video marağı, ...]`),
+      - $\mathbf{q}_i$ — məhsul $i$-nin gizli xüsusiyyət vektoru,
+      - $\hat{r}_{u,i}$ — gözlənilən reytinq və ya uyğunluq skoru (skalyar hasil / dot product).
+
+      **Mühəndislik reallıqları:**
+      - **Cold-Start Problemi:** Yeni qeydiyyatdan keçən istifadəçinin heç bir tarixçəsi yoxdur ($\mathbf{p}_{\text{new}}$ məlum deyil). Bu halda sistem **Popularity Baseline** (son 7 günün ən populyar məhsulları) və ya məzmun əsaslı (**Content-Based** — istifadəçinin seçdiyi teqlər və ya məhsulun mətn embedding-i) tövsiyəyə keçir.
+      - **Qiymətləndirmə:** İstifadəçi bütün $100\,000$ məhsula baxmır, yalnız ekrandakı ilk $K$ (məsələn, $K=5$ və ya $10$) tövsiyəni görür. Buna görə RMSE əvəzinə **Precision@K** (ilk $K$ tövsiyədən neçə faizi klikləndi) və **NDCG@K** (doğru məhsul 1-ci sırada çıxdı, yoxsa 10-cu sırada?) istifadə olunur.
+  - id: exam-and-matchmaker-analogy
+    kind: analogy
+    title: "Mental model: Sabahkı qəzetə baxıb proqnoz vermək və zövq koordinatları"
+    body: |
+      - **Time Leakage — Sabahkı qəzeti oxuyan falçı:** Təsəvvür et ki, bir falçı 2023-cü ilin bütün qəzetlərini qarışdırıb oxuyandan sonra "2023-cü ilin 15 mayında yağış yağacaqdı" deyir — çünki artıq 16 may qəzetində "dünən güclü yağış yağdı" xəbərini görüb! `KFold(shuffle=True)` məhz budur. **Walk-Forward Validation** isə falçını zaman maşınından düşürür: 15 mayı təxmin etmək üçün yalnız 14 maya qədərki qəzetləri görməyə icazə verir.
+      - **Seasonal Naive — Bazar ertəsi tıxacı:** "Gələn bazar ertəsi səhər saat 09:00-da yolda nə qədər maşın olacaq?" sualına ən sadə və güclü cavab dünənə (bazar gününə) baxmaq deyil, **keçən bazar ertəsi saat 09:00-a** ($t - 7\text{ gün}$) baxmaqdır.
+      - **Matrix Factorization — İki oxlu zövq kompasında uyğunluq:** Hər filmi iki rəqəmlə təsvir edək: `[Komediya, Elmi-Fantastika]`. *Interstellar* filmi `[0.1, 0.9]`, *Evdə Tək* filmi isə `[0.9, 0.0]` olsun. Əgər Əlinin zövq vektoru $\mathbf{p}_{\text{Əli}} = [0.2, 0.8]$ olarsa, onun *Interstellar* ilə skalyar hasili $0.2(0.1) + 0.8(0.9) = 0.74$ (yüksək uyğunluq), *Evdə Tək* ilə isə $0.2(0.9) + 0.8(0.0) = 0.18$ (aşağı uyğunluq) çıxır.
+  - id: walk-forward-diagram
+    kind: diagram
+    title: "Walk-Forward (Expanding Window) Validasiya və RecSys Dot-Product Axını"
+    body: |
+      ```mermaid
+      flowchart TD
+        subgraph TimeSeries["Walk-Forward Validation (Zaman Oxu: Soldan Sağa)"]
+          F1["Fold 1: Train [t1..t4]  -->  Val [t5..t6]"]
+          F2["Fold 2: Train [t1..t6]  -->  Val [t7..t8]"]
+          F3["Fold 3: Train [t1..t8]  -->  Val [t9..t10]"]
+          F1 --> F2 --> F3
+        end
+        subgraph RecSys["Collaborative Filtering & Cold-Start Fallback"]
+          U["İstifadəçi tarixçəsi varmı?"] -- "Bəli" --> MF["Skalyar Hasil: r = p_u · q_i"]
+          U -- "Xeyr (Cold-Start)" --> POP["Popularity / Content-Based Fallback"]
+          MF --> TOPK["Top-K Sıralama (Precision@K, NDCG@K)"]
+          POP --> TOPK
+        end
+      ```
+
+      Zaman sıralarında hər bir fold-da validation pəncərəsi həmişə training pəncərəsindən **sonra** gəlir. Tövsiyə sistemində isə dot-product yalnız tarixçəsi olan istifadəçilər üçün işləyir; yeni istifadəçilər üçün fallback qolu məcburidir.
+  - id: worked-seasonal-and-mf
+    kind: worked_example
+    title: "Addım-addım hesablama: Seasonal Naive, MAE və RecSys Dot-Product"
+    body: |
+      ### Hissə 1: Seasonal Naive Proqnozu və MAE
+      Kiçik mövsüm uzunluğu $m = 3$ olan satış tarixçəsi verilib:
+      - `history = [10.0, 20.0, 50.0, 12.0, 22.0, 55.0]` (son mövsüm: `[12.0, 22.0, 55.0]`)
+      - Növbəti $H = 4$ addım üçün həqiqi gələcək satışlar: `actual = [14.0, 20.0, 58.0, 15.0]`
+
+      **Seasonal Naive ($m=3, H=4$) proqnozu:**
+      Son $3$ dəyəri (`[12.0, 22.0, 55.0]`) $4$ addım boyunca dövri təkrarlayırıq:
+      - $\hat{y}_1 = 12.0$ (həqiqi: $14.0$, $|e_1| = 2.0$)
+      - $\hat{y}_2 = 22.0$ (həqiqi: $20.0$, $|e_2| = 2.0$)
+      - $\hat{y}_3 = 55.0$ (həqiqi: $58.0$, $|e_3| = 3.0$)
+      - $\hat{y}_4 = 12.0$ (həqiqi: $15.0$, $|e_4| = 3.0$)
+
+      $$\text{MAE} = \frac{2.0 + 2.0 + 3.0 + 3.0}{4} = \frac{10.0}{4} = 2.5$$
+
+      ---
+
+      ### Hissə 2: Matrix Factorization ilə Top-1 Tövsiyə
+      İstifadəçi $u$-nun $d=3$ ölçülü gizli vektoru: $\mathbf{p}_u = [0.8,\; 0.1,\; 0.5]$.
+      Üç namizəd kursun gizli vektorları:
+
+      | Kurs | Vektor $\mathbf{q}_i$ | Skalyar Hasil $\hat{r}_{u,i} = \mathbf{p}_u \cdot \mathbf{q}_i$ | Yekun Skor |
+      |---|---|---|---|
+      | Kurs A (AI Mühəndisliyi) | $[0.9,\; 0.0,\; 0.6]$ | $0.8(0.9) + 0.1(0.0) + 0.5(0.6) = 0.72 + 0 + 0.30$ | **$1.02$** |
+      | Kurs B (Dizayn) | $[0.1,\; 0.9,\; 0.2]$ | $0.8(0.1) + 0.1(0.9) + 0.5(0.2) = 0.08 + 0.09 + 0.10$ | $0.27$ |
+      | Kurs C (Robototexnika) | $[0.7,\; 0.2,\; 0.4]$ | $0.8(0.7) + 0.1(0.2) + 0.5(0.4) = 0.56 + 0.02 + 0.20$ | $0.78$ |
+
+      Sıralama: **Kurs A ($1.02$) > Kurs C ($0.78$) > Kurs B ($0.27$)**.
+  - id: code-walk-forward-and-recsys
+    kind: code
+    title: "Python ilə Seasonal Naive, Walk-Forward Splits və Dot-Product Recommender"
+    body: |
+      ```python
+      def seasonal_naive_forecast(
+          history: list[float],
+          season_length: int,
+          horizon: int,
+      ) -> list[float]:
+          """Forecast `horizon` steps ahead by repeating the last `season_length` observations."""
+          if season_length <= 0 or horizon <= 0:
+              raise ValueError("season_length and horizon must be positive.")
+          if len(history) < season_length:
+              raise ValueError("history must contain at least season_length observations.")
+
+          last_season = history[-season_length:]
+          return [float(last_season[i % season_length]) for i in range(horizon)]
+
+
+      def walk_forward_splits(
+          series: list,
+          min_train_size: int,
+          horizon: int,
+      ) -> list[tuple[list, list]]:
+          """Generate expanding-window (train, val) splits stepping forward by `horizon`."""
+          if min_train_size <= 0 or horizon <= 0:
+              raise ValueError("min_train_size and horizon must be positive.")
+          if len(series) < min_train_size + horizon:
+              raise ValueError("series is too short for the requested min_train_size and horizon.")
+
+          splits: list[tuple[list, list]] = []
+          for split_idx in range(min_train_size, len(series) - horizon + 1, horizon):
+              train_fold = list(series[:split_idx])
+              val_fold = list(series[split_idx : split_idx + horizon])
+              splits.append((train_fold, val_fold))
+          return splits
+
+
+      def score_items_dot_product(
+          user_vec: list[float],
+          item_vecs: dict[str, list[float]],
+      ) -> list[tuple[str, float]]:
+          """Rank items by dot product similarity with user_vec (descending)."""
+          scored = [
+              (item_id, sum(u * v for u, v in zip(user_vec, vec)))
+              for item_id, vec in item_vecs.items()
+          ]
+          return sorted(scored, key=lambda pair: pair[1], reverse=True)
+
+
+      print(seasonal_naive_forecast([10, 20, 50, 12, 22, 55], season_length=3, horizon=4))
+      print(walk_forward_splits([1, 2, 3, 4, 5, 6], min_train_size=2, horizon=2))
+      ```
+
+      Kodda diqqət yetirilməli məqamlar:
+      - `walk_forward_splits` hər fold-da `list(series[:split_idx])` və `list(series[split_idx : split_idx + horizon])` ilə **yeni kopya** siyahılar qaytarır və `split_idx`-i `horizon` addımı ilə irəli sürüşdürür. Beləliklə, heç bir validation nöqtəsi özündən əvvəlki və ya cari training pəncərəsinə düşmür.
+      - `seasonal_naive_forecast` mod (`i % season_length`) indeksindən istifadə etdiyi üçün `horizon > season_length` olduqda belə (məsələn, 7 günlük həftəlik dövrlə 30 gün irəlini proqnozlaşdıranda) problemsiz işləyir.
+  - id: common-ts-recsys-mistakes
+    kind: mistakes
+    title: "Zaman Sıraları və Tövsiyə Sistemlərində ən çox edilən səhvlər"
+    body: |
+      **1. Zaman sırasını bölməzdən əvvəl bütün dataset üzərində `StandardScaler` və ya `rolling_mean` hesablamaq**
+      Hətta zaman sırasını tarixə görə düzgün bölsən belə, bölməzdən əvvəl bütün `df["sales"]` üzərində orta və ya standart meyl hesablamaq gələcək pik satışların (məsələn, Black Friday) statistikasını keçmişə sızdırır. Hər bir Walk-Forward fold-unda scaler **yalnız həmin fold-un `train` hissəsində** `fit` edilməlidir!
+
+      **2. Laq əlamətləri (Lag Features) yaradarkən hədəf günün özünü (`lag_0`) və ya gələcəyi (`shift(-1)`) daxil etmək**
+      Pandas-da `df["sales"].shift(1)` dünənki satışı verir, `df["sales"].shift(-1)` isə **sabahkı** satışı! Səhvən mənfi shift və ya `rolling(3, center=True)` istifadə etmək gələcəyi birbaşa X matrisinə kopyalayır.
+
+      **3. Tövsiyə sistemini yalnız kliklənmiş məhsulların RMSE-si ilə qiymətləndirmək**
+      İstifadəçinin yalnız 5 ulduz verdiyi filmlərdə RMSE-nin aşağı olması modelin yaxşı sıralama (ranking) etməsi demək deyil. İstifadəçiyə maraqsız olan minlərlə məhsulu yuxarı sıraya çıxaran model RMSE-də yaxşı görünüb, **Precision@K / NDCG@K** və real CTR-də (Click-Through Rate) uğursuz ola bilər.
+
+      **4. Cold-Start və Popularity Bias-ı nəzərə almamaq**
+      Yeni gələn istifadəçiyə sıfır vektoru ($\mathbf{p}_u = \mathbf{0}$) verildikdə bütün skalyar hasillər $0$ olur və sistem təsadüfi məhsullar göstərir. Explicit fallback (populyar və ya onboarding kateqoriya seçimi) mütləqdir.
+  - id: ts-recsys-tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri: Expanding vs Sliding Window və Two-Stage RecSys"
+    body: |
+      - **Expanding Window vs Sliding (Rolling) Window:** `Expanding Window` başlanğıcdan bəri bütün tarixçəni (`series[:split_idx]`) saxlayır — data az olduqda və mövsümilik sabit qaldıqda əladır. Lakin bazarda kəskin rejim dəyişikliyi (*concept drift*, məsələn, qiymət islahatı və ya pandemiya) baş veribsə, 5 il əvvəlki köhnə datanı unutmaq üçün sabit uzunluqlu **Sliding Window** (`series[split_idx - W : split_idx]`) daha dəqiq nəticə verir.
+      - **Sadə Statistik Modellər (Seasonal Naive / ARIMA / ETS) vs GBDT / Deep Learning:** Tək bir mağazanın qısa tarixçəli satışı üçün Seasonal Naive və ya ETS/ARIMA həm sürətli, həm də izaholunandır. Minlərlə məhsul üzrə çarpaz əlamətlər (endirim kampaniyaları, hava, bayram təqvimi, qiymət elastikliyi) olduqda isə lag əlamətləri üzərində öyrədilmiş **LightGBM / XGBoost** sənayedə ən güclü nəticəni verir.
+      - **İki Mərhələli (Two-Stage) Tövsiyə Arxitekturası:** $10$ milyon məhsulun hər biri üçün ağır neyron şəbəkəni real zamanda işlətmək mümkün deyil. Production RecSys iki mərhələdən ibarətdir:
+        1. **Candidate Generation (Retrieval):** İstifadəçi vektoru $\mathbf{p}_u$ ilə ANN (Approximate Nearest Neighbors) axtarışı vasitəsilə $10\text{M}$ məhsuldan ən yaxın $200$ namizəd $<10\text{ ms}$-də seçilir ($\mathbf{p}_u \cdot \mathbf{q}_i$).
+        2. **Reranking:** Yalnız həmin $200$ namizəd zəngin kontekst əlamətləri (saat, cihaz, stok, qiymət) ilə birlikdə ağır sıralama modelindən keçirilib yekun Top-10 siyahısı qurulur.
+mastery_criteria:
+  - "Zaman sıralarında future-to-past data leakage mənbələrini (random split, center rolling, global scaling) dərhal aşkarlayır və Walk-Forward validasiya ilə düzəldir"
+  - "Seasonal Naive proqnozunu və Walk-Forward bölgü funksiyasını kənar halların yoxlanması ilə birlikdə proqramlaşdırır"
+  - "Tövsiyə sistemlərində Matrix Factorization skalyar hasilini hesablayır və Cold-Start üçün müvafiq fallback dizayn edir"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-spects-seasonal-naive-calc
+      type: numeric
+      title: "Seasonal Naive proqnozu"
+      prompt: |
+        Mövsüm uzunluğu $m = 4$ (rüblük satışlar) olan zaman sırasının tarixçəsi belədir:
+        `history = [100, 120, 90, 200, 110, 130, 95, 240]`
+        Seasonal Naive modelinə görə növbəti **2 addımdan sonrakı** ($h = 2$, yəni gələn ilin 2-ci rübü üçün) proqnoz $\hat{y}_{T+2}$ neçəyə bərabərdir?
+      skills: [ml-regression-metrics, ml-data-splitting]
+      category: math
+      answer: 130
+      tolerance: 0.1
+      hints:
+        - "Son $m = 4$ müşahidədən ibarət mövsümü götür: `[110, 130, 95, 240]`."
+        - "1-ci addım ($h=1$) proqnozu $110$, 2-ci addım ($h=2$) proqnozu isə həmin dövrün ikinci elementidir."
+      explanation: "Son 4 rübün dəyərləri `[110, 130, 95, 240]`-dır. Seasonal Naive bu dövrü təkrarladığı üçün $h=1 \\to 110$, $h=2 \\to 130$ olur."
+    - id: q-spects-mf-dot-product
+      type: numeric
+      title: "Matrix Factorization skalyar hasil skoru"
+      prompt: |
+        İstifadəçinin gizli zövq vektoru $\mathbf{p}_u = [1.5,\; -0.5,\; 2.0]$ və məhsulun gizli vektoru $\mathbf{q}_i = [2.0,\; 1.0,\; 0.5]$ olarsa, proqnozlaşdırılan uyğunluq skoru $\hat{r}_{u,i} = \mathbf{p}_u \cdot \mathbf{q}_i$ neçəyə bərabərdir?
+      skills: [vectors-dot-product]
+      category: math
+      answer: 3.5
+      tolerance: 0.01
+      hints:
+        - "Skalyar hasil uyğun koordinatların hasilləri cəmidir: p1*q1 + p2*q2 + p3*q3."
+        - "(1.5 * 2.0) + (-0.5 * 1.0) + (2.0 * 0.5) ifadəsini hesabla."
+      explanation: "$\\hat{r}_{u,i} = 1.5(2.0) + (-0.5)(1.0) + 2.0(0.5) = 3.0 - 0.5 + 1.0 = 3.5$."
+    - id: q-spects-cold-start
+      type: mcq
+      title: "Tövsiyə sistemlərində Cold-Start problemi"
+      prompt: "Yalnız istifadəçi-məhsul qarşılıqlı əlaqə matrisinin faktorizasiyasına ($\\hat{r}_{u,i} = \\mathbf{p}_u \\cdot \\mathbf{q}_i$) əsaslanan sistemə **tamamilə yeni bir istifadəçi** daxil olduqda hansı problem yaranır və ən düzgün ilk addım nədir?"
+      skills: [vectors-dot-product, ml-problem-framing]
+      category: production
+      options:
+        - id: a
+          text: "Yeni istifadəçinin tarixçəsi olmadığı üçün $\\mathbf{p}_u$ vektoru öyrənilməyib (Cold-Start); ilk qarşılıqlı əlaqələr yığılana qədər Popularity Baseline və ya onboarding maraq sorğusu (Content-Based) istifadə edilməlidir"
+          feedback: "Doğrudur! Tarixçə yaranana qədər populyar məhsullar və ya məzmun əlamətləri ilə körpü qurulur."
+        - id: b
+          text: "Matrix Factorization yeni istifadəçinin zövqünü onun IP ünvanının skalyar hasilindən avtomatik tapır"
+          feedback: "Yanlışdır. Collaborative Filtering yalnız keçmiş interaksiya matrisinə baxır."
+        - id: c
+          text: "Bütün məhsulların vektorları silinib sıfırdan təsadüfi ədədlərlə əvəz olunmalıdır"
+          feedback: "Yanlışdır. Bu, mövcud istifadəçilər üçün də sistemi məhv edər."
+      answer: a
+      explanation: "Collaborative Filtering-in əsas məhdudiyyəti Cold-Start problemidir; production sistemlərdə bu hal Popularity fallback və Content-Based hibridləşmə ilə həll edilir."
+    - id: q-spects-valid-practices
+      type: multi
+      title: "Zaman sıralarında data sızmasının (leakage) qarşısını almaq"
+      prompt: "Gündəlik enerji sərfiyyatını proqnozlaşdıran ML boru kəmərində aşağıdakı qaydalardan hansılar **məcburidir**? Hamısını seç."
+      skills: [ml-data-splitting, ml-regression-metrics]
+      category: data
+      options:
+        - id: a
+          text: "Hər bir Walk-Forward fold-unda `train` pəncərəsinin bütün tarixləri `validation` pəncərəsinin bütün tarixlərindən ciddi şəkildə əvvəl gəlməlidir"
+          feedback: "Bəli, səbəb-nəticə və zaman ardıcıllığı qorunmalıdır."
+        - id: b
+          text: "Modelin MAE/RMSE nəticəsini mütləq Seasonal Naive ($\\hat{y}_t = y_{t-m}$) baseline-ı ilə müqayisə etmək"
+          feedback: "Bəli, mövsümi təkrarlanmanı keçə bilməyən model əlavə dəyər yaratmır."
+        - id: c
+          text: "Normallaşdırma (mean/std) və imputer statistikalarını yalnız cari `train` pəncərəsində hesablayıb `validation` pəncərəsinə tətbiq etmək"
+          feedback: "Bəli, gələcək pəncərənin statistikası keçmişə sızmamalıdır."
+        - id: d
+          text: "Datanı bölməzdən əvvəl `KFold(shuffle=True)` ilə qarışdırmaq ki, bütün aylar bərabər paylansın"
+          feedback: "Xeyr! Zaman sırasını qarışdırmaq gələcək günləri training-ə salaraq ağır look-ahead leakage yaradır."
+      answers: [a, b, c]
+      explanation: "Xronoloji bölgü (Walk-Forward), yalnız keçmiş üzərində fit edilən transformasiyalar və Seasonal Naive müqayisəsi zaman sırası mühəndisliyinin toxunulmaz qaydalarıdır."
+exercises:
+  - id: ex-spects-walk-forward-and-naive
+    type: code
+    title: "Seasonal Naive Forecast və Walk-Forward Splits funksiyalarını yaz"
+    prompt: |
+      Zaman sırası qiymətləndirmə boru kəməri üçün iki funksiyanı implementasiya et:
+
+      1. `seasonal_naive_forecast(history: list[float], season_length: int, horizon: int) -> list[float]`:
+         - Əgər `season_length <= 0`, `horizon <= 0` və ya `len(history) < season_length` olarsa, `ValueError` qaldır.
+         - `history`-nin son `season_length` elementini götür və `horizon` uzunluğunda siyahı alınana qədər dövri (`i % season_length`) təkrarla.
+
+      2. `walk_forward_splits(series: list, min_train_size: int, horizon: int) -> list[tuple[list, list]]`:
+         - Əgər `min_train_size <= 0`, `horizon <= 0` və ya `len(series) < min_train_size + horizon` olarsa, `ValueError` qaldır.
+         - Kəsim indeksini `split_idx = min_train_size`-dan başlayaraq `len(series) - horizon` (daxil olmaqla) həddinə qədər hər dəfə **`horizon` addımı ilə** artır (`range(min_train_size, len(series) - horizon + 1, horizon)`).
+         - Hər addımda `(list(series[:split_idx]), list(series[split_idx : split_idx + horizon]))` cütünü siyahıya əlavə edib qaytar.
+    skills: [ml-data-splitting, ml-regression-metrics]
+    category: python
+    difficulty: 2
+    hints:
+      - "`seasonal_naive_forecast` daxilində `last_season = history[-season_length:]` götür və `[last_season[i % season_length] for i in range(horizon)]` qaytar."
+      - "`walk_forward_splits` daxilində əvvəlcə `min_train_size <= 0 or horizon <= 0 or len(series) < min_train_size + horizon` şərtini yoxlayıb `ValueError` qaldır."
+      - "Dövr üçün `for split_idx in range(min_train_size, len(series) - horizon + 1, horizon):` istifadə et və hər fold-da `series[:split_idx]` ilə `series[split_idx : split_idx + horizon]` kəsiklərini kopyalayaraq əlavə et."
+    starter_code: |
+      def seasonal_naive_forecast(
+          history: list[float],
+          season_length: int,
+          horizon: int,
+      ) -> list[float]:
+          # TODO: son season_length müşahidəni horizon qədər dövri təkrarla
+          return []
+
+
+      def walk_forward_splits(
+          series: list,
+          min_train_size: int,
+          horizon: int,
+      ) -> list[tuple[list, list]]:
+          # TODO: expanding window (train, val) bölgülərini yarat
+          return []
+    tests:
+      - name: "Seasonal Naive dövri proqnoz (horizon > season_length daxil)"
+        code: |
+          pred = seasonal_naive_forecast([10.0, 20.0, 50.0, 12.0, 22.0, 55.0], season_length=3, horizon=5)
+          assert pred == [12.0, 22.0, 55.0, 12.0, 22.0], f"Alınan: {pred}"
+      - name: "Walk-Forward Expanding Window bölgüləri"
+        code: |
+          splits = walk_forward_splits([1, 2, 3, 4, 5, 6, 7], min_train_size=3, horizon=2)
+          expected = [
+              ([1, 2, 3], [4, 5]),
+              ([1, 2, 3, 4, 5], [6, 7]),
+          ]
+          assert splits == expected, f"Gözlənilən {expected}, alınan {splits}"
+      - name: "Yanlış parametrlərdə hər iki funksiya ValueError qaldırır"
+        code: |
+          for fn, args in [
+              (seasonal_naive_forecast, ([1.0, 2.0], 3, 2)),
+              (seasonal_naive_forecast, ([1.0, 2.0, 3.0], 0, 2)),
+              (seasonal_naive_forecast, ([1.0, 2.0, 3.0], 2, 0)),
+              (walk_forward_splits, ([1, 2, 3], 2, 2)),
+              (walk_forward_splits, ([1, 2, 3, 4], 0, 2)),
+              (walk_forward_splits, ([1, 2, 3, 4], 2, 0)),
+          ]:
+              try:
+                  fn(*args)
+                  assert False, f"ValueError gözlənilirdi: {fn.__name__}{args}"
+              except ValueError:
+                  pass
+    solution: |
+      def seasonal_naive_forecast(
+          history: list[float],
+          season_length: int,
+          horizon: int,
+      ) -> list[float]:
+          if season_length <= 0 or horizon <= 0 or len(history) < season_length:
+              raise ValueError("Invalid season_length, horizon, or insufficient history.")
+          last_season = history[-season_length:]
+          return [last_season[i % season_length] for i in range(horizon)]
+
+
+      def walk_forward_splits(
+          series: list,
+          min_train_size: int,
+          horizon: int,
+      ) -> list[tuple[list, list]]:
+          if min_train_size <= 0 or horizon <= 0 or len(series) < min_train_size + horizon:
+              raise ValueError("Invalid min_train_size, horizon, or series too short.")
+          splits: list[tuple[list, list]] = []
+          for split_idx in range(min_train_size, len(series) - horizon + 1, horizon):
+              splits.append((list(series[:split_idx]), list(series[split_idx : split_idx + horizon])))
+          return splits
+    explanation: |
+      `seasonal_naive_forecast` son mövsümü mod indeksi ilə istənilən üfüqə uzadır. `walk_forward_splits` isə zaman oxunu pozmadan hər addımda training pəncərəsini `horizon` qədər genişləndirir və dərhal sonrakı `horizon` elementini validation kimi ayırır.
+  - id: ex-spects-leakage-mcq
+    type: mcq
+    title: "Diaqnostika: Notebook-da 98% R², Production-da ilk gündə iflas"
+    prompt: |
+      Junior ML mühəndisi pərakəndə mağazalar şəbəkəsinin gündəlik satışlarını proqnozlaşdırmaq üçün Gradient Boosting modeli qurur.
+      O, 2 illik tarixçəni `KFold(n_splits=5, shuffle=True, random_state=42)` ilə qiymətləndirir və orta hesabla **$R^2 = 0.98$** əldə edir.
+      Lakin model production-a buraxılan **ilk həftədən** fəlakətli dərəcədə səhv proqnozlar verir (Seasonal Naive baseline-dan belə pis çıxır).
+
+      Bu uçurumun **əsas texniki səbəbi** nədir?
+    skills: [ml-data-splitting, ml-regression-metrics]
+    category: debug
+    difficulty: 2
+    hints:
+      - "`KFold(shuffle=True)` zaman sırasındakı günləri necə bölür? Çərşənbə günü testdədirsə, Çərşənbə axşamı və Cümə axşamı hara düşür?"
+      - "Production-da bu gün Çərşənbə axşamıdırsa, sabahkı və birigünkü satışlar artıq məlumdurmu?"
+    options:
+      - id: a
+        text: "KFold(shuffle=True) zaman ardıcıllığını pozaraq gələcək günləri training setinə salıb (future-to-past data leakage); model gələcək nöqtələr arasında interpolyasiya etməyi öyrənib, production-da isə gələcək günlər mövcud deyil"
+        feedback: "Tamamilə doğrudur! Təsadüfi qarışdırma zamanı hər bir test gününün həm əvvəlindəki, həm də sonrakı günlər training-də olur. Production-da isə biz yalnız keçmişdən gələcəyə ekstrapolyasiya edirik."
+      - id: b
+        text: "n_splits=5 çox kiçikdir; KFold(n_splits=20, shuffle=True) istifadə olunsaydı production-da da 98% R² alınardı"
+        feedback: "Yanlışdır. `shuffle=True` qaldıqca fold sayını artırmaq gələcək sızmasını daha da gücləndirər."
+      - id: c
+        text: "R² metriki yalnız təsnifat (classification) məsələləri üçündür, reqressiyada həmişə 0.98 göstərir"
+        feedback: "Yanlışdır. $R^2$ standart reqressiya metrikidir; problem metrikdə yox, datanın gələcəkdən keçmişə sızmasındadır."
+    answer: a
+    explanation: |
+      Zaman sıralarında `shuffle=True` istifadə etmək gələcək müşahidələri training setinə səpələyir. Model zaman üzrə proqnoz vermək (ekstrapolyasiya) əvəzinə qonşu günlər arasında orta tapmağı (interpolyasiya) öyrənir. Düzgün qiymətləndirmə yalnız **Walk-Forward (TimeSeriesSplit)** ilə aparılmalıdır.
+references:
+  - title: "Hyndman & Athanasopoulos — Forecasting: Principles and Practice (3rd ed.)"
+    url: https://otexts.com/fpp3/
+    note: "Zaman sıralarında Seasonal Naive baseline, proqnoz üfüqü və Walk-Forward (time series cross-validation) üzrə qızıl standart dərslik"
+  - title: "Koren, Bell & Volinsky (2009) — Matrix Factorization Techniques for Recommender Systems"
+    url: https://datajobs.com/data-science-repo/Recommender-Systems-%5BNetflix%5D.pdf
+    note: "Netflix Prize qaliblərinin Collaborative Filtering və gizli vektorların skalyar hasili üzrə klassik məqaləsi"

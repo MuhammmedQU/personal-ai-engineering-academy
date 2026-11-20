@@ -1,0 +1,364 @@
+id: ml-classification-metrics
+track: classical-ml
+module: ml-evaluation
+title: Classification metrics — Confusion Matrix, Precision, Recall, F1 və ROC-AUC
+summary: Disbalanslı datada Accuracy-nin niyə təhlükəli illüziya olduğunu, Confusion Matrix (TP, FP, TN, FN) üzərindən Precision, Recall və F1-score hesablamağı, qərar həddini (threshold) biznes xərcinə görə seçməyi öyrənəcəksən.
+level: foundation
+estimated_minutes: [50, 65]
+prerequisites: [ml-data-leakage]
+next: ml-regression-metrics
+skills: [ml-classification-metrics]
+objectives:
+  - Sinif disbalansı olan məsələlərdə Accuracy metrikinin niyə aldadıcı olduğunu rəqəmlərlə göstərmək
+  - İkili təsnifat üçün Confusion Matrix (TP, FP, TN, FN) qurmaq və ondan Precision, Recall və F1-score düsturlarını əllə və kodla hesablamaq
+  - Qərar həddinin (decision threshold) dəyişdirilməsinin Precision və Recall arasındakı trade-off-a necə təsir etdiyini izah etmək
+  - ROC-AUC metrikinin mənası (sıralama keyfiyyəti) ilə sabit threshold metriklərini fərqləndirmək
+why_it_matters: |
+  Bankda kredit kartı fırıldaqçılığını (fraud) tutan model qurmusan. Əməliyyatların 99.9%-i normal, yalnız 0.1%-i oğurluqdur. Əgər modelin sadəcə hər əməliyyata *"normaldır"* deyirsə, onun **Accuracy** (ümumi dəqiqlik) göstəricisi **99.9%** olacaq! Təqdimatda 99.9% rəqəmi möhtəşəm görünür, amma model **sıfır** oğrunu tutur.
+
+  Real mühəndislikdə səhvlərin qiyməti simmetrik deyil:
+  - Xərçəng skrininqində xəstə insana *"sağlamsan"* demək (**False Negative**) həyat bahasına başa gəlir.
+  - Spam filtrində vacib iş məktubunu *"spamdır"* deyib silmək (**False Positive**) müştərini qəzəbləndirir.
+  Hansı xətanın daha baha olduğunu ölçmək və idarə etmək üçün Confusion Matrix, Precision, Recall, F1 və Threshold anlayışlarına tam hakim olmalısan.
+terms:
+  - term: Confusion Matrix
+    definition: Həqiqi etiketlərlə ($y$) modelin proqnozlarını ($\hat{y}$) qarşılaşdıran $2 \times 2$ cədvəl — TP, FP, FN və TN saylarını göstərir.
+  - term: True Positive (TP) və True Negative (TN)
+    definition: 'TP: həqiqətən pozitiv ($y=1$) olan nümunəni modelin pozitiv ($\hat{y}=1$) tapması. TN: həqiqətən neqativ ($y=0$) olanı neqativ ($\hat{y}=0$) tapması.'
+  - term: False Positive (FP) və False Negative (FN)
+    definition: 'FP (Yalançı həyəcan / Type I error): neqativ ($y=0$) nümunəyə səhvən pozitiv ($\hat{y}=1$) demək. FN (Buraxılmış hədəf / Type II error): pozitiv ($y=1$) nümunəni qaçırıb neqativ ($\hat{y}=0$) demək.'
+  - term: Precision
+    definition: "Modelin 'pozitivdir' ($\\hat{y}=1$) dediyi nümunələrin neçə faizinin həqiqətən pozitiv olduğu: $\\frac{TP}{TP + FP}$."
+  - term: Recall (Sensitivity / True Positive Rate)
+    definition: "Həqiqətən pozitiv ($y=1$) olan bütün nümunələrin neçə faizini modelin tuta bildiyi: $\\frac{TP}{TP + FN}$."
+  - term: F1-score
+    definition: "Precision və Recall-un harmonik ortası: $\\frac{2 \\cdot \\text{Precision} \\cdot \\text{Recall}}{\\text{Precision} + \\text{Recall}}$. Hər iki metrik yüksək olmayana qədər F1 yüksək çıxmır."
+  - term: Decision Threshold
+    definition: 'Modelin çıxardığı ehtimalı ($p \in [0, 1]$) sinif etiketinə çevirən kəsim həddi ($\tau$): $p \ge \tau \implies \hat{y}=1$, əks halda $\hat{y}=0$.'
+  - term: ROC-AUC
+    definition: Bütün mümkün threshold-lar üzrə True Positive Rate ilə False Positive Rate əyrisinin altındakı sahə; modelin təsadüfi bir pozitiv nümunəyə təsadüfi bir neqativ nümunədən daha yüksək ehtimal vermə şansını ölçür.
+sections:
+  - id: confusion-matrix-and-formulas
+    kind: explanation
+    title: Accuracy tələsi, Confusion Matrix və Precision / Recall / F1
+    body: |
+      İkili təsnifatda (Binary Classification, $y \in \{0, 1\}$) hər bir proqnoz dörd xanadan birinə düşür:
+
+      | | Proqnoz: Pozitiv ($\hat{y}=1$) | Proqnoz: Neqativ ($\hat{y}=0$) |
+      |---|---|---|
+      | **Həqiqi: Pozitiv ($y=1$)** | **TP** (True Positive — düz tutduq) | **FN** (False Negative — qaçırdıq!) |
+      | **Həqiqi: Neqativ ($y=0$)** | **FP** (False Positive — yalançı həyəcan!) | **TN** (True Negative — düz keçdik) |
+
+      ### 1. Accuracy (Ümumi dəqiqlik) və onun zəifliyi
+      $$\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+      Siniflər disbalanslı olanda ($TN$ çox böyük olanda) $TP = 0$ olsa belə Accuracy $\approx 1.0$ çıxır. Ona görə də pozitiv sinif üzrə iki fokuslanmış sual veririk:
+
+      ### 2. Precision (Dəqiqlik — "Həyəcan siqnalına nə qədər güvənək?")
+      $$\text{Precision} = \frac{TP}{TP + FP}$$
+      - $TP$ — doğru pozitivlər, $FP$ — yalançı pozitivlər, $TP + FP$ — modelin **pozitiv elan etdiyi** bütün nümunələr.
+      - **Yüksək Precision nə vaxt kritikdir?** $FP$ baha olanda: spam filtri (vacib məktubu silməmək), müştəriyə avtomatik blok qoymaq, uşaqlara video tövsiyə etmək.
+
+      ### 3. Recall (Əhatəlilik — "Həqiqi hədəflərin neçəsini tutduq?")
+      $$\text{Recall} = \frac{TP}{TP + FN}$$
+      - $FN$ — qaçırılmış pozitivlər, $TP + FN$ — datadakı **həqiqi pozitivlərin** ümumi sayı.
+      - **Yüksək Recall nə vaxt kritikdir?** $FN$ baha olanda: tibbi xərçəng skrininqi, təyyarə mühərrikində nasazlıq aşkarlama, fırıldaqçılıq üzrə ilkin yoxlama.
+
+      ### 4. F1-score (Harmonik orta)
+      Həm Precision, həm də Recall-u tək ədəddə balanslaşdırmaq üçün adi ədədi orta yox, **harmonik orta** işlədilir:
+
+      $$F_1 = \frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}} = \frac{2 \cdot TP}{2 \cdot TP + FP + FN}$$
+
+      Niyə harmonik orta? Əgər model hamıya $\hat{y}=1$ desə, $\text{Recall} = 1.0$, $\text{Precision} \approx 0.01$ olar. Adi ədədi orta $(1.0 + 0.01)/2 = 0.505$ verib bizi aldadardı; harmonik orta isə $F_1 \approx 0.02$ verərək rədd edir!
+  - id: fishing-net-analogy
+    kind: analogy
+    title: "Mental model: Balıqçı toru və hava limanı detektoru"
+    body: |
+      Dənizdə yalnız qiymətli qızılbalıqları ($y=1$) tutmaq istəyən balıqçını təsəvvür et (dənizdə həm də köhnə çəkmələr və yosunlar var, $y=0$):
+
+      - **Yüksək Precision, aşağı Recall (Tək qarmaqla ov):** Balıqçı yalnız gözü ilə dəqiq gördüyü qızılbalığa qarmaq atır. Tutduğu 10 şeyin 10-u da qızılbalıqdır (**Precision = 100%**), heç zibil tutmayıb ($FP=0$). Amma dənizdəki 100 qızılbalıqdan 90-nı qaçırıb (**Recall = 10%**).
+      - **Yüksək Recall, aşağı Precision (Nəhəng xırda gözlü tor):** Balıqçı bütün körfəzi süpürən nəhəng tor atır. Dənizdəki 100 qızılbalığın 98-ni tutur (**Recall = 98%**). Amma torun içindən 400 ədəd köhnə çəkmə və zibil də çıxır ($FP=400 \implies \text{Precision} \approx 20\%$).
+
+      **Threshold ($\tau$) torun gözlərinin ölçüsüdür:**
+      Hava limanındakı metal detektorun həssaslığını artırsan ($\tau$-nu azaltsan), cibində qəpik olan hər kəsdə siqnal çalacaq (Recall $\uparrow$, Precision $\downarrow$). Həssaslığı azaltsan ($\tau$-nu artırsan), yalnız böyük metal əşyada siqnal çalacaq (Precision $\uparrow$, Recall $\downarrow$).
+  - id: threshold-diagram
+    kind: diagram
+    title: Ehtimaldan qərar həddinə (Threshold) və Precision-Recall balansına
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Model çıxışı: p = P(y=1 | X)"] --> B{"p >= threshold (tau)?"}
+        B -- "Bəli" --> C["Proqnoz: y_hat = 1"]
+        B -- "Xeyr" --> D["Proqnoz: y_hat = 0"]
+        E["tau AZALIR (məs. 0.5 -> 0.2)"] --> F["Daha çox y_hat=1 -> Recall ARTIR, Precision AZALIR"]
+        G["tau ARTIR (məs. 0.5 -> 0.8)"] --> H["Daha az y_hat=1 -> Precision ARTIR, Recall AZALIR"]
+      ```
+
+      Vacib həqiqət: `LogisticRegression` və ya neyron şəbəkəsi birbaşa `0` və ya `1` çıxarmır, $p \in [0, 1]$ ehtimalı çıxarır. Standart $\tau = 0.5$ sadəcə default-dur — mühəndis $\tau$-nu biznes xərcinə görə özü seçməlidir!
+  - id: worked-fraud-numbers
+    kind: worked_example
+    title: "Addım-addım hesablama: 100 əməliyyat üzrə Confusion Matrix və F1"
+    body: |
+      Tutaq ki, 100 bank əməliyyatından **10-u həqiqi fırıldaqdır** ($y=1$), **90-ı isə normaldır** ($y=0$).
+      Modelimiz 12 əməliyyata "fırıldaq" ($\hat{y}=1$) deyib. Onları yoxlayanda məlum olur ki:
+      - Modelin "fırıldaq" dediyi 12 əməliyyatdan **8-i həqiqətən fırıldaqdır** $\implies TP = 8$.
+      - Qalan **4-ü isə normal müştəri imiş** (kartları səhvən bloklanıb) $\implies FP = 4$.
+      - Cəmi 10 həqiqi fırıldaq var idi, 8-ni tutduqsa, **2-sini qaçırmışıq** $\implies FN = 2$.
+      - 90 normal əməliyyatdan 4-nə səhvən pozitiv dediksə, **86-sına düzgün normal demişik** $\implies TN = 86$.
+
+      Yoxlama: $TP + FP + FN + TN = 8 + 4 + 2 + 86 = 100$.
+
+      1. **Accuracy:**
+         $$\text{Accuracy} = \frac{8 + 86}{100} = 0.94 \quad (94\%)$$
+         *(Diqqət: heç bir fırıldaq tutmayan "hamıya 0 de" baseline-ı belə $90/100 = 90\%$ Accuracy alırdı!)*
+
+      2. **Precision:**
+         $$\text{Precision} = \frac{TP}{TP + FP} = \frac{8}{8 + 4} = \frac{8}{12} \approx 0.6667 \quad (66.7\%)$$
+
+      3. **Recall:**
+         $$\text{Recall} = \frac{TP}{TP + FN} = \frac{8}{8 + 2} = \frac{8}{10} = 0.80 \quad (80.0\%)$$
+
+      4. **F1-score:**
+         $$F_1 = \frac{2 \times 0.6667 \times 0.80}{0.6667 + 0.80} = \frac{2 \times 8}{2 \times 8 + 4 + 2} = \frac{16}{22} \approx 0.7273$$
+  - id: code-metrics-from-scratch
+    kind: code
+    title: "Kod: Sıfıra bölmədən qorunan Precision, Recall və F1"
+    body: |
+      ```python
+      def confusion_counts(
+          y_true: list[int], y_pred: list[int]
+      ) -> tuple[int, int, int, int]:
+          """Return (tp, fp, tn, fn) for binary labels in {0, 1}."""
+          if len(y_true) != len(y_pred) or not y_true:
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+
+          tp = fp = tn = fn = 0
+          for yt, yp in zip(y_true, y_pred):
+              if yt == 1 and yp == 1:
+                  tp += 1
+              elif yt == 0 and yp == 1:
+                  fp += 1
+              elif yt == 0 and yp == 0:
+                  tn += 1
+              elif yt == 1 and yp == 0:
+                  fn += 1
+              else:
+                  raise ValueError(f"Labels must be 0 or 1, got {(yt, yp)}")
+          return tp, fp, tn, fn
+
+
+      def precision_recall_f1(
+          y_true: list[int], y_pred: list[int]
+      ) -> tuple[float, float, float]:
+          """Compute (precision, recall, f1) safely handling zero denominators."""
+          tp, fp, tn, fn = confusion_counts(y_true, y_pred)
+
+          precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+          recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+          f1 = (
+              (2 * precision * recall) / (precision + recall)
+              if (precision + recall) > 0
+              else 0.0
+          )
+          return precision, recall, f1
+
+
+      # Majority baseline (hamıya 0 deyir) disbalanslı datada nə alır?
+      y_real = [0, 0, 0, 0, 0, 0, 0, 0, 0, 1]
+      y_dumb = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      print(precision_recall_f1(y_real, y_dumb))  # (0.0, 0.0, 0.0) -> ifşa olundu!
+      ```
+
+      Vacib edge case: `y_dumb` heç bir nümunəyə `1` demədiyi üçün $TP + FP = 0$ olur. Sadəlövh kod burada `ZeroDivisionError` ilə çökərdi; bizim müqaviləmiz isə `0.0` qaytarır (eynilə `scikit-learn`-dəki `zero_division=0.0` parametri kimi).
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Disbalanslı datada yalnız Accuracy və ya hətta yalnız ROC-AUC ilə kifayətlənmək**
+      Nadir sinif çox kiçik olanda (məsələn, 0.1% fraud), $TN$ çox böyük olduğu üçün False Positive Rate $\text{FPR} = \frac{FP}{FP + TN}$ məxrəcdəki nəhəng $TN$ üzündən kiçik görünür və **ROC-AUC** həddindən artıq yüksək (məsələn, 0.96) çıxa bilər, halbuki Precision cəmi 15%-dir. Güclü disbalansda **Precision-Recall AUC (PR-AUC)** və konkret threshold-dakı Precision/Recall daha dürüstdür.
+
+      **2. Default `threshold = 0.5`-i dəyişməz qanun sanmaq**
+      `model.predict(X)` pərdə arxasında `model.predict_proba(X)[:, 1] >= 0.5` işlədir. Əgər datada pozitiv sinif cəmi 3%-dirsə, modelin çıxardığı ehtimallar bəlkə də 0.01 ilə 0.35 arasında dəyişir və `0.5` həddində model hamıya `0` deyir! `predict_proba` işlədib threshold-u validation dəstində seç.
+
+      **3. Test dəstində ən yaxşı threshold-u axtarmaq**
+      Threshold ($\tau$) da bir hiperparametrdir. Onu test dəstində seçsən, test dəstinə sızma etmiş olursan. Threshold **validation** dəstində seçilir, dondurulur və test dəstinə olduğu kimi tətbiq olunur.
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və biznes xərci matrisi
+    body: |
+      - **Precision vs Recall bir-birinin əksidir:** Modeli yenidən öyrətmədən yalnız threshold $\tau$-nu sürüşdürməklə istənilən Recall-u əldə edə bilərsən (məsələn, $\tau=0 \implies \text{Recall}=1.0$), amma bunun əvəzini Precision itkisi ilə ödəyirsən.
+      - **Riyazi metrik vs Biznesin pul xərci (Expected Cost):** Ən yetkin mühəndislik yanaşması $FP$ və $FN$-ə manatla qiymət qoymaqdır. Məsələn, bir fırıldağı qaçırmaq ($FN$) banka orta hesabla $200\text{ AZN}$ zərər vurursa, müştəriyə təsdiq SMS-i göndərmək ($FP$) isə $0.10\text{ AZN}$-dirsə, ümumi xərci $\text{Cost} = 200 \cdot FN + 0.10 \cdot FP$ minimuma endirən $\tau$ seçilir.
+      - **İnsan dövrədə (Human-in-the-loop) ikiqat threshold:** Çox vaxt tək threshold kifayət etmir: $p < 0.2 \implies$ avtomatik burax, $p > 0.85 \implies$ avtomatik blokla, $0.2 \le p \le 0.85 \implies$ insan operatorun növbəsinə göndər.
+mastery_criteria:
+  - Verilmiş TP, FP, TN, FN və ya həqiqi/proqnoz siyahılarından Precision, Recall, F1 və Accuracy-ni əllə və kodla səhvsiz hesablayırsan
+  - Biznes ssenarisinə görə False Positive yoxsa False Negative-in daha təhlükəli olduğunu müəyyən edib Precision və ya Recall-a üstünlük verirsən
+  - Threshold dəyişikliyinin TP, FP, FN, Precision və Recall-a təsir istiqamətini dəqiq proqnozlaşdırırsan
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlcm-cancer-screening
+      type: mcq
+      title: Tibbi skrininqdə hansı metrik prioritetdir?
+      prompt: "İlkin xərçəng skrininqi modelində pozitiv çıxan pasiyentlər əlavə dəqiq həkim müayinəsinə göndərilir, neqativ çıxanlar isə evə buraxılır. Hansı xəta daha təhlükəlidir və hansı metriki yüksək tutmaq üçün threshold-u necə dəyişmək lazımdır?"
+      skills: [ml-classification-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: False Negative (xəstəni qaçırmaq) daha təhlükəlidir; Recall-u artırmaq üçün threshold-u aşağı salmaq (məs. 0.5 -> 0.2) lazımdır
+          feedback: Doğru! Xəstəni evə buraxmaq həyat üçün təhlükəlidir; yalançı həyəcan (FP) isə sadəcə əlavə həkim yoxlaması ilə aydınlaşacaq.
+        - id: b
+          text: False Positive daha təhlükəlidir; Precision-u 100% etmək üçün threshold-u 0.95-ə qaldırmaq lazımdır
+          feedback: Threshold 0.95 olsa, xəstələrin böyük əksəriyyəti nəzərdən qaçacaq (yüksək FN).
+        - id: c
+          text: Yalnız ümumi Accuracy-ni maksimum etmək kifayətdir
+          feedback: Xəstəlik nadirdirsə, hamıya sağlam demək 99% Accuracy verər, amma heç bir xəstəni xilas etməz.
+      answer: a
+      explanation: İlkin skrininqdə məqsəd həqiqi xəstələri qaçırmamaqdır ($FN \to 0$), bu da yüksək Recall və daha aşağı qərar həddi tələb edir.
+    - id: q-mlcm-threshold-effect
+      type: mcq
+      title: Threshold-u artırdıqda nə baş verir?
+      prompt: "Modelin qərar həddini $\\tau = 0.4$-dən $\\tau = 0.8$-ə qaldırdıqda (model daha yalnız çox əmin olanda $\\hat{y}=1$ deyir) adətən nə baş verir?"
+      skills: [ml-classification-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: Həm Recall, həm də False Positive sayı artır
+          feedback: Hədd yüksələndə model daha az nümunəyə 1 deyir, ona görə həm TP, həm də FP azalır.
+        - id: b
+          text: Model daha az pozitiv proqnoz verir — Precision artır (FP azalır), lakin Recall azalır (FN artır)
+          feedback: Doğru! Yalnız ən yüksək ehtimallı nümunələr seçildiyi üçün tutulanların dəqiqliyi artır, amma bəzi pozitivlər həddən aşağıda qalıb qaçırılır.
+        - id: c
+          text: ROC-AUC dəyəri 2 dəfə artır
+          feedback: ROC-AUC bütün threshold-lar üzrə hesablanan sahədir; tək bir threshold-u dəyişmək ROC-AUC-u dəyişmir!
+      answer: b
+      explanation: 'Yüksək threshold modeli daha mühafizəkar edir: yalançı həyəcanlar ($FP$) azalır, lakin qaçırılan hədəflər ($FN$) artır.'
+    - id: q-mlcm-roc-auc-meaning
+      type: mcq
+      title: ROC-AUC = 0.5 nə deməkdir?
+      prompt: İkili təsnifat modelinin validation dəstində ROC-AUC göstəricisi `0.50` çıxıb. Bu nə deməkdir?
+      skills: [ml-classification-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: Model nümunələrin 50%-ni düzgün sıralayır, yəni təsadüfi qəpik atmaqdan (random guessing) fərqlənmir
+          feedback: Doğru! ROC-AUC = 0.5 modelin pozitiv və neqativ sinifləri ayırma gücünün sıfır olduğunu göstərir.
+        - id: b
+          text: Model ideal işləyir, çünki 0.5 balanslı threshold-dur
+          feedback: Threshold = 0.5 ilə ROC-AUC = 0.5 tamam fərqli anlayışlardır. İdeal ROC-AUC 1.0-dır.
+        - id: c
+          text: Datada siniflərin nisbəti 50% / 50%-dir
+          feedback: ROC-AUC sinif nisbətini yox, modelin sıralama keyfiyyətini göstərir.
+      answer: a
+      explanation: ROC-AUC modelin təsadüfi seçilmiş pozitiv nümunəyə təsadüfi seçilmiş neqativ nümunədən daha yüksək bal vermə ehtimalıdır; 0.5 təsadüfi təxmindir, 1.0 isə mükəmməl sıralamadır.
+    - id: q-mlcm-numeric-precision
+      type: numeric
+      title: Precision-u hesabla
+      prompt: |
+        Spam detektoru 50 e-məktuba "Spam" ($\hat{y}=1$) deyib. Onlardan 40-ı həqiqətən spam imiş ($TP=40$), 10-u isə normal iş məktubu imiş ($FP=10$). Bundan əlavə, gələn qutuda 30 spam məktubu da nəzərdən qaçıb ($FN=30$).
+
+        Modelin **Precision** göstəricisi neçədir? (Onluq kəsrlə yaz, məsələn `0.75`).
+      skills: [ml-classification-metrics]
+      category: ml-metric
+      answer: 0.8
+      tolerance: 0.001
+      explanation: "$\\text{Precision} = \\frac{TP}{TP + FP} = \\frac{40}{40 + 10} = \\frac{40}{50} = 0.80$ ($FN=30$ Recall hesabında iştirak edir, Precision-da yox)."
+exercises:
+  - id: ex-mlcm-precision-recall-f1
+    type: code
+    title: precision_recall_f1 funksiyasını sıfırdan yaz
+    prompt: |
+      İkili təsnifat nəticələrini qiymətləndirən `precision_recall_f1(y_true, y_pred)` funksiyasını pure Python-da yaz:
+
+      - `y_true` və `y_pred` yalnız `0` və `1`-lərdən ibarət eyni uzunluqlu list-lərdir.
+      - Əgər uzunluqlar fərqlidirsə və ya list-lər boşdursa, `ValueError` qaldır.
+      - `(precision, recall, f1)` tuple-nı `float` olaraq qaytar.
+      - **Sıfıra bölmə təhlükəsizliyi:** Əgər $TP + FP == 0$ olarsa `precision = 0.0`, $TP + FN == 0$ olarsa `recall = 0.0`, `precision + recall == 0` olarsa `f1 = 0.0` qaytar.
+    skills: [ml-classification-metrics]
+    category: python
+    difficulty: 2
+    hints:
+      - "`for yt, yp in zip(y_true, y_pred):` dövrü ilə `tp`, `fp` və `fn` sayğaclarını hesabla."
+      - "Hər bölmədən əvvəl məxrəcin `> 0` olduğunu yoxla."
+    starter_code: |
+      def precision_recall_f1(
+          y_true: list[int], y_pred: list[int]
+      ) -> tuple[float, float, float]:
+          # TODO: (precision, recall, f1) hesabla və qaytar
+          pass
+    tests:
+      - name: Dərsdəki nümunə (TP=8, FP=4, FN=2)
+        code: |
+          y_t = [1]*8 + [0]*4 + [1]*2 + [0]*86
+          y_p = [1]*8 + [1]*4 + [0]*2 + [0]*86
+          p, r, f1 = precision_recall_f1(y_t, y_p)
+          assert abs(p - (8 / 12)) < 1e-9, f"precision səhvdir: {p}"
+          assert abs(r - 0.8) < 1e-9, f"recall səhvdir: {r}"
+          assert abs(f1 - (16 / 22)) < 1e-9, f"f1 səhvdir: {f1}"
+      - name: Majority baseline (hamısı 0) sıfıra bölmə xətası vermədən (0.0, 0.0, 0.0) qaytarır
+        code: |
+          assert precision_recall_f1([0, 0, 1], [0, 0, 0]) == (0.0, 0.0, 0.0)
+          assert precision_recall_f1([0, 0, 0], [0, 0, 0]) == (0.0, 0.0, 0.0)
+      - name: Mükəmməl proqnoz (1.0, 1.0, 1.0)
+        code: |
+          assert precision_recall_f1([1, 0, 1, 0], [1, 0, 1, 0]) == (1.0, 1.0, 1.0)
+      - name: Boş və ya fərqli uzunluqlu list-lərdə ValueError
+        code: |
+          for bad in [([], []), ([1, 0], [1])]:
+              try:
+                  precision_recall_f1(bad[0], bad[1])
+                  assert False, f"{bad} üçün ValueError gözlənilirdi"
+              except ValueError:
+                  pass
+    solution: |
+      def precision_recall_f1(
+          y_true: list[int], y_pred: list[int]
+      ) -> tuple[float, float, float]:
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+          tp = fp = fn = 0
+          for yt, yp in zip(y_true, y_pred):
+              if yt == 1 and yp == 1:
+                  tp += 1
+              elif yt == 0 and yp == 1:
+                  fp += 1
+              elif yt == 1 and yp == 0:
+                  fn += 1
+          precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+          recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+          f1 = (
+              (2 * precision * recall) / (precision + recall)
+              if (precision + recall) > 0
+              else 0.0
+          )
+          return precision, recall, f1
+    explanation: |
+      TP, FP və FN bir keçiddə (`O(n)`) sayılır və hər üç kəsr məxrəc sıfır olduqda təhlükəsiz şəkildə `0.0` qaytarır.
+  - id: ex-mlcm-calc-f1-numeric
+    type: numeric
+    title: Confusion Matrix-dən F1-score hesabla
+    prompt: |
+      Bir təsnifat modelinin validation dəsti üzrə Confusion Matrix göstəriciləri belədir:
+      - $TP = 15$
+      - $FP = 5$
+      - $FN = 15$
+      - $TN = 165$
+
+      1. $\text{Precision} = \frac{15}{15 + 5} = 0.75$
+      2. $\text{Recall} = \frac{15}{15 + 15} = 0.50$
+
+      Modelin **F1-score** dəyərini hesabla (məsələn: `0.6`).
+    skills: [ml-classification-metrics]
+    category: ml-metric
+    difficulty: 1
+    answer: 0.6
+    tolerance: 0.005
+    hints:
+      - "$F_1 = \\frac{2 \\cdot \\text{Precision} \\cdot \\text{Recall}}{\\text{Precision} + \\text{Recall}}$ düsturunda $0.75$ və $0.50$-ni yerinə qoy."
+      - "Surət: $2 \\times 0.75 \\times 0.50 = 0.75$. Məxrəc: $0.75 + 0.50 = 1.25$."
+    explanation: "$F_1 = \\frac{2 \\times 0.75 \\times 0.50}{0.75 + 0.50} = \\frac{0.75}{1.25} = 0.60$. Diqqət et ki, ədədi orta $0.625$ olduğu halda harmonik orta daha aşağı olan Recall-a ($0.50$) tərəf çəkilib $0.60$ verir."
+references:
+  - title: scikit-learn — Metrics and scoring (Classification metrics)
+    url: https://scikit-learn.org/stable/modules/model_evaluation.html#classification-metrics
+    note: Precision, Recall, F1, ROC-AUC və Precision-Recall əyrilərinin rəsmi təsviri
+  - title: Saito & Rehmsmeier — The Precision-Recall Plot Is More Informative than the ROC Plot on Imbalanced Datasets
+    url: https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0118432
+    note: Disbalanslı datada PR-AUC vs ROC-AUC müqayisəsi

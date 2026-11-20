@@ -1,0 +1,450 @@
+id: py-functions-contracts
+track: software-engineering
+module: python-engineering
+title: Funksiyalar müqavilə kimi — type hints, pure functions və side effects
+summary: Funksiyanı "kod parçası" yox, aydın input/output müqaviləsi kimi dizayn etməyi öyrənəcəksən. AI kodunda ən çox rast gəlinən gizli bug-ların — input mutasiyası və mutable default argument — qarşısını almağı məşq edəcəksən.
+level: foundation
+estimated_minutes: [40, 60]
+prerequisites: []
+next: py-errors-validation
+skills: [py-functions, py-control-flow, debugging]
+objectives:
+  - Funksiyanın müqaviləsini (input-lar, output, ilkin şərtlər, edge case-lər) yazılı şəkildə təsvir etmək
+  - Type hints yazmaq və onların runtime-da nəyi yoxlamadığını bilmək
+  - Pure function ilə side effect olan funksiyanı ayırd etmək
+  - Input list-i dəyişdirməyən (mutate etməyən) funksiya yazmaq
+  - Mutable default argument bug-ını tanımaq və düzəltmək
+why_it_matters: |
+  AI layihələrində eyni preprocessing funksiyası iki yerdə çağırılır: **training** zamanı və **serving** (real sorğu) zamanı.
+  Əgər funksiya gizlicə input-u dəyişirsə, qlobal vəziyyətə yazırsa və ya edge case-də səssizcə səhv nəticə qaytarırsa,
+  model training-də yaxşı, production-da isə pis işləyir. Bu, **training/serving skew** adlanan çox bahalı problemin ən adi səbəblərindən biridir.
+
+  Aydın müqaviləsi olan funksiya:
+  - test etmək asandır (eyni input → eyni output),
+  - AI coding assistant-ın yazdığı kodu yoxlamağı asanlaşdırır (nə gözlədiyini bilirsən),
+  - komanda yoldaşına sənədsiz də başa düşülür.
+terms:
+  - term: Function signature
+    definition: "Funksiyanın adı, parametrləri və qaytardığı tip — `def scale(values: list[float]) -> list[float]`. Funksiyanın 'üz qabığı'."
+  - term: Contract (müqavilə)
+    definition: Funksiyanın nəyi qəbul etdiyi (precondition), nəyi zəmanət verdiyi (postcondition) və edge case-lərdə nə edəcəyi barədə razılaşma.
+  - term: Type hint
+    definition: Parametr və return tipləri barədə qeyd. Python bunu runtime-da YOXLAMIR; mypy/pyright kimi alətlər və insanlar üçündür.
+  - term: Pure function
+    definition: Eyni input üçün həmişə eyni output qaytaran və xarici dünyaya heç bir təsiri olmayan funksiya.
+  - term: Side effect
+    definition: Funksiyanın return-dan başqa xarici təsiri — input-u dəyişmək, faylа yazmaq, print, HTTP sorğu, qlobal dəyişəni dəyişmək.
+  - term: Mutation
+    definition: Mövcud obyektin yerində dəyişdirilməsi (məs. `list.append`, `list.sort()`). Yeni obyekt yaradılmır.
+  - term: Mutable default argument
+    definition: "`def f(x=[])` kimi default dəyər. Default yalnız funksiya təyin olunanda BİR DƏFƏ yaradılır və bütün çağırışlar arasında paylaşılır."
+  - term: Docstring
+    definition: Funksiyanın içində ilk sətirdəki sənəd mətni; müqaviləni, edge case-ləri və nümunəni təsvir edir.
+sections:
+  - id: contract-idea
+    kind: explanation
+    title: Funksiya = müqavilə
+    body: |
+      Funksiya yazmazdan əvvəl dörd suala cavab ver:
+
+      1. **Nə qəbul edir?** (tiplər, icazəli dəyər aralığı) — *precondition*
+      2. **Nə qaytarır?** (tip, forma, uzunluq) — *postcondition*
+      3. **Edge case-lərdə nə edir?** (boş list, sıfır, `None`, eyni dəyərlər)
+      4. **Xarici dünyaya toxunurmu?** (input-u dəyişirmi, fayl yazırmı) — *side effects*
+
+      Bu cavablar funksiyanın **müqaviləsidir**. Kodu sonra yazırsan — müqavilə kodun nə etməli olduğunu müəyyən edir.
+
+      Məsələn, `min_max_scale(values)` üçün müqavilə:
+
+      | Sual | Cavab |
+      |---|---|
+      | Input | `list[float]`, istənilən uzunluq |
+      | Output | Eyni uzunluqda **yeni** `list[float]`, dəyərlər `[0, 1]` aralığında |
+      | Edge case | Boş list → `[]`; bütün dəyərlər eynidirsə → hamısı `0.0` |
+      | Side effects | Yoxdur — input list dəyişdirilmir |
+
+      Diqqət et: "bütün dəyərlər eynidirsə nə olsun?" sualı **dizayn qərarıdır**. Riyaziyyat burada sıfıra bölmə verir; sən nəyin baş verəcəyini *seçməli* və sənədləşdirməlisən. Alternativ seçim exception qaldırmaq ola bilərdi — vacib olan seçimin açıq olmasıdır.
+  - id: vending-machine
+    kind: analogy
+    title: "Mental model: avtomat (vending machine)"
+    body: |
+      Yaxşı funksiya içki avtomatına bənzəyir:
+
+      - Pul və düymə nömrəsi verirsən (**input**), içki alırsan (**output**).
+      - Eyni pul və eyni düymə → həmişə eyni içki (**pure**, deterministik).
+      - Avtomat sənin cüzdanından gizlicə əlavə pul götürmür (**input-u dəyişmir**).
+      - Səhv düymə basanda "belə məhsul yoxdur" deyir, səssizcə su vermir (**aydın edge case davranışı**).
+
+      Pis funksiya isə hər dəfə fərqli nəticə verən, cüzdanındakı pulu dəyişən və xətada susan avtomatdır. Belə avtomata etibar etmək olmaz — belə funksiyaya da.
+  - id: data-flow
+    kind: diagram
+    title: Pure function vs side effect
+    body: |
+      ```mermaid
+      flowchart LR
+        A["input: values"] --> B["min_max_scale"]
+        B --> C["return: NEW list"]
+        B -. "side effect YOX" .-> D["input list olduğu kimi qalır"]
+        E["input: values"] --> F["scale_in_place"]
+        F --> G["return: None"]
+        F -- "side effect" --> H["input list DƏYİŞDİ"]
+      ```
+
+      Sol tərəf təhlükəsizdir: çağıran kod əvvəlki datanı itirmir. Sağ tərəf bəzən lazımdır (yaddaşa qənaət), amma **adından və sənədindən aydın görünməlidir** (`_in_place` suffiksi, `None` qaytarmaq — Python-un öz `list.sort()` konvensiyası kimi).
+  - id: worked-min-max
+    kind: worked_example
+    title: Kiçik rəqəmlərlə min-max scaling
+    body: |
+      Min-max scaling hər dəyəri `[0, 1]` aralığına gətirir:
+
+      $$x' = \frac{x - x_{min}}{x_{max} - x_{min}}$$
+
+      Simvollar:
+      - $x$ — orijinal dəyər
+      - $x_{min}$, $x_{max}$ — list-dəki ən kiçik və ən böyük dəyər
+      - $x'$ — scale olunmuş dəyər
+
+      **Nümunə:** `values = [2, 4, 10]` → $x_{min}=2$, $x_{max}=10$, fərq $=8$.
+
+      | $x$ | hesab | $x'$ |
+      |---|---|---|
+      | 2 | (2−2)/8 | 0.0 |
+      | 4 | (4−2)/8 | 0.25 |
+      | 10 | (10−2)/8 | 1.0 |
+
+      **Edge case:** `values = [5, 5, 5]` → $x_{max} - x_{min} = 0$ → sıfıra bölmə! Müqaviləmiz bu halda hamısını `0.0` qaytarmağı deyir.
+
+      **ML əlaqəsi:** real layihədə $x_{min}$ və $x_{max}$ **yalnız training datasından** hesablanır və serving zamanı eyni dəyərlər istifadə olunur. Əks halda test datası haqqında məlumat modelə sızır (data leakage — Classical ML track-ində görəcəksən).
+  - id: code-walkthrough
+    kind: code
+    title: Kod — müqaviləni koda çevirmək
+    body: |
+      ```python
+      def min_max_scale(values: list[float]) -> list[float]:
+          """Scale values to [0, 1].
+
+          Contract:
+          - Returns a NEW list of the same length; `values` is not modified.
+          - Empty input -> [].
+          - If all values are equal -> list of 0.0 (no division by zero).
+          """
+          if not values:                       # (1) edge case: boş list
+              return []
+          lo, hi = min(values), max(values)    # (2) bir dəfə hesablanır
+          span = hi - lo
+          if span == 0:                        # (3) edge case: eyni dəyərlər
+              return [0.0 for _ in values]
+          return [(v - lo) / span for v in values]  # (4) yeni list
+
+
+      data = [2, 4, 10]
+      scaled = min_max_scale(data)
+      print(scaled)   # [0.0, 0.25, 1.0]
+      print(data)     # [2, 4, 10]  <- orijinal dəyişməyib
+      ```
+
+      Vacib sətirlər:
+      - **(1)** `if not values` boş list-i tutur. Bunsuz `min([])` → `ValueError` verərdi — müqavilədə boş list icazəlidir, ona görə açıq idarə edirik.
+      - **(2)** `min`/`max` hər biri list-i bir dəfə keçir — `O(n)`. Dövrün içində hər dəfə `max(values)` çağırsaydın `O(n²)` olardı.
+      - **(3)** Sıfıra bölmə müqavilədə qərarlaşdırılmış qaydada idarə olunur.
+      - **(4)** List comprehension **yeni** list yaradır; `values` toxunulmaz qalır.
+      - Type hint `list[float]` sənəddir: `min_max_scale("abc")` yazsan, Python çağırışı dayandırmayacaq — xəta funksiyanın içində, daha anlaşılmaz yerdə çıxacaq. Runtime yoxlaması lazımdırsa, bunu açıq yazmalısan (növbəti dərs: validation).
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər və debugging
+    body: |
+      **1. Mutable default argument**
+      ```python
+      def add_tag(tag, tags=[]):   # BUG
+          tags.append(tag)
+          return tags
+
+      add_tag("a")   # ['a']
+      add_tag("b")   # ['a', 'b']  <- gözlənilməz!
+      ```
+      Default `[]` funksiya **təyin olunanda bir dəfə** yaradılır. Düzəliş: `tags: list[str] | None = None` və içəridə `tags = [] if tags is None else list(tags)`.
+
+      **2. `list.sort()` nəticəsini mənimsətmək**
+      ```python
+      ordered = scores.sort()   # ordered = None !
+      ```
+      `.sort()` yerində dəyişir və `None` qaytarır. Yeni list lazımdırsa `sorted(scores)`.
+
+      **3. Input-u gizlicə dəyişmək**
+      ```python
+      def remove_outliers(xs):
+          for x in xs:
+              if x > 100:
+                  xs.remove(x)   # həm input dəyişir, həm də iterasiya zamanı silmək elementləri ötürür
+          return xs
+      ```
+      İterasiya zamanı list-dən silmək bəzi elementləri **atlayır** (`[150, 200, 5]` → `[200, 5]`). Düzəliş: `return [x for x in xs if x <= 100]`.
+
+      **4. `print` vs `return`** — funksiya nəticəni çap edir, amma qaytarmır; çağıran `None` alır.
+
+      **Debugging hint:** Gözlənilməz dəyişən data görəndə soruş: *"Bu obyekti başqa kim dəyişə bilər?"* `id(obj)` ilə iki dəyişənin eyni obyekt olub-olmadığını yoxla.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Pure vs in-place:** 10 GB-lıq massivi kopyalamaq yaddaşı ikiqat artırır. NumPy/Pandas bəzən in-place əməliyyatlar təklif edir. Qayda: default olaraq yeni obyekt qaytar; in-place yalnız ölçülmüş yaddaş problemi olanda və adında açıq göstərilməklə.
+      - **Type hints runtime-da yoxlanmır:** Onlar mypy/pyright ilə statik analiz və oxunaqlılıq üçündür. Xarici input (API, fayl, istifadəçi) üçün runtime validation (məs. Pydantic) lazımdır.
+      - **Hər şeyi pure etmək mümkün deyil:** Fayl oxumaq, model çağırmaq, log yazmaq side effect-dir. Yaxşı dizayn side effect-ləri kənarda saxlayır, hesablama məntiqini isə pure funksiyalarda — "functional core, imperative shell".
+      - **Edge case seçimi kontekstdən asılıdır:** Eyni dəyərlər üçün `0.0` qaytarmaq bəzi modellərdə məqbuldur, bəzilərində isə exception daha təhlükəsizdir (səhv datanın səssizcə keçməsinin qarşısını alır).
+      - **AI-generated kod:** LLM-lər tez-tez mutable default və input mutasiyası olan kod yazır. Müqaviləni əvvəlcədən bilmək bu kodu yoxlamağın ən sürətli yoludur.
+mastery_criteria:
+  - Yeni funksiya üçün input, output, edge case və side effect-ləri yazılı müqavilə kimi təsvir edə bilirsən
+  - Input-u dəyişdirməyən və edge case-ləri idarə edən funksiyanı müstəqil yaza bilirsən
+  - Mutable default argument bug-ını kodda tapıb düzəldə və səbəbini izah edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-pyfn-sort-return
+      type: mcq
+      title: sort() nə qaytarır?
+      prompt: |
+        ```python
+        scores = [3, 1, 2]
+        result = scores.sort()
+        ```
+        `result` dəyişəninin dəyəri nədir?
+      skills: [py-functions]
+      category: predict-output
+      options:
+        - id: a
+          text: "[1, 2, 3]"
+          feedback: Bu `sorted(scores)` olsaydı doğru idi. `.sort()` list-i yerində dəyişir.
+        - id: b
+          text: None
+          feedback: Doğru. `.sort()` yerində (in-place) sıralayır və Python konvensiyasına görə `None` qaytarır.
+        - id: c
+          text: "[3, 1, 2]"
+          feedback: "`.sort()` list-i dəyişir, amma nəticə kimi list qaytarmır."
+      answer: b
+      explanation: In-place əməliyyatlar (`list.sort`, `list.append`, `list.reverse`) `None` qaytarır ki, səhvən "yeni obyekt aldım" düşünməyəsən.
+    - id: q-pyfn-type-hints
+      type: mcq
+      title: Type hints runtime-da
+      prompt: "`def f(x: int) -> int: return x * 2` funksiyasını `f(\"ab\")` ilə çağırsaq nə olar?"
+      skills: [py-functions]
+      category: concept
+      options:
+        - id: a
+          text: TypeError — Python type hint-i yoxlayır
+          feedback: Python type hint-ləri runtime-da yoxlamır.
+        - id: b
+          text: "'abab' qaytarır"
+          feedback: Doğru. Hint-lər yoxlanmır; `\"ab\" * 2` sadəcə string təkrarıdır.
+        - id: c
+          text: SyntaxError
+          feedback: Kod sintaktik cəhətdən düzgündür.
+      answer: b
+      explanation: Type hints statik analiz alətləri (mypy, pyright) və oxucular üçündür. Runtime zəmanəti lazımdırsa, açıq validation yazmalısan.
+    - id: q-pyfn-side-effects
+      type: multi
+      title: Hansıları side effect-dir?
+      prompt: Aşağıdakılardan hansılar funksiyanın **side effect**-idir? Hamısını seç.
+      skills: [py-functions]
+      category: concept
+      options:
+        - id: a
+          text: Parametr kimi gələn list-ə `append` etmək
+          feedback: Bəli — çağıranın obyekti dəyişir.
+        - id: b
+          text: Log faylına sətir yazmaq
+          feedback: Bəli — xarici dünyaya (fayl sisteminə) təsir.
+        - id: c
+          text: İki ədədin cəmini hesablayıb qaytarmaq
+          feedback: Xeyr — bu sadəcə return dəyəridir.
+        - id: d
+          text: HTTP API-yə sorğu göndərmək
+          feedback: Bəli — şəbəkə və xarici sistemlə qarşılıqlı əlaqə.
+        - id: e
+          text: Input list-in sıralanmış KOPYASINI qaytarmaq (`sorted(xs)`)
+          feedback: Xeyr — yeni obyekt yaradılır, input dəyişmir.
+      answers: [a, b, d]
+      explanation: Side effect = return-dan kənar hər hansı müşahidə oluna bilən təsir. Yeni obyekt qaytarmaq side effect deyil.
+    - id: q-pyfn-mutable-default
+      type: text
+      title: Mutable default — output-u proqnozlaşdır
+      prompt: |
+        ```python
+        def collect(x, bucket=[]):
+            bucket.append(x)
+            return bucket
+
+        collect(1)
+        print(collect(2))
+        ```
+        Nə çap olunacaq? Python-un çap etdiyi kimi yaz.
+      skills: [py-functions, debugging]
+      category: predict-output
+      accepted: ["[1, 2]"]
+      hints:
+        - Default `bucket=[]` nə vaxt yaradılır — hər çağırışda, yoxsa bir dəfə?
+      explanation: Default list funksiya təyin olunanda bir dəfə yaradılır və hər iki çağırış eyni list-ə append edir → `[1, 2]`.
+exercises:
+  - id: ex-pyfn-min-max-scale
+    type: code
+    title: min_max_scale funksiyasını müqaviləyə uyğun yaz
+    prompt: |
+      Dərsdəki müqaviləyə uyğun `min_max_scale(values)` funksiyasını yaz:
+
+      - Eyni uzunluqda **yeni** list qaytarır, dəyərlər `[0, 1]` aralığında.
+      - Input list **dəyişdirilmir**.
+      - Boş list → `[]`.
+      - Bütün dəyərlər eynidirsə → hamısı `0.0`.
+
+      Kodu yazmazdan əvvəl edge case-ləri düşün. Testlər brauzerində həqiqi Python (Pyodide) ilə işə salınır.
+    skills: [py-functions, py-control-flow]
+    category: python
+    difficulty: 1
+    hints:
+      - Əvvəlcə boş list halını idarə et — `min([])` xəta verir.
+      - "`lo = min(values)`, `hi = max(values)` hesabla; `hi - lo == 0` halını ayrıca yoxla."
+      - List comprehension `[... for v in values]` yeni list yaradır və input-u dəyişmir.
+    starter_code: |
+      def min_max_scale(values: list[float]) -> list[float]:
+          # TODO: müqaviləyə uyğun implementasiya et
+          return values
+    tests:
+      - name: Əsas nümunə [2, 4, 10]
+        code: |
+          result = min_max_scale([2, 4, 10])
+          assert result == [0.0, 0.25, 1.0], f"gözlənilən [0.0, 0.25, 1.0], alınan {result}"
+      - name: Input list dəyişdirilmir
+        code: |
+          data = [3.0, 1.0, 2.0]
+          out = min_max_scale(data)
+          assert data == [3.0, 1.0, 2.0], f"input dəyişdirilib: {data}"
+          assert out is not data, "yeni list qaytarılmalıdır, eyni obyekt yox"
+      - name: Boş list
+        code: |
+          assert min_max_scale([]) == [], "boş input üçün [] gözlənilir"
+      - name: Bütün dəyərlər eyni
+        code: |
+          result = min_max_scale([5, 5, 5])
+          assert result == [0.0, 0.0, 0.0], f"alınan {result}"
+      - name: Mənfi dəyərlər
+        code: |
+          result = min_max_scale([-1, 0, 1])
+          assert result == [0.0, 0.5, 1.0], f"alınan {result}"
+    solution: |
+      def min_max_scale(values: list[float]) -> list[float]:
+          if not values:
+              return []
+          lo, hi = min(values), max(values)
+          span = hi - lo
+          if span == 0:
+              return [0.0 for _ in values]
+          return [(v - lo) / span for v in values]
+    explanation: |
+      Həll müqavilənin hər bəndini ayrıca sətirlə qarşılayır: boş list, sıfıra bölmə və yeni list. Testlər də məhz müqavilənin bəndlərini yoxlayır — yaxşı testlər müqavilədən yazılır, implementasiyadan yox.
+  - id: ex-pyfn-fix-mutable-default
+    type: code
+    title: "Debug: paylaşılan default list"
+    prompt: |
+      Komanda yoldaşın aşağıdakı funksiyanı yazıb: hər sənəd üçün tag siyahısı qaytarmalıdır.
+      Amma production-da müxtəlif sənədlərin tag-ları bir-birinə qarışır.
+
+      Bug-ı düzəlt. Tələblər:
+      - `add_tag("x")` hər dəfə **yalnız** `["x"]` qaytarmalıdır.
+      - `tags` verilibsə, **verilən list dəyişdirilməməlidir** — yeni list qaytar.
+    skills: [py-functions, debugging]
+    category: debug
+    difficulty: 2
+    hints:
+      - Default dəyər nə vaxt yaradılır? İki ardıcıl `add_tag("x")` çağırışını ağlında icra et.
+      - "Python idiomu: `tags=None`, sonra funksiya içində yeni list yarat."
+      - "`list(tags)` verilmiş list-in kopyasını yaradır."
+    starter_code: |
+      def add_tag(tag: str, tags: list[str] = []) -> list[str]:
+          tags.append(tag)
+          return tags
+    tests:
+      - name: Ardıcıl çağırışlar bir-birinə təsir etmir
+        code: |
+          first = add_tag("x")
+          second = add_tag("y")
+          assert first == ["x"], f"birinci çağırış: {first}"
+          assert second == ["y"], f"ikinci çağırış: {second}"
+      - name: Verilən list dəyişdirilmir
+        code: |
+          original = ["a"]
+          result = add_tag("b", original)
+          assert result == ["a", "b"], f"alınan {result}"
+          assert original == ["a"], f"input dəyişdirilib: {original}"
+      - name: Boş list ötürüldükdə yeni list qaytarır
+        code: |
+          empty = []
+          res = add_tag("init", empty)
+          assert res == ["init"] and empty == [] and res is not empty
+    solution: |
+      def add_tag(tag: str, tags: list[str] | None = None) -> list[str]:
+          result = [] if tags is None else list(tags)
+          result.append(tag)
+          return result
+    explanation: |
+      `None` default-u immutable-dır, ona görə paylaşılma problemi yoxdur. Funksiya hər çağırışda yeni list yaradır (`[]` və ya `list(tags)` kopyası), beləliklə nə çağırışlar arası vəziyyət, nə də input mutasiyası qalır.
+  - id: ex-pyfn-predict-aliasing
+    type: text
+    title: "Predict the output: aliasing"
+    prompt: |
+      ```python
+      def normalize(row):
+          row[0] = row[0] / 100
+          return row
+
+      raw = [50, 7]
+      clean = normalize(raw)
+      print(raw)
+      ```
+      Nə çap olunacaq? Python-un çap etdiyi formatda yaz.
+    skills: [py-functions, debugging]
+    category: predict-output
+    difficulty: 1
+    accepted: ["[0.5, 7]"]
+    hints:
+      - "`row` və `raw` eyni obyektdirmi, yoxsa kopya?"
+      - Python-da funksiyaya list ötürmək kopya yaratmır — eyni obyektə ikinci ad verir.
+    explanation: |
+      `row` parametri `raw` ilə **eyni** list obyektinə işarə edir (aliasing). `row[0] = ...` həmin obyekti dəyişir, ona görə `raw` da `[0.5, 7]` olur. Training pipeline-da belə funksiya "raw" datanı gizlicə dəyişir və sonrakı addımlar artıq dəyişmiş datanı görür.
+  - id: ex-pyfn-explain-skew
+    type: explain
+    title: "İzah et: in-place preprocessing niyə təhlükəlidir?"
+    prompt: |
+      Bir komanda belə preprocessing funksiyası istifadə edir:
+
+      ```python
+      def preprocess(df):
+          df["age"] = df["age"].fillna(df["age"].mean())
+          df["income"] = df["income"] / 1000
+          return df
+      ```
+
+      Bu funksiya training notebook-unda bir neçə dəfə yenidən işə salınır, eyni zamanda serving kodunda da istifadə olunur.
+      Bu dizaynın **ən azı iki konkret riskini** izah et və necə düzəldəcəyini təklif et.
+    skills: [py-functions]
+    category: explain-code
+    difficulty: 2
+    hints:
+      - Hüceyrə iki dəfə işə salınsa `income` sütununa nə olar?
+      - Serving zamanı `df["age"].mean()` hansı datadan hesablanır — training-dən, yoxsa tək sorğudan?
+    rubric:
+      - Funksiyanın input DataFrame-i yerində dəyişdiyini (mutation) qeyd edir
+      - Təkrar çağırışda `income`-un yenidən 1000-ə bölünəcəyini (idempotent olmadığını) göstərir
+      - Serving zamanı mean-in training statistikası əvəzinə cari datadan hesablandığını (training/serving skew) izah edir
+      - "Düzəliş təklif edir: kopya ilə işləmək və statistikaları training-də bir dəfə hesablayıb saxlamaq (fit/transform ayrılığı)"
+    model_answer: |
+      1. **Mutation:** funksiya `df`-i yerində dəyişir — çağıranın orijinal datası itir.
+      2. **Idempotent deyil:** notebook hüceyrəsi iki dəfə işə salınsa, `income` 1000-ə iki dəfə bölünür (1 000 000 → 1000 → 1). Bu səhv səssizdir.
+      3. **Training/serving skew:** serving zamanı tək sorğuda `df["age"].mean()` həmin sorğunun öz dəyəridir (və ya NaN), training-dəki ortalama deyil. Model fərqli paylanmalı data görür.
+
+      **Düzəliş:** `fit` mərhələsində (yalnız training datası) `age_mean`-i hesablayıb saxla; `transform(df, stats)` funksiyası `df.copy()` üzərində işləsin və saxlanmış statistikadan istifadə etsin. scikit-learn-də bu, `SimpleImputer` + `Pipeline` ilə edilir.
+    explanation: Bu nümunə müqavilə anlayışının ML-də niyə kritik olduğunu göstərir — eyni funksiya iki kontekstdə fərqli nəticə verirsə, model production-da səssizcə pisləşir.
+references:
+  - title: Python Tutorial — Default Argument Values
+    url: https://docs.python.org/3/tutorial/controlflow.html#default-argument-values
+    note: Mutable default barədə rəsmi xəbərdarlıq
+  - title: typing — Support for type hints
+    url: https://docs.python.org/3/library/typing.html

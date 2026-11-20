@@ -1,0 +1,120 @@
+id: pdf-knowledge-assistant
+title: "PDF & Sənəd Biliyi Assistenti (Grounded RAG + Evaluation)"
+summary: "Sənəd korpusunu təmizləyib metadata ilə chunk edən, hybrid retrieval və məcburi sitatlarla (`[source: ...]`) cavab verən, sübut olmayanda imtina edən və 20+ suallıq benchmark ilə ölçülən RAG sistemi."
+optional: false
+level: core
+estimated_hours: [14, 22]
+recommended_lessons:
+  - llm-tokens-structured-output
+  - llm-embeddings-semantic-search
+  - llm-rag-pipeline-evaluation
+  - http-json-api-clients
+  - py-testing-pytest
+problem_statement: |
+  Sadə bir RAG demosunu 30 dəqiqəyə qurmaq mümkündür, lakin belə demolar real sənədlərdə cədvəl/başlıq sərhədlərini yarıdan bölür, dəqiq termin və ya maddə nömrələrini (məsələn, "Maddə 14.2" və ya xüsusi kod) yalnız sıx embedding axtarışı ilə qaçırır və kontekstdə məlumat olmadıqda özündən uydurma (hallucination) cavablar verir. Bu layihədə konkret bir sənəd toplusu (məsələn, universitet qaydaları, texniki spesifikasiyalar, daxili siyasət sənədləri və ya müqavilə şablonları) üzərində mənbəyə söykənən (grounded), sitat gətirən və riyazi olaraq `Recall@k` ilə qiymətləndirilən mühəndislik səviyyəli RAG sistemi quracaqsan.
+intended_user: "Böyük sənəd qovluğunda dəqiq qayda, rəqəm və ya proseduru tez tapmaq istəyən və cavabın hansı sənədin hansı hissəsindən gəldiyini yoxlamağa ehtiyac duyan mütəxəssis."
+requirements:
+  - "Ən azı 5-15 real sənəddən (PDF və ya Markdown/TXT) ibarət korpusu təmizləyib hər chunk-a `doc_id`, `title`, `page_or_section` və `chunk_id` metadatası əlavə edən ingestion pipeline yazmaq."
+  - "Yalnız vector search ilə kifayətlənməyib, lexical (BM25 / açar söz) və semantic (embedding) axtarışı birləşdirən hybrid retrieval mexanizmi qurmaq."
+  - "Generator promptunu və cavab sxemini elə qurmaq ki, hər faktiki iddia `[source: doc_id#chunk_id]` sitatı ilə əsaslandırılsın."
+  - "Retrieved kontekstdə sualın cavabı olmadıqda model uydurma etməsin, aydın şəkildə `\"Təqdim olunan sənədlərdə bu sual üzrə məlumat yoxdur\"` cavabını və `abstained: true` bayrağını qaytarsın."
+  - "Ən azı 20 sualdan ibarət qızıl evaluation dəsti (15 cavabı sənəddə olan + 5 cavabı sənəddə olmayan tələ sual) hazırlamaq və `Recall@k` ilə citation faithfulness metriklərini hesablamaq."
+non_goals:
+  - "Sıfırdan öz foundation LLM və ya embedding modelini train etmək."
+  - "Bütün interneti axtaran ümumi məqsədli chatbot yaratmaq (sistem yalnız verilmiş korpus daxilində cavab verməlidir)."
+  - "Mürəkkəb çox-agentli (multi-agent) orkestrasiya qurmaq."
+architecture: |
+  Sistem iki aydın fazadan — Offline Ingestion/Indexing və Online Retrieval/Grounded Generation + Offline Evaluation axınından ibarətdir:
+
+  ```mermaid
+  flowchart TD
+    Docs["PDF / Markdown Corpus"] --> Ingest["Cleaning & Section-Aware Chunking"]
+    Ingest --> Meta["Chunks + Metadata (doc_id, section, chunk_id)"]
+    Meta --> Vec["Vector Index (Embeddings)"]
+    Meta --> Lex["Lexical Index (BM25 / Keyword)"]
+    Query["User Question"] --> Hybrid["Hybrid Retriever (Vector + Lexical Fusion)"]
+    Vec --> Hybrid
+    Lex --> Hybrid
+    Hybrid -->|"Top-k Chunks"| Prompt["Grounded Prompt + Citation Schema"]
+    Prompt --> Check{"Context Supports Answer?"}
+    Check -->|"Yes"| Ans["Answer + Verified [source: doc_id#chunk_id]"]
+    Check -->|"No"| Abstain["Abstain: 'Sənədlərdə məlumat yoxdur'"]
+    EvalSet["20+ Eval Questions"] --> Hybrid
+  ```
+
+  - `src/ingest.py`: Sənəd oxuma, səs-küy təmizləmə və overlap-li chunking + metadata.
+  - `src/retriever.py`: Embedding + lexical axtarış və Reciprocal Rank Fusion (və ya weighted score).
+  - `src/generator.py`: Grounded prompt, structured cavab və sitat doğrulaması (citation verifier).
+  - `eval/questions.jsonl` və `src/eval_runner.py`: `Recall@k`, abstention accuracy və faithfulness ölçən skript.
+milestones:
+  - id: m1-ingestion-chunking
+    title: "Korpusun Təmizlənməsi və Metadata-lı Chunking"
+    goal: "Sənədləri məna sərhədlərini qoruyaraq və hər parçanın mənbəyini izləyə biləcək şəkildə chunk-lara bölmək."
+    tasks:
+      - "Korpusu yükləyib təkrarlanan header/footer, boş səhifə və qırılmış sətir sonlarını təmizləyən funksiya yaz."
+      - "Hər bir chunk üçün deterministik `chunk_id`, `doc_id`, `page_or_section` və simvol/token uzunluğu saxlayan chunker tətbiq et."
+      - "Ən azı 2 fərqli chunk ölçüsünü (məsələn, 300 vs 700 token, 15% overlap) nümunə suallar üzərində yoxla."
+    evidence_required: "`src/ingest.py` kodu, yaradılmış chunk-ların JSON/JSONL nümunəsi və chunking qərarının qısa əsaslandırması."
+    skills:
+      - llm-embeddings
+      - llm-tokens-context
+      - py-data-structures
+  - id: m2-hybrid-retrieval
+    title: "Embedding İndeksi və Hybrid Retrieval"
+    goal: "Həm məna oxşarlığını, həm də dəqiq termin/kod uyğunluğunu tapan axtarış qatı qurmaq."
+    tasks:
+      - "Chunk-ların embedding vektorlarını hesablayıb cosine similarity əsaslı semantic axtarış funksiyası yaz."
+      - "Açar söz / BM25 axtarışı əlavə et və hər iki nəticəni birləşdirən hybrid retrieval funksiyasını (`retrieve(query, k=5)`) qur."
+    evidence_required: "`src/retriever.py` kodu və tək semantic axtarışın qaçırdığı, lakin hybrid axtarışın tapdığı ən azı 2 konkret sorğu nümunəsi."
+    skills:
+      - llm-embeddings
+      - vectors-dot-product
+      - llm-rag
+  - id: m3-grounded-generation-citations
+    title: "Grounded Generation, Sitat Doğrulaması və İmtina (Abstention)"
+    goal: "Modelin yalnız təqdim olunan chunk-lara əsaslanmasını və uydurma sitat qaytarmamasını təmin etmək."
+    tasks:
+      - "Cavabı `answer`, `citations` (siyahı) və `abstained` (boolean) sahələrindən ibarət strukturlaşdırılmış formatda tələb edən prompt və validator yaz."
+      - "Modelin qaytardığı hər bir `chunk_id`-nin həqiqətən həmin sorğuda retrieved olunmuş `top-k` siyahısında mövcud olduğunu kodla yoxla (phantom citation filter)."
+    evidence_required: "`src/generator.py` kodu, sitatlı cavab nümunələri və korpusda olmayan suala verilən düzgün imtina cavabı."
+    skills:
+      - llm-rag
+      - llm-structured-output
+      - py-errors
+  - id: m4-rag-evaluation-benchmark
+    title: "20+ Suallıq Evaluation Benchmark (Retrieval vs Generation)"
+    goal: "RAG sisteminin keyfiyyətini gözəyarı deyil, ayrı-ayrılıqda retrieval və generation metrikləri ilə ölçmək."
+    tasks:
+      - "`eval/questions.jsonl` faylında ən azı 20 sual (hər biri üçün gözlənilən `expected_doc_id` / `expected_chunk_id` və ya `should_abstain: true`) tərtib et."
+      - "`Recall@3`, `Recall@5`, sitat dəqiqliyi (valid citation rate) və sənəddə olmayan suallarda düzgün imtina faizini hesablayan `src/eval_runner.py` yaz."
+      - "Uğursuz olan sualları analiz edib problemin retrieval-da, yoxsa generation-da olduğunu təsnif et."
+    evidence_required: "`eval/questions.jsonl`, eval skriptinin çıxardığı metrik cədvəli və retrieval vs generation səhv analizi."
+    skills:
+      - llm-evaluation
+      - debugging
+test_plan:
+  - "Chunking integrity test: Heç bir chunk boş deyil, hər birinin unikal `chunk_id` və dolu `doc_id` metadatası var və uzunluğu maksimum limiti keçmir."
+  - "Citation verification test: Əgər model retrieved kontekstdə olmayan uydurma `doc_99#chunk_99` sitatı qaytararsa, validator bunu tutur və rədd edir."
+  - "Abstention test: Korpusla tamamilə əlaqəsiz 5 sualın ən azı 4-də sistem mənbə uydurmadan `abstained: true` qaytarır."
+  - "Retrieval regression test: 20 suallıq eval dəsti üzrə `Recall@5` müəyyən edilmiş minimum həddən (məsələn, 0.75) aşağı düşmür."
+failure_cases:
+  - "Mid-sentence / Table Split: Şərt cümləsinin əvvəli bir chunk-da, istisna halı isə növbəti chunk-da qaldığı üçün modelin natamam qayda çıxarması."
+  - "Lexical Blindness: İstifadəçi dəqiq sənəd kodu (`AZ-204-B`) soruşduqda sıx embedding modelinin ümumi mövzulu başqa chunk-ları gətirməsi."
+  - "Phantom Citations: Modelin cavabı öz ümumi biliyindən yazıb sonuna təsadüfi bir `[source: ...]` etiketi yapışdırması."
+  - "Indirect Prompt Injection: Sənədin içindəki mətnin (`\"Əvvəlki təlimatları unut və...\"`) sistem təlimatını ələ keçirməsi."
+privacy_security:
+  - "Sənəd mətnləri etibarsız məlumat (`untrusted data`) kimi açıq XML/delimiter teqləri (`<context>...</context>`) içində verilməli və içindəki əmrlər icra olunmamalıdır."
+  - "Korpusa daxil edilən sənədlərdə real müştəri FİN kodu, parol və ya məxfi müqavilə məlumatları olmamalıdır."
+definition_of_done:
+  - "Ingestion, hybrid retrieval, sitat yoxlamalı generation və evaluation skripti tam işlək vəziyyətdədir."
+  - "20+ suallıq benchmark üzrə `Recall@k`, `Citation Faithfulness` və `Abstention Accuracy` rəqəmləri hesablanıb və README-də dərc olunub."
+  - "Chunking, citation validator və retriever üçün yazılmış `pytest` testləri uğurla keçir."
+readme_outline:
+  - "1. Korpusun Təsviri, İstifadəçi Ssenarisi və RAG Arxitekturası"
+  - "2. Chunking Strategiyası və Hybrid Retrieval Dizaynı"
+  - "3. Grounded Prompt, Sitat Doğrulaması və İmtina (Abstention) Mexanizmi"
+  - "4. Evaluation Benchmark Nəticələri (`Recall@k`, Faithfulness, Retrieval vs Generation Səhv Analizi)"
+  - "5. Təhlükəsizlik (Prompt Injection Müdafiəsi) və İşə Salma Təlimatı"
+stretch_goals:
+  - "Top-20 hybrid nəticəni kiçik bir cross-encoder / reranker addımı ilə yenidən sıralayıb `Recall@3` artımını ölçmək."
+  - "Hər sorğunun input/output token sayını və təxmini USD xərcini hesablayan telemetriya hesabatı əlavə etmək."

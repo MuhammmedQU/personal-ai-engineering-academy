@@ -1,0 +1,329 @@
+id: ml-regression-metrics
+track: classical-ml
+module: ml-evaluation
+title: Regression metrics — MAE, MSE, RMSE, R² və residual analizi
+summary: Kəsilməz ədəd proqnozlaşdırarkən (qiymət, müddət, tələbat) xətanı MAE, MSE, RMSE və R² ilə ölçməyi, RMSE-nin böyük outlier xətalarını niyə daha sərt cəzalandırdığını və qalıqları (residuals) seqmentlər üzrə yoxlamağı öyrənəcəksən.
+level: foundation
+estimated_minutes: [45, 60]
+prerequisites: [ml-classification-metrics]
+next: ml-overfitting-regularization
+skills: [ml-regression-metrics]
+objectives:
+  - MAE, MSE və RMSE düsturlarını simvolları ilə izah etmək, vahidlərini müqayisə etmək və Python-da sıfırdan hesablamaq
+  - Tək bir ekstremal xətanın (outlier) RMSE-ni MAE-dən qat-qat çox necə şişirtdiyini rəqəmlərlə göstərmək
+  - "$R^2$ (determinasiya əmsalı) metrikini 'modelimiz sadə mean baseline-dan nə qədər yaxşıdır?' sualının cavabı kimi şərh etmək"
+  - Tək ümumi metrik əvəzinə qalıqları ($e_i = y_i - \hat{y}_i$) seqmentlər üzrə analiz edərək gizli qərəzləri (bias) tapmaq
+why_it_matters: |
+  Mənzil qiymətlərini, çatdırılma müddətini və ya server yükünü proqnozlaşdıranda modelin çıxışı sinif etiketi yox, kəsilməz ədəddir ($\hat{y} \in \mathbb{R}$). Burada *"düz tapdı / səhv tapdı"* anlayışı yoxdur — *"nə qədər yaxın tapdı?"* sualı var.
+
+  Amma hansı metrikə baxmalıyıq? Tutaq ki, kuryer çatdırılma modelin sifarişlərin 95%-də cəmi 2 dəqiqə yanılır, amma 5% sifarişdə 60 dəqiqə yanılır. **MAE** sənə *"orta xəta 4.9 dəqiqədir, hər şey əladır!"* deyəcək. **RMSE** isə həmin 60 dəqiqəlik fəlakətləri kvadrata yüksəldib həyəcan təbili çalacaq (`~13.6 dəqiqə`). Hansı metriki seçdiyin modelin hansı xətalara həssas olacağını birbaşa müəyyən edir.
+terms:
+  - term: Residual (Qalıq xəta)
+    definition: "Həqiqi dəyərlə proqnoz arasındakı işarəli fərq: $e_i = y_i - \\hat{y}_i$. Müsbətdirsə model aşağı qiymətləndirib (under-prediction), mənfidirsə yuxarı (over-prediction)."
+  - term: MAE (Mean Absolute Error)
+    definition: "Mütləq xətaların ədədi ortası: $\\frac{1}{n}\\sum_{i=1}^n |y_i - \\hat{y}_i|$. Hədəf dəyişəni ($y$) ilə eyni ölçü vahidindədir və outlier-lərə qarşı dayanıqlıdır (robust)."
+  - term: MSE (Mean Squared Error)
+    definition: "Kvadratik xətaların ədədi ortası: $\\frac{1}{n}\\sum_{i=1}^n (y_i - \\hat{y}_i)^2$. Ölçü vahidi hədəfin kvadratıdır (məs. $\\text{AZN}^2$) və hamar törəməyə malik olduğu üçün loss funksiyası kimi geniş işlədilir."
+  - term: RMSE (Root Mean Squared Error)
+    definition: "MSE-nin kvadrat kökü: $\\sqrt{\\text{MSE}}$. Yenidən $y$ ilə eyni ölçü vahidinə qayıdır, lakin böyük xətaları (outlier-ləri) MAE-dən daha sərt cəzalandırır."
+  - term: R² (Coefficient of Determination)
+    definition: "Modelin kvadratik xətasını sadə ortalama baseline-ın ($\\bar{y}$) kvadratik xətası ilə müqayisə edən ölçüsüz əmsal: $R^2 = 1 - \\frac{\\sum (y_i - \\hat{y}_i)^2}{\\sum (y_i - \\bar{y})^2}$."
+sections:
+  - id: mae-mse-rmse-r2-explained
+    kind: explanation
+    title: MAE, MSE, RMSE və R² — düsturlar və həndəsi məna
+    body: |
+      $n$ müşahidədən ibarət reqressiya tapşırığında həqiqi dəyərlər $y_1, \dots, y_n$ və modelin proqnozları $\hat{y}_1, \dots, \hat{y}_n$ olsun. Hər nöqtədəki qalıq (residual) $e_i = y_i - \hat{y}_i$-dir.
+
+      ### 1. Mean Absolute Error (MAE)
+      $$\text{MAE} = \frac{1}{n} \sum_{i=1}^{n} |y_i - \hat{y}_i|$$
+      - **Mənası:** Xətaların işarəsini atıb birbaşa ortalamasını tapır.
+      - **Xassəsi:** $10\text{ AZN}$-lik xəta $5\text{ AZN}$-lik xətadan düz **2 dəfə** pis sayılır (xətti cəza).
+
+      ### 2. Mean Squared Error (MSE) və Root Mean Squared Error (RMSE)
+      $$\text{MSE} = \frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2, \qquad \text{RMSE} = \sqrt{\frac{1}{n} \sum_{i=1}^{n} (y_i - \hat{y}_i)^2}$$
+      - **Mənası:** Xətaları əvvəlcə kvadrata yüksəldir, ortalamasını tapır (MSE), sonra ölçü vahidini bərpa etmək üçün kök alır (RMSE).
+      - **Xassəsi:** $10\text{ AZN}$-lik xəta ($10^2=100$) $5\text{ AZN}$-lik xətadan ($5^2=25$) **4 dəfə** pis sayılır! Buna görə hər zaman $\text{RMSE} \ge \text{MAE}$ bərabərsizliyi ödənir (yalnız bütün xətaların mütləq qiyməti bir-birinə bərabər olanda $\text{RMSE} = \text{MAE}$ olur).
+
+      ### 3. $R^2$ — Mean Baseline ilə birbaşa müqayisə
+      $$\text{R}^2 = 1 - \frac{\sum_{i=1}^{n} (y_i - \hat{y}_i)^2}{\sum_{i=1}^{n} (y_i - \bar{y})^2} = 1 - \frac{\text{MSE}_{\text{model}}}{\text{MSE}_{\text{mean baseline}}}$$
+      Burada $\bar{y} = \frac{1}{n}\sum_{i=1}^n y_i$ həqiqi dəyərlərin ortalamasıdır:
+      - $R^2 = 1.0$: Mükəmməl model ($\text{MSE} = 0$).
+      - $R^2 = 0.0$: Modelin həmişə $\bar{y}$ deyən axmaq **mean baseline** qədər xətası var (heç nə öyrənməyib).
+      - $R^2 < 0.0$: Model hətta sadə ortalamadan da **daha pisdir**!
+  - id: late-bus-analogy
+    kind: analogy
+    title: "Mental model: Avtobusun gecikməsi — MAE vs RMSE"
+    body: |
+      Hər səhər işə avtobusla gedirsən. İki fərqli marşrut seçimin var:
+
+      - **Marşrut A:** Hər gün sabit olaraq **5 dəqiqə** gecikir ($[5, 5, 5, 5]$).
+        - $\text{MAE} = 5\text{ dəq}$, $\text{RMSE} = \sqrt{25} = 5\text{ dəq}$. Həyatını planlaşdıra bilirsən.
+      - **Marşrut B:** 3 gün dəqiq vaxtında gəlir ($0$ dəqiqə gecikmə), amma 4-cü gün **20 dəqiqə** gecikir ($[0, 0, 0, 20]$) və sən vacib iclasa gecikib töhmət alırsan.
+        - **MAE baxışı:** $\frac{0 + 0 + 0 + 20}{4} = 5\text{ dəq}$. MAE deyir ki, *"Marşrut A ilə Marşrut B eyni dərəcədə yaxşıdır!"*
+        - **RMSE baxışı:** $\sqrt{\frac{0^2 + 0^2 + 0^2 + 20^2}{4}} = \sqrt{\frac{400}{4}} = \sqrt{100} = 10\text{ dəq}$! RMSE dərhal xəbərdarlıq edir ki, Marşrut B-də nadir, amma dağıdıcı gecikmə var.
+
+      Əgər biznesdə böyük tək səhv kiçik səhvlərin cəmindən daha təhlükəlidirsə, **RMSE** seç; əgər xərc xəta ilə düz mütənasibdirsə və ya datada texniki səs-küy (səhv yazılmış outlier-lər) çoxdursa, **MAE** seç.
+  - id: metric-comparison-diagram
+    kind: diagram
+    title: Reqressiya xətasının qiymətləndirilməsi və residual yoxlaması
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Həqiqi y və Proqnoz y_hat"] --> B["Qalıqlar: e_i = y_i - y_hat_i"]
+        B --> C["MAE = mean(|e_i|) — Outlier-ə dayanıqlı, xətti cəza"]
+        B --> D["RMSE = sqrt(mean(e_i^2)) — Böyük xətalara həssas, kvadratik cəza"]
+        B --> E["R^2 = 1 - MSE_model / MSE_baseline — Baseline-a nisbi qazanc"]
+        B --> F["Seqment üzrə Residual Analizi: ucuz vs bahalı, şəhər vs kənd"]
+      ```
+
+      Tək bir rəqəm (MAE və ya RMSE) hekayənin yalnız yarısıdır; ən sağdakı qutu (`Residual Analizi`) modelin hansı alt-qruplarda sistemli şəkildə yanıldığını üzə çıxarır.
+  - id: worked-outlier-example
+    kind: worked_example
+    title: "4 nöqtə üzərində hesablama: 1 outlier RMSE-ni necə sıçradır?"
+    body: |
+      4 mənzilin həqiqi qiyməti ($y$, min AZN ilə) və modelin proqnozu ($\hat{y}$) verilib:
+
+      | Mənzil | Həqiqi $y_i$ | Proqnoz $\hat{y}_i$ | Qalıq $e_i = y_i - \hat{y}_i$ | $|e_i|$ | $e_i^2$ |
+      |---|---|---|---|---|---|
+      | 1 | 100 | 102 | $-2$ | $2$ | $4$ |
+      | 2 | 150 | 148 | $+2$ | $2$ | $4$ |
+      | 3 | 200 | 198 | $+2$ | $2$ | $4$ |
+      | 4 (Outlier villa) | 350 | 332 | $+18$ | $18$ | $324$ |
+
+      **1. MAE hesabı:**
+      $$\text{MAE} = \frac{2 + 2 + 2 + 18}{4} = \frac{24}{4} = 6.0\text{ min AZN}$$
+
+      **2. MSE və RMSE hesabı:**
+      $$\text{MSE} = \frac{4 + 4 + 4 + 324}{4} = \frac{336}{4} = 84.0\text{ (min AZN)}^2$$
+      $$\text{RMSE} = \sqrt{84.0} \approx 9.165\text{ min AZN}$$
+
+      Göründüyü kimi, 4-cü mənzildəki $18$ minlik xəta kvadratik cəmdə $324 / 336 \approx 96.4\%$ paya sahib oldu və RMSE-ni $6.0$-dan $9.165$-ə qaldırdı!
+
+      **3. $R^2$ hesabı:**
+      Həqiqi qiymətlərin ortalaması: $\bar{y} = \frac{100 + 150 + 200 + 350}{4} = 200$.
+      Mean baseline-ın kvadratik xətası:
+      $$\text{MSE}_{\text{base}} = \frac{(100-200)^2 + (150-200)^2 + (200-200)^2 + (350-200)^2}{4} = \frac{10000 + 2500 + 0 + 22500}{4} = 8750$$
+      $$R^2 = 1 - \frac{84}{8750} \approx 0.9904$$
+  - id: code-mae-rmse
+    kind: code
+    title: "Kod: MAE, RMSE və seqment üzrə residual yoxlaması"
+    body: |
+      ```python
+      import math
+
+
+      def mae_and_rmse(
+          y_true: list[float], y_pred: list[float]
+      ) -> tuple[float, float]:
+          """Return (mae, rmse) for equal-length non-empty lists."""
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+
+          n = len(y_true)
+          abs_err_sum = 0.0
+          sq_err_sum = 0.0
+          for yt, yp in zip(y_true, y_pred):
+              err = yt - yp
+              abs_err_sum += abs(err)
+              sq_err_sum += err * err
+
+          mae = abs_err_sum / n
+          rmse = math.sqrt(sq_err_sum / n)
+          return mae, rmse
+
+
+      def mean_residual(y_true: list[float], y_pred: list[float]) -> float:
+          """Signed mean error: positive means model systematically under-predicts."""
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+          return sum(yt - yp for yt, yp in zip(y_true, y_pred)) / len(y_true)
+
+
+      y = [100.0, 150.0, 200.0, 350.0]
+      p = [102.0, 148.0, 198.0, 332.0]
+      mae, rmse = mae_and_rmse(y, p)
+      print(f"MAE={mae:.2f}, RMSE={rmse:.3f}, Bias={mean_residual(y, p):.2f}")
+      # MAE=6.00, RMSE=9.165, Bias=4.00
+      ```
+
+      `mean_residual` funksiyasına diqqət et: işarəsiz MAE `6.0` olduğu halda, işarəli orta qalıq `+4.0` çıxır — bu bizə deyir ki, model bahalı mənzillərdə qiyməti sistemli şəkildə **aşağı** proqnozlaşdırır.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. Müxtəlif şkalalı hədəflərdə MAE/RMSE-ni birbaşa müqayisə etmək**
+      Mənzil qiymətində $\text{MAE} = 5000\text{ AZN}$, çatdırılma müddətində $\text{MAE} = 4\text{ dəq}$ olması birinci modelin pis olduğu demək deyil. MAE və RMSE hədəfin vahidindən asılıdır; müqayisə həmişə həmin tapşırığın **mean/median baseline**-ı ilə aparılmalıdır.
+
+      **2. Qalıqların (residuals) paylanmasına və seqmentlərinə baxmamaq**
+      Ümumi $\text{MAE} = 3\text{ dəq}$ əla görünə bilər. Amma datanı rayonlara görə qruplaşdıranda məlum olur ki, şəhər mərkəzində xəta $1\text{ dəq}$, şəhərkənarı qəsəbələrdə isə $25\text{ dəq}$-dir! Həmişə $e_i = y_i - \hat{y}_i$ qalıqlarını əsas biznes seqmentlərinə görə yoxla.
+
+      **3. MSE ilə RMSE-ni qarışdırmaq**
+      `mean_squared_error(y, y_pred)` funksiyası kök alınmamış **MSE** qaytarır. Əgər $\text{MSE} = 100\text{ dəq}^2$ alıb hesabatda *"modelimiz orta hesabla 100 dəqiqə yanılır"* desən, xətanı 10 dəfə şişirtmiş olarsan (əslində $\text{RMSE} = \sqrt{100} = 10\text{ dəq}$-dir).
+  - id: engineering-tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Training Loss vs Evaluation Metric:** MSE-nin törəməsi ($2(y_i - \hat{y}_i)$) hər yerdə kəsilməz və hamardır, ona görə də gradient descent ilə optimizasiya üçün çox rahatdır. MAE-nin törəməsi isə $0$ nöqtəsində kəsilir ($\pm 1$). Praktikada tez-tez hər ikisinin üstünlüyünü birləşdirən **Huber Loss** (kiçik xətalarda kvadratik, böyük outlier-lərdə xətti) işlədilir.
+      - **Nisbi (faizlə) xəta lazım olanda:** $10\text{ AZN}$-lik məhsulda $5\text{ AZN}$ yanılmaq (50% xəta) ilə $10,000\text{ AZN}$-lik məhsulda $5\text{ AZN}$ yanılmaq (0.05% xəta) eyni deyil. Qiymətlər bir neçə tərtib fərqlənəndə hədəfi loqarifmləmək ($\log(1 + y)$ üzərində RMSE) və ya MAPE işlətmək daha balanslı nəticə verir.
+mastery_criteria:
+  - Verilmiş həqiqi və proqnoz siyahıları üçün MAE, MSE, RMSE və R² dəyərlərini əllə və Python kodu ilə düzgün hesablayırsan
+  - Outlier-lərin olduğu və ya böyük xətaların qəbuledilməz olduğu ssenarilərdə MAE ilə RMSE arasında əsaslandırılmış seçim edirsən
+  - Qalıqları (residuals) hesablayıb modelin hansı seqmentdə aşağı və ya yuxarı proqnoz verdiyini müəyyən edirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-mlrm-rmse-vs-mae
+      type: mcq
+      title: RMSE niyə MAE-dən böyük çıxır?
+      prompt: Eyni validation dəstində modelin $\text{MAE} = 3.2$, $\text{RMSE} = 14.8$ çıxıb. Bu iki rəqəm arasındakı böyük fərq nədən xəbər verir?
+      skills: [ml-regression-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: Bütün nümunələrdə xəta sabit olaraq 3.2-yə bərabərdir
+          feedback: Bütün xətalar sabit 3.2 olsaydı, RMSE də tam 3.2-yə bərabər çıxardı!
+        - id: b
+          text: Model əksər nümunələrdə kiçik xəta edir, lakin az sayda nümunədə çox böyük (outlier) xətalar buraxır və kvadratik cəza RMSE-ni kəskin artırır
+          feedback: Doğru! RMSE böyük tək-tük xətaları kvadrata yüksəltdiyi üçün MAE-dən qat-qat yuxarı sıçrayır.
+        - id: c
+          text: Kodda səhv var, çünki riyazi olaraq həmişə RMSE < MAE olmalıdır
+          feedback: Əksinə, Koshi-Bunyakovski bərabərsizliyinə görə həmişə RMSE >= MAE olur.
+      answer: b
+      explanation: $\text{RMSE} \gg \text{MAE}$ olması qalıqların (residuals) içində kəskin böyük outlier xətaların olduğunun ən sürətli diaqnostik göstəricisidir.
+    - id: q-mlrm-r2-negative
+      type: mcq
+      title: R² = 0 və R² < 0 nə deməkdir?
+      prompt: Test dəstində öyrətdiyin reqressiya modelinin $R^2$ göstəricisi `-0.15` çıxıb. Bunun düzgün şərhi nədir?
+      skills: [ml-regression-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: Modelin kvadratik xətası (MSE), hər kəsə sadəcə sabit ortalama ($\bar{y}$) deyən axmaq baseline-ın xətasından belə 15% daha pisdir
+          feedback: Doğru! R² = 0 mean baseline səviyyəsidir; mənfi R² modelin mean baseline-a belə uduzduğunu göstərir.
+        - id: b
+          text: Model proqnozlarının 15%-i mənfi ədədlərdir
+          feedback: R² proqnozların işarəsini yox, baseline-a nisbətən izah olunan dispersiyanı ölçür.
+        - id: c
+          text: R² heç vaxt mənfi ola bilməz, yalnız [0, 1] aralığında olur
+          feedback: Test dəstində və ya intercept-siz modellərdə MSE_model > MSE_baseline olduqda R² mənfi çıxa bilər!
+      answer: a
+      explanation: "$R^2 = 1 - \\frac{\\text{MSE}_{\\text{model}}}{\\text{MSE}_{\\text{baseline}}}$ düsturuna görə $\\text{MSE}_{\\text{model}} > \\text{MSE}_{\\text{baseline}}$ olduqda $R^2 < 0$ alınır."
+    - id: q-mlrm-units
+      type: mcq
+      title: Hansı metriklər hədəflə eyni ölçü vahidindədir?
+      prompt: "Hədəf dəyişəni $y$ **dəqiqə** ilə ölçülürsə, aşağıdakı metriklərdən hansılarının ölçü vahidi də **dəqiqə**-dir?"
+      skills: [ml-regression-metrics]
+      category: ml-metric
+      options:
+        - id: a
+          text: Yalnız MSE və R²
+          feedback: MSE dəqiqə² vahidindədir, R² isə ölçüsüzdür (vahidi yoxdur).
+        - id: b
+          text: MAE və RMSE
+          feedback: Doğru! Həm mütləq xəta ortası (MAE), həm də kvadrat kök alınmış MSE (RMSE) birbaşa dəqiqə ilə ifadə olunur.
+        - id: c
+          text: Yalnız R²
+          feedback: R² nisbət olduğu üçün ölçü vahidi yoxdur.
+      answer: b
+      explanation: MAE $|y - \hat{y}|$, RMSE isə $\sqrt{\frac{1}{n}\sum (y - \hat{y})^2}$ olduğu üçün hər ikisi orijinal hədəfin vahidini ($y$) saxlayır.
+    - id: q-mlrm-calc-mae
+      type: numeric
+      title: 3 nöqtə üçün MAE hesabla
+      prompt: |
+        Üç sifariş üçün həqiqi çatdırılma müddətləri $y = [20, 30, 50]$ dəqiqə, modelin proqnozları isə $\hat{y} = [25, 28, 41]$ dəqiqədir.
+
+        Bu modelin **MAE** (Mean Absolute Error) dəyərini hesabla.
+      skills: [ml-regression-metrics]
+      category: ml-metric
+      answer: 5.333
+      tolerance: 0.02
+      explanation: "Mütləq xətalar: $|20-25|=5$, $|30-28|=2$, $|50-41|=9$. Cəm $= 5 + 2 + 9 = 16$. $\\text{MAE} = 16 / 3 \\approx 5.333$."
+exercises:
+  - id: ex-mlrm-mae-and-rmse
+    type: code
+    title: mae_and_rmse funksiyasını müqaviləyə uyğun yaz
+    prompt: |
+      Reqressiya proqnozlarını qiymətləndirən `mae_and_rmse(y_true, y_pred)` funksiyasını pure Python-da yaz:
+
+      - `(mae, rmse)` tuple-nı (`float, float`) qaytarır:
+        $$\text{MAE} = \frac{1}{n}\sum_{i=1}^n |y_i - \hat{y}_i|, \qquad \text{RMSE} = \sqrt{\frac{1}{n}\sum_{i=1}^n (y_i - \hat{y}_i)^2}$$
+      - Əgər `y_true` və ya `y_pred` boşdursa və ya uzunluqları fərqlidirsə, `ValueError` qaldır.
+    skills: [ml-regression-metrics]
+    category: python
+    difficulty: 1
+    hints:
+      - "Əvvəlcə `if not y_true or len(y_true) != len(y_pred): raise ValueError(...)` yoxlamasını yaz."
+      - "`math.sqrt` funksiyasından istifadə et."
+    starter_code: |
+      import math
+
+
+      def mae_and_rmse(
+          y_true: list[float], y_pred: list[float]
+      ) -> tuple[float, float]:
+          # TODO: (mae, rmse) hesabla və qaytar
+          pass
+    tests:
+      - name: 4 nöqtəli outlier nümunəsi (MAE=6.0, RMSE=sqrt(84))
+        code: |
+          y = [100.0, 150.0, 200.0, 350.0]
+          p = [102.0, 148.0, 198.0, 332.0]
+          mae, rmse = mae_and_rmse(y, p)
+          assert abs(mae - 6.0) < 1e-9, f"MAE 6.0 olmalı idi, alınan {mae}"
+          assert abs(rmse - math.sqrt(84.0)) < 1e-9, f"RMSE səhvdir: {rmse}"
+      - name: Sabit xətada MAE == RMSE
+        code: |
+          mae, rmse = mae_and_rmse([10.0, 20.0], [13.0, 17.0])
+          assert abs(mae - 3.0) < 1e-9 and abs(rmse - 3.0) < 1e-9
+      - name: Mükəmməl proqnozda (0.0, 0.0)
+        code: |
+          assert mae_and_rmse([1.5, -2.0], [1.5, -2.0]) == (0.0, 0.0)
+      - name: Boş list və ya fərqli uzunluqda ValueError
+        code: |
+          for bad in [([], []), ([1.0, 2.0], [1.0]), ([], [1.0])]:
+              try:
+                  mae_and_rmse(bad[0], bad[1])
+                  assert False, f"{bad} üçün ValueError qaldırılmalı idi"
+              except ValueError:
+                  pass
+    solution: |
+      import math
+
+
+      def mae_and_rmse(
+          y_true: list[float], y_pred: list[float]
+      ) -> tuple[float, float]:
+          if not y_true or len(y_true) != len(y_pred):
+              raise ValueError("y_true and y_pred must have equal non-zero length")
+          n = len(y_true)
+          mae = sum(abs(yt - yp) for yt, yp in zip(y_true, y_pred)) / n
+          mse = sum((yt - yp) ** 2 for yt, yp in zip(y_true, y_pred)) / n
+          return mae, math.sqrt(mse)
+    explanation: |
+      Funksiya əvvəlcə müqavilənin ilkin şərtlərini (boş olmamaq və bərabər uzunluq) yoxlayır, sonra isə tərifə uyğun olaraq MAE və $\sqrt{\text{MSE}}$ qaytarır.
+  - id: ex-mlrm-numeric-rmse
+    type: numeric
+    title: 4 nöqtə üzrə RMSE hesabla
+    prompt: |
+      Dörd müşahidə üzrə modelin buraxdığı qalıq xətalar ($e_i = y_i - \hat{y}_i$) belədir:
+      $$e = [0, 0, 0, 10]$$
+
+      *(Yəni ilk 3 nümunədə model tam dəqiq tapıb, 4-cü nümunədə isə 10 vahid yanılıb.)*
+      Bu modelin **RMSE** dəyərini hesabla.
+    skills: [ml-regression-metrics]
+    category: ml-metric
+    difficulty: 1
+    answer: 5.0
+    tolerance: 0.01
+    hints:
+      - "Əvvəlcə kvadratların ortalamasını tap: $\\text{MSE} = \\frac{0^2 + 0^2 + 0^2 + 10^2}{4}$."
+      - "Sonra alınan MSE-dən kvadrat kök al: $\\text{RMSE} = \\sqrt{\\text{MSE}}$."
+    explanation: "$\\text{MSE} = \\frac{0 + 0 + 0 + 100}{4} = 25$. Oradan $\\text{RMSE} = \\sqrt{25} = 5.0$. Müqayisə üçün: eyni nöqtələrdə $\\text{MAE} = \\frac{10}{4} = 2.5$ olardı — tək outlier RMSE-ni MAE-dən tam 2 dəfə böyük çıxardı!"
+references:
+  - title: scikit-learn — Regression metrics
+    url: https://scikit-learn.org/stable/modules/model_evaluation.html#regression-metrics
+    note: MAE, MSE, RMSE və R² funksiyalarının rəsmi sənədləri
+  - title: Chai & Draxler — Root mean square error (RMSE) or mean absolute error (MAE)?
+    url: https://gmd.copernicus.org/articles/7/1247/2014/
+    note: Elmi və mühəndislik modellərində RMSE vs MAE müzakirəsi

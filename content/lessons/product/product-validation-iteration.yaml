@@ -1,0 +1,398 @@
+id: product-validation-iteration
+track: product
+module: product-validation
+title: "Ödəmə İstəyi (WTP), Build vs API İqtisadiyyatı, Məxfilik Yoxlaması və Kohort İterasiyası"
+summary: "Aldadıcı 'vanity' metriklərlə real ödəmə öhdəliyini (Willingness to Pay) fərqləndirməyi, kommersiya API-si ilə öz GPU serverini (Self-Hosting) kəsişmə nöqtəsinə görə müqayisə etməyi, buraxılış öncəsi Məxfilik/Təhlükəsizlik siyahısını və kohort saxlama (retention) əsasında məhsul iterasiyasını öyrənəcəksən."
+level: core
+estimated_minutes: [45, 65]
+prerequisites: [product-problem-mvp-costs]
+next: null
+skills: [product-discovery, product-mvp-economics, llm-security]
+objectives:
+  - Vanity metrikləri (bəyənmələr, öhdəliksiz waitlist) real Willingness to Pay (ödənişli pilot, depozit, LOI, data inteqrasiyası) siqnallarından ayırmaq
+  - Kommersiya LLM API-si ilə öz GPU serverində Self-Hosting arasındakı xərc kəsişmə nöqtəsini (breakeven token volume) hesablamaq
+  - Buraxılış öncəsi Məxfilik, Hüquq və Təhlükəsizlik (Zero Data Retention, PII silinməsi, yüksək riskli qərarlarda human override) yoxlamasını tətbiq etmək
+  - İstifadəçi kohort saxlama (retention) əyrisi və uğursuz sorğu logları əsasında növbəti mühəndislik iterasiyasını prioritetləşdirmək
+why_it_matters: |
+  AI startaplarının əksəriyyəti modelin dəqiqliyi aşağı olduğu üçün deyil, **heç kimin pul ödəmək istəmədiyi bir problemi həll etdiyi** və ya **vaxtından əvvəl bahalı GPU klasteri qurub büdcəni yandırdığı** üçün bağlanır.
+
+  Sosial şəbəkədə 5,000 bəyənmə və ya pulsuz gözləmə siyahısına (waitlist) 1,000 e-poçt toplanması biznes sübutu deyil — çünki istifadəçi heç nə itirmir ("skin in the game" yoxdur). Digər tərəfdən, ilk gündən ayda \$1,500-lıq xüsusi GPU server icarəyə götürmək, halbuki real trafik API ilə ayda cəmi \$40 tutardı, mühəndis eqosunun maliyyə səhvidir. Bu dərs texniki qərarları birbaşa məhsul həyatda qalması ilə birləşdirir.
+terms:
+  - term: Willingness to Pay (WTP)
+    definition: Müştərinin problemi həll etmək üçün real resurs (pul, depozit, rəsmi niyyət məktubu — LOI, və ya mühəndis/data inteqrasiya vaxtı) xərcləmək öhdəliyi.
+  - term: Vanity Metric (Aldadıcı metrik)
+    definition: Gözəl görünən, lakin real istifadə və ya gəlirə çevrilməyən göstəricilər (LinkedIn bəyənmələri, öhdəliksiz e-poçt qeydiyyatı, birdəfəlik maraq klikləri).
+  - term: Breakeven Token Volume (Kəsişmə həcmi)
+    definition: Pay-per-token kommersiya API xərcinin sabit GPU server + DevOps saxlama xərcinə bərabərləşdiyi aylıq token həcmi.
+  - term: Zero Data Retention (ZDR)
+    definition: LLM API provayderinin göndərilən sorğu və cavabları öz serverlərində saxlamaması və model təlimində istifadə etməməsi barədə hüquqi/texniki müqavilə.
+  - term: Cohort Retention
+    definition: Eyni həftədə və ya ayda qoşulan istifadəçi qrupunun (kohortun) 1, 2, 4 və 8 həftə sonra məhsula nə dərəcədə geri qayıtdığını ölçən əsas məhsul sağlamlığı metriki.
+  - term: Data Flywheel (Data Çarxı)
+    definition: İstifadəçilərin məhsul daxilindəki düzəlişlərinin, thumbs-up/down və seçimlərinin toplanaraq golden eval və SFT dəstini avtomatik yaxşılaşdırması dövrü.
+sections:
+  - id: wtp-and-build-vs-buy
+    kind: explanation
+    title: "Real Ödəmə İstəyi (WTP) və Build vs API Arxitekturası"
+    body: |
+      ### 1. Vanity Metrics vs Real Willingness to Pay
+      İnsanlar nəzakətli olmaq üçün *"Çox maraqlı AI ideyasıdır, çıxanda işlədərəm"* deyirlər. Məhsul validasiyasında yalnız **xərci olan siqnallar** sayılır:
+
+      | Zəif Siqnal (Vanity / Nəzakət) | Güclü Siqnal (Real Öhdəlik / WTP) |
+      |---|---|
+      | "Çıxanda mənə xəbər et" (pulsuz e-poçt) | Geri qaytarıla bilən \$100 depozit və ya 3 aylıq ödənişli pilot müqaviləsi |
+      | Sorğuda "Bəli, ayda \$50 verərəm" cavabı | Qiymət və uğur meyarları yazılmış imzalı Niyyət Məktubu (LOI) |
+      | Demo videoya 10,000 baxış | Müştərinin öz real (anonimləşdirilmiş) sənədlərini test üçün təqdim etməsi və həftədə 1 saat rəy görüşünə vaxt ayırması |
+
+      ---
+
+      ### 2. Kommersiya API-si vs Öz GPU Serverin (Self-Hosting)
+      Yeni AI məhsulunda **95% hallarda Kommersiya API-si ilə başlamaq** düzgün mühəndislik qərarıdır:
+      - **Kommersiya API (Pay-per-token):** Sıfır sabit GPU xərci, sıfır DevOps yükü, ən güclü modellərə dərhal çıxış. Trafik az olanda ayda \$10–\$200 tutur.
+      - **Self-Hosting (vLLM / TGI + Xüsusi GPU + Mühəndis vaxtı):** GPU server trafik olmasa belə 7/24 pul yazır (`gpu_hourly_usd * hours_per_month`), üstəlik model yenilənməsi, autoscaling və on-call üçün **əməliyyat yükü (`ops_overhead_usd`)** var.
+
+      **Nə vaxt Self-Hosting (və ya Fine-tuned açıq model) məntiqlidir?**
+      1. **Həcm kəsişməsi:** Aylıq token həcmi kəsişmə nöqtəsini (`breakeven_tokens_millions`) sabit şəkildə keçəndə.
+      2. **Sərt Data Residency / On-Premise tələbi:** Dövlət, müdafiə və ya bank qanunvericiliyi məlumatın ölkə və ya daxili şəbəkə xaricinə çıxmasını qəti qadağan edəndə.
+      3. **Ultra-aşağı latency / xüsusi LoRA:** Kiçik 3B–8B model xüsusi dar tapşırıqda böyük API-ni əvəz edə biləndə.
+  - id: restaurant-kitchen-analogy
+    kind: analogy
+    title: "Mental model: food-truck ilə başlamaq vs ilk gündən çörək zavodu tikmək"
+    body: |
+      Yeni sendviç reseptini bazarda yoxlamaq istəyən sahibkarı təsəvvür et:
+
+      - **Vanity metric:** Küçədə keçənlərdən *"Dadlı sendviç xoşlayırsınız?"* soruşmaq. Hamı "bəli" deyəcək, amma bu heç kimin sənin sendviçini alacağını sübut etmir.
+      - **Real WTP:** Kiçik bir piştaxtada *"Sendviç 8 AZN — indi sifariş ver"* yazmaq və insanların həqiqətən cüzdanını çıxarmasını görmək.
+      - **API vs Self-Hosting:** Gündə 30 sendviç satarkən çörəyi hazır topdansatış fırınından (**Kommersiya API**) ədədlə almaq ən ağıllı yoldur. İlk gündən \$200,000-lıq sənaye çörək zavodu (**7/24 GPU klasteri**) tiksən, resepti dəyişmək lazım olanda həm batacaqsan, həm də zavodun elektrik və usta xərci səni müflis edəcək. Zavodu yalnız gündəlik satış 10,000 ədədi keçəndə tikirlər!
+  - id: validation-lifecycle-diagram
+    kind: diagram
+    title: "Validasiya, Arxitektura seçimi və Kohort İterasiya dövrü"
+    body: |
+      ```mermaid
+      flowchart TD
+        A["Problem Hipotezi"] --> B{"Real WTP Testi: Ödənişli Pilot / Depozit / LOI"}
+        B -- "Yalnız nəzakətli tərif (Vanity)" --> C["Problemi və ya hədəf seqmenti dəyiş (Pivot)"]
+        B -- "Ödəniş və data öhdəliyi var" --> D["Privacy & Safety Yoxlaması (ZDR, PII, Human Override)"]
+        D --> E["MVP: Kommersiya API + Golden Eval"]
+        E --> F["Həftəlik Kohort Retention & Error Log Təhlili"]
+        F --> G{"Aylıq token həcmi > Breakeven və ya On-Prem tələbi?"}
+        G -- "Xeyr" --> E
+        G -- "Bəli" --> H["Distillasiya / LoRA + Self-Hosted GPU"]
+      ```
+
+      Bu axında **Self-Hosting** birinci addım deyil — məhsul-bazar uyğunluğu (Product-Market Fit) və sabit trafik sübut olunduqdan sonrakı optimallaşdırma addımıdır.
+  - id: breakeven-worked-example
+    kind: worked_example
+    title: "Ədədi nümunə: Kommersiya API vs Self-Hosted GPU kəsişmə hesabı"
+    body: |
+      Startapın müştəri dəstəyi AI məhsulu ayda orta hesabla **180 milyon token** (`monthly_tokens_millions = 180`) emal edir. İki variantı müqayisə edək:
+
+      - **Variant A — Kommersiya API-si:**
+        Qiymət (giriş/çıxış qarışıq orta): $p_{\text{API}} = \$2.50$ / 1M token.
+        $$C_{\text{API}} = 180 \times 2.50 = \$450.00 \text{ / ay}$$
+
+      - **Variant B — Öz GPU Serverində Self-Hosting (7/24):**
+        - GPU saatlıq qiyməti: $c_{\text{GPU}} = \$1.20 \text{ / saat}$
+        - Aylıq saat: $H = 730 \text{ saat}$
+        - Mühəndis/DevOps saxlama və monitorinq yükü: $C_{\text{ops}} = \$350.00 \text{ / ay}$
+        $$C_{\text{self}} = (1.20 \times 730) + 350.00 = 876.00 + 350.00 = \$1,226.00 \text{ / ay}$$
+
+      - **Kəsişmə nöqtəsi (Breakeven token həcmi):**
+        Öz serverimizin kommersiya API-si ilə eyni xərcə düşməsi üçün aylıq neçə milyon token lazımdır?
+        $$T_{\text{breakeven}} = \frac{C_{\text{self}}}{p_{\text{API}}} = \frac{1226.00}{2.50} = 490.40 \text{ milyon token / ay}$$
+
+      **Qərar:** Cari həcm ($180\text{M}$) kəsişmə nöqtəsindən ($490.4\text{M}$) xeyli aşağı olduğu üçün (`$450 <= $1,226`), tövsiyə **`"api"`**-dir. Self-hosting-ə keçmək ayda **\$776 əlavə zərər** yaradardı!
+  - id: breakeven-and-privacy-code
+    kind: code
+    title: "Kod: API vs Self-Host İqtisadi Kalkulyatoru və Buraxılış Öncəsi Privacy Gate"
+    body: |
+      ```python
+      def compare_api_vs_selfhost(
+          monthly_tokens_millions: float,
+          api_price_per_1m: float,
+          gpu_hourly_usd: float,
+          hours_per_month: int,
+          ops_overhead_usd: float,
+      ) -> dict[str, float | str]:
+          """Compare monthly commercial API cost vs dedicated GPU self-hosting cost."""
+          if (
+              monthly_tokens_millions < 0
+              or api_price_per_1m <= 0
+              or gpu_hourly_usd < 0
+              or hours_per_month <= 0
+              or ops_overhead_usd < 0
+          ):
+              raise ValueError("Invalid cost or usage parameters.")
+
+          api_cost_usd = round(monthly_tokens_millions * api_price_per_1m, 2)
+          selfhost_cost_usd = round(gpu_hourly_usd * hours_per_month + ops_overhead_usd, 2)
+          breakeven_tokens_millions = round(selfhost_cost_usd / api_price_per_1m, 2)
+          recommendation = "api" if api_cost_usd <= selfhost_cost_usd else "selfhost"
+
+          return {
+              "api_cost_usd": api_cost_usd,
+              "selfhost_cost_usd": selfhost_cost_usd,
+              "breakeven_tokens_millions": breakeven_tokens_millions,
+              "recommendation": recommendation,
+          }
+
+
+      def prelaunch_privacy_check(config: dict[str, bool]) -> list[str]:
+          """Return missing mandatory privacy & safety controls before launching an AI product."""
+          required = [
+              "zero_data_retention_enabled",
+              "pii_redaction_active",
+              "user_data_deletion_endpoint",
+              "human_override_for_high_stakes",
+          ]
+          return [key for key in required if not config.get(key, False)]
+
+
+      print(compare_api_vs_selfhost(180.0, 2.5, 1.2, 730, 350.0))
+      # {'api_cost_usd': 450.0, 'selfhost_cost_usd': 1226.0, 'breakeven_tokens_millions': 490.4, 'recommendation': 'api'}
+      ```
+
+      **Niyə `ops_overhead_usd` həmişə hesaba qatılmalıdır?**
+      Çox vaxt mühəndislər yalnız bulud GPU fakturasını (`$876`) hesablayıb öz vaxtlarını pulsuz sayırlar. Halbuki vLLM yenilənməsi, CUDA sürücü xətaları və gecə çökmələrinə sərf olunan ayda 10–20 saat mühəndis vaxtı startap üçün ən bahalı resursdur.
+  - id: common-mistakes
+    kind: mistakes
+    title: Ən çox edilən səhvlər
+    body: |
+      **1. "Dost-tanış rəyi" və pulsuz waitlist-i bazar tələbi saymaq**
+      Heç bir maliyyə və ya iş axını öhdəliyi tələb etməyən qeydiyyatların 90%-dən çoxu ödənişli mərhələdə aktivləşmir. İlk 5 müştəridən ən azı kiçik ödənişli pilot tələb et.
+
+      **2. İstehlakçı (Consumer) pulsuz çat hesabının API şərtlərini B2B müştəri datasına tətbiq etmək**
+      Bəzi standart API və ya veb çat planlarında göndərilən məlumatlar provayderin gələcək modellərini öyrətmək üçün saxlanıla bilər. B2B müştəri sənədləri üçün mütləq **Zero Data Retention (ZDR) / Enterprise API** şərtləri aktiv edilməlidir.
+
+      **3. Ümumi qeydiyyat sayına baxıb düşən Cohort Retention-ı görməzdən gəlmək**
+      Reklamla hər həftə 500 yeni istifadəçi gətirə bilərsən (ümumi qeydiyyat qrafiki yuxarı gedir), amma 2-ci həftədə həmin istifadəçilərin yalnız 3%-i qalırsa ("leaky bucket" — deşik vedrə), məhsul real dəyər yaratmır.
+
+      **4. Yüksək riskli qərarlarda "Human Override" (İnsan ləğvi/düzəlişi) qoymamaq**
+      Kredit rəddi, tibbi triaj, hüquqi bildiriş və ya hesab bloklanması kimi qərarlarda istifadəçiyə və ya operatora AI qərarını nəzərdən keçirib ləğv etmək mexanizmi verməmək həm hüquqi məsuliyyət, həm də müştəri itkisi yaradır.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: Engineering trade-offs və real məhdudiyyətlər
+    body: |
+      - **Vendor Lock-in vs Time-to-Market:** Kommersiya API-si ilə məhsulu 3 günə bazara çıxarmaq mümkündür, lakin provayder qiyməti dəyişdikdə və ya modeli deprecate etdikdə risk yaranır. Praktik kompromis: ilk gündən kommersiya API-si işlət, amma kodda model çağırışlarını tək bir nazik interfeys (`LLMClient` adapteri) arxasında gizlət və bütün uğurlu nümunələri gələcək distillasiya üçün strukturlaşdırılmış logda saxla.
+      - **Sərt PII Redaction vs Kontekst Keyfiyyəti:** Bütün adları, tarixləri və məbləğləri kor-koranə `[REDACTED]` ilə əvəz etsən, model müqavilədəki iki tərəfi bir-birindən ayıra bilməz. Daha ağıllı həll: **Consistent Pseudonymization** — `Əli Məmmədov -> [PERSON_1]`, `Vəli Quliyev -> [PERSON_2]` şəklində əvəzləyib cavab qayıtdıqdan sonra yerli olaraq geri bərpa etmək.
+      - **Sürətli İterasiya vs Sabitlik:** Erkən mərhələdə hər gün prompt və UI dəyişir. Amma müştərinin dünən bəyəndiyi funksiyanı bu gün təsadüfən sındırmamaq üçün ən azı 30–50 real müştəri sorğusundan ibarət kiçik reqressiya dəsti hər buraxılışda işləməlidir.
+mastery_criteria:
+  - Müxtəlif startap eksperimentləri arasında ən güclü Willingness to Pay siqnalını əsaslandıraraq seçə bilirsən
+  - Kommersiya API-si və Self-Hosting xərclərini, kəsişmə nöqtəsini (`breakeven_tokens_millions`) və tövsiyəni hesablayan kodu yaza bilirsən
+  - Buraxılış öncəsi Məxfilik/Təhlükəsizlik siyahısını (ZDR, PII, silinmə hüququ, human override) və kohort retention təhlilini tətbiq edə bilirsən
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-prodval-vanity-vs-wtp
+      type: mcq
+      title: Vanity Metric vs Real Willingness to Pay
+      prompt: "Hüquq şirkətləri üçün AI müqavilə yoxlayıcısı quran komanda 3 fərqli nəticə əldə edib. Hansı nəticə məhsul üçün real Ödəmə İstəyinin (Willingness to Pay) ən güclü sübutudur?"
+      skills: [product-discovery]
+      category: concept
+      options:
+        - id: a
+          text: LinkedIn-də paylaşılan demo videosunun 25,000 baxış və 400 'Möhtəşəm!' rəyi toplaması
+          feedback: Sosial şəbəkə bəyənmələri sıfır xərc tələb edən vanity metrikdir; bəyənənlərin əksəriyyəti hədəf alıcı belə deyil.
+        - id: b
+          text: 2 hüquq firmasının ayda 300 USD ödənişli 6 həftəlik pilot müqaviləsi imzalaması və test üçün 500 anonimləşdirilmiş müqavilə təqdim etməsi
+          feedback: Doğru! Həm pul ödənişi, həm də real iş məlumatlarının inteqrasiyasına vaxt ayrılması ən güclü WTP sübutudur.
+        - id: c
+          text: Pulsuz landing səhifəsində 800 tələbənin e-poçt ünvanını buraxması
+          feedback: Hədəf müştəri hüquq firmalarıdır, həm də öhdəliksiz e-poçt siyahısı ödəniş qabiliyyətini göstərmir.
+      answer: b
+      explanation: Real WTP yalnız müştəri pul, rəsmi müqavilə və ya inteqrasiya vaxtı ("skin in the game") qoyduqda təsdiqlənir.
+    - id: q-prodval-breakeven-math
+      type: numeric
+      title: API vs Self-Hosting kəsişmə nöqtəsi (Breakeven)
+      prompt: "Öz GPU serverini 7/24 işlətmək (GPU + DevOps yükü daxil) ayda sabit **900 USD** tutur. Kommersiya API-sinin qiyməti isə 1 milyon token üçün **3.00 USD**-dir. Öz serverinin API-dən daha ucuz başa gəlməsi üçün aylıq trafik ən azı neçə **milyon tokeni** keçməlidir?"
+      skills: [product-mvp-economics]
+      category: math
+      answer: 300
+      tolerance: 0.1
+      unit: "milyon token"
+      hints:
+        - "Kəsişmə düsturu: $\\text{breakeven} = \\text{selfhost\\_cost} / \\text{api\\_price\\_per\\_1m}$."
+      explanation: "$900 / 3.00 = 300$ milyon token/ay. Aylıq həcm 300M tokendən az olduqda pay-per-token API daha sərfəlidir."
+    - id: q-prodval-privacy-checklist
+      type: multi
+      title: B2B AI buraxılışı öncəsi Məxfilik və Təhlükəsizlik tələbləri
+      prompt: "Klinikalara pasiyent qeydlərini xülasə edən B2B AI məhsulunu canlıya çıxarmazdan əvvəl hansı tədbirlər mütləq yerinə yetirilməlidir? Düzgün olanların hamısını seç."
+      skills: [llm-security, product-discovery]
+      category: production
+      options:
+        - id: a
+          text: LLM provayderi ilə Zero Data Retention (ZDR) / təlimdə istifadə etməmə müqaviləsini aktivləşdirmək və ya təsdiqlənmiş izolyasiyalı mühitdən istifadə etmək
+          feedback: Bəli — həssas tibbi məlumatlar üçüncü tərəfin ümumi model təliminə sızmamalıdır.
+        - id: b
+          text: Həkimin AI xülasəsini redaktə etməsi və ya rədd etməsi üçün məcburi Human Override / təsdiq addımı qoymaq
+          feedback: Bəli — klinik qərarlarda AI yalnız köməkçi qaralama verir, son məsuliyyət və təsdiq həkimdə olmalıdır.
+        - id: c
+          text: Müştəri tələb etdikdə onun məlumatlarını həm əsas bazadan, həm də vektor indeksindən və keşdən tam silən mexanizm qurmaq
+          feedback: Bəli — məlumatların silinməsi hüququ təkcə SQL cədvəlini yox, embedding və keş təbəqələrini də əhatə etməlidir.
+        - id: d
+          text: Debug rahatlığı üçün bütün pasiyent adlarını və diaqnozlarını açıq mətnlə ictimai log kanalına yazmaq
+          feedback: Xeyr — bu, kobud məxfilik və qanunvericilik pozuntusudur; loglarda PII mütləq maskalanmalıdır.
+      answers: [a, b, c]
+      explanation: ZDR, PII qorunması, vektor/keş daxil tam silinmə mexanizmi və yüksək riskli çıxışlarda insan təsdiqi buraxılış öncəsi məcburi təməldir.
+    - id: q-prodval-cohort-retention
+      type: mcq
+      title: Kohort Retention və növbəti iterasiya qərarı
+      prompt: "Məhsul analitikası göstərir ki, hər həftə 300 yeni istifadəçi qeydiyyatdan keçib ilk sorğunu göndərir, lakin 1-ci həftənin sonunda kohort retention 8%-ə düşür. Error logların təhlili göstərir ki, istifadəçilərin 45%-i PDF cədvəllərindən səhv rəqəm çıxdığı üçün məhsulu tərk edir. Komanda növbəti 2 həftədə nəyə fokuslanmalıdır?"
+      skills: [product-discovery, product-mvp-economics]
+      category: concept
+      options:
+        - id: a
+          text: Reklam büdcəsini 3 dəfə artırmaq ki, həftədə 900 yeni istifadəçi gəlsin
+          feedback: Deşik vedrəyə (8% retention) daha çox su tökmək yalnız marketinq büdcəsini yandırır.
+        - id: b
+          text: PDF cədvəl parsinqi (parsing) və rəqəm ekstraksiyası xətalarını golden eval dəstinə əlavə edib əsas keyfiyyət problemini həll etmək, sonra yeni kohortun 1-ci həftə retention-ını yenidən ölçmək
+          feedback: Doğru! Kohort itkisinin əsas kök səbəbi (PDF cədvəl xətası) tapılıb; əvvəlcə vedrədəki deşik təmir olunmalıdır.
+        - id: c
+          text: Loqotipin rəngini dəyişmək və qaranlıq rejim (dark mode) əlavə etmək
+          feedback: İstifadəçilər dizayna görə yox, əsas funksiyanın səhv rəqəm çıxarmasına görə gedirlər.
+      answer: b
+      explanation: Kohort retention aşağı olduqda yeni istifadəçi cəlb etmək əvəzinə error loglarındakı əsas uğursuzluq rejimi düzəldilməli və növbəti kohortda retention artımı yoxlanmalıdır.
+exercises:
+  - id: ex-prodval-api-vs-selfhost
+    type: code
+    title: "Build vs API: Aylıq xərc və Breakeven kalkulyatoru"
+    prompt: |
+      Kommersiya LLM API-si ilə öz GPU serverində Self-Hosting variantını müqayisə edən `compare_api_vs_selfhost` funksiyasını tamamla:
+
+      ```python
+      def compare_api_vs_selfhost(
+          monthly_tokens_millions: float,
+          api_price_per_1m: float,
+          gpu_hourly_usd: float,
+          hours_per_month: int,
+          ops_overhead_usd: float,
+      ) -> dict
+      ```
+
+      **Müqavilə (Contract):**
+      1. Əgər `monthly_tokens_millions < 0`, `api_price_per_1m <= 0`, `gpu_hourly_usd < 0`, `hours_per_month <= 0` və ya `ops_overhead_usd < 0` olarsa → `ValueError` qaldır.
+      2. `api_cost_usd = round(monthly_tokens_millions * api_price_per_1m, 2)`
+      3. `selfhost_cost_usd = round(gpu_hourly_usd * hours_per_month + ops_overhead_usd, 2)`
+      4. `breakeven_tokens_millions = round(selfhost_cost_usd / api_price_per_1m, 2)`
+      5. Əgər `api_cost_usd <= selfhost_cost_usd` olarsa `"recommendation": "api"`, əks halda `"recommendation": "selfhost"`.
+      6. `{"api_cost_usd": float, "selfhost_cost_usd": float, "breakeven_tokens_millions": float, "recommendation": str}` qaytar.
+    skills: [product-mvp-economics]
+    category: python
+    difficulty: 1
+    hints:
+      - "Əvvəlcə mənfi dəyərlər və sıfıra bölmə (`api_price_per_1m <= 0`, `hours_per_month <= 0`) üçün `ValueError` yoxlamasını yaz."
+      - "`selfhost_cost_usd = round(gpu_hourly_usd * hours_per_month + ops_overhead_usd, 2)` və `breakeven_tokens_millions = round(selfhost_cost_usd / api_price_per_1m, 2)`."
+      - "`api_cost_usd <= selfhost_cost_usd` olduqda `'api'`, əks halda `'selfhost'` qaytar."
+    starter_code: |
+      def compare_api_vs_selfhost(
+          monthly_tokens_millions: float,
+          api_price_per_1m: float,
+          gpu_hourly_usd: float,
+          hours_per_month: int,
+          ops_overhead_usd: float,
+      ) -> dict:
+          # TODO: API vs Self-Host xərc və breakeven hesabını yaz
+          return {
+              "api_cost_usd": 0.0,
+              "selfhost_cost_usd": 0.0,
+              "breakeven_tokens_millions": 0.0,
+              "recommendation": "api",
+          }
+    tests:
+      - name: "Erkən mərhələ (180M token) — API daha sərfəlidir"
+        code: |
+          res = compare_api_vs_selfhost(180.0, 2.5, 1.2, 730, 350.0)
+          assert res == {
+              "api_cost_usd": 450.0,
+              "selfhost_cost_usd": 1226.0,
+              "breakeven_tokens_millions": 490.4,
+              "recommendation": "api",
+          }, f"Alınan: {res}"
+      - name: "Yüksək həcm (800M token) — Self-Hosting daha sərfəlidir"
+        code: |
+          res = compare_api_vs_selfhost(800.0, 2.5, 1.2, 730, 350.0)
+          assert res["api_cost_usd"] == 2000.0
+          assert res["selfhost_cost_usd"] == 1226.0
+          assert res["breakeven_tokens_millions"] == 490.4
+          assert res["recommendation"] == "selfhost", f"Alınan: {res}"
+      - name: "Bərabər xərc nöqtəsində (api_cost == selfhost_cost) API tövsiyə olunur"
+        code: |
+          res = compare_api_vs_selfhost(500.0, 2.0, 1.0, 700, 300.0)
+          assert res["api_cost_usd"] == 1000.0
+          assert res["selfhost_cost_usd"] == 1000.0
+          assert res["breakeven_tokens_millions"] == 500.0
+          assert res["recommendation"] == "api"
+      - name: "Yanlış parametrlər üçün ValueError"
+        code: |
+          for args in [(-10.0, 2.0, 1.0, 730, 100.0), (100.0, 0.0, 1.0, 730, 100.0), (100.0, 2.0, -1.0, 730, 100.0), (100.0, 2.0, 1.0, 0, 100.0), (100.0, 2.0, 1.0, 730, -5.0)]:
+              raised = False
+              try:
+                  compare_api_vs_selfhost(*args)
+              except ValueError:
+                  raised = True
+              assert raised, f"{args} üçün ValueError gözlənilirdi"
+    solution: |
+      def compare_api_vs_selfhost(
+          monthly_tokens_millions: float,
+          api_price_per_1m: float,
+          gpu_hourly_usd: float,
+          hours_per_month: int,
+          ops_overhead_usd: float,
+      ) -> dict:
+          if (
+              monthly_tokens_millions < 0
+              or api_price_per_1m <= 0
+              or gpu_hourly_usd < 0
+              or hours_per_month <= 0
+              or ops_overhead_usd < 0
+          ):
+              raise ValueError("Invalid parameters.")
+
+          api_cost_usd = round(monthly_tokens_millions * api_price_per_1m, 2)
+          selfhost_cost_usd = round(gpu_hourly_usd * hours_per_month + ops_overhead_usd, 2)
+          breakeven_tokens_millions = round(selfhost_cost_usd / api_price_per_1m, 2)
+          recommendation = "api" if api_cost_usd <= selfhost_cost_usd else "selfhost"
+          return {
+              "api_cost_usd": api_cost_usd,
+              "selfhost_cost_usd": selfhost_cost_usd,
+              "breakeven_tokens_millions": breakeven_tokens_millions,
+              "recommendation": recommendation,
+          }
+    explanation: |
+      Bu sadə iqtisadi model startapları erkən mərhələdə lazımsız GPU klasteri xərcindən qoruyur, trafik böyüdükdə isə dəqiq hansı həcmdə (`breakeven_tokens_millions`) öz infrastrukturuna keçməyin sərfəli olduğunu göstərir.
+  - id: ex-prodval-wtp-signals
+    type: mcq
+    title: "Hansı eksperiment real Willingness to Pay sübutudur?"
+    prompt: |
+      Üç startap komandası mühasibatlıq qaimələrini avtomatik emal edən AI agenti üçün bazar validasiyası aparır:
+      - **Komanda A:** 40 mühasiblə söhbət edib *"Belə alət olsa bəyənərdinizmi?"* soruşub və 38 *"Bəli"* cavabı alıb.
+      - **Komanda B:** Landing səhifəsi açıb və 600 pulsuz waitlist e-poçtu toplayıb.
+      - **Komanda C:** 15 şirkətə müraciət edib; onlardan 4-ü ilk ay üçün **\$250 depozit** ödəyib və test üçün son 3 ayın real qaimə arxivini təqdim edib.
+
+      Hansı komanda mühəndislik resurslarını tam MVP-yə yatırmaq üçün **ən güclü validasiya sübutuna** malikdir?
+    skills: [product-discovery, product-mvp-economics]
+    category: concept
+    difficulty: 1
+    hints:
+      - Hansı eksperimentdə müştəri həqiqi pul və məlumat riski ("skin in the game") götürüb?
+      - Nəzakətli "bəli" cavabı və ya pulsuz e-poçt yazmaq müştəriyə nəyə başa gəlir?
+    options:
+      - id: a
+        text: "Komanda A — çünki 40 nəfərdən 38-i müsbət rəy verib (95% bəyənmə)"
+        feedback: Hipotetik suallara verilən nəzakətli 'bəli' cavabı The Mom Test qaydasını pozur və ödəmə öhdəliyi yaratmır.
+      - id: b
+        text: "Komanda B — çünki 600 nəfər ən böyük rəqəmdir"
+        feedback: Pulsuz e-poçt qeydiyyatı vanity metrikdir; heç bir öhdəlik tələb etmir.
+      - id: c
+        text: "Komanda C — çünki 4 şirkət həm real pul depoziti ödəyib, həm də həqiqi qaimə datasını paylaşaraq iş vaxtı sərf edib"
+        feedback: Doğru! 4 ödənişli və data paylaşan pilot müştəri 600 pulsuz e-poçtdan qat-qat güclü bazar sübutudur.
+    answer: c
+    explanation: |
+      B2B AI məhsullarında kiçik sayda (3–5) ödənişli və öz datasını təqdim edən pilot müştəri həm real problemi, həm büdcə mövcudluğunu, həm də ilkin evaluation datasetini təmin edir.
+references:
+  - title: "The Mom Test — Rob Fitzpatrick"
+    url: https://www.momtestbook.com/
+    note: Yalançı təriflər əvəzinə real öhdəlik və fakt toplamaq bələdçisi
+  - title: "Y Combinator Startup Library — How to Talk to Users"
+    url: https://www.ycombinator.com/library
+    note: İstifadəçi validasiyası, WTP və kohort retention əsasları

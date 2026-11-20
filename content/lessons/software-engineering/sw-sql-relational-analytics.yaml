@@ -1,0 +1,449 @@
+id: sw-sql-relational-analytics
+track: software-engineering
+module: sql-databases
+title: "AI üçün SQL və Relasiyalı Analitika — Sxem Dizaynı, JOIN Seçimi və İndekslər"
+summary: "AI tətbiqləri üçün relasiyalı verilənlər bazası sxemi (prediction_logs, feedback) qurmağı, INNER JOIN vs LEFT JOIN fərqinin ML datasetlərində yaratdığı seçim qərəzini (selection bias), GROUP BY aqreqasiyalarını, B-Tree indekslərini və SQL Injection-dan qorunmağı öyrənəcəksən."
+level: core
+estimated_minutes: [50, 75]
+prerequisites: [sw-git-debugging-structured-logging]
+next: sw-linux-cli-shell-systems
+skills: [sql-basics, py-data-structures]
+objectives:
+  - "AI sistemləri üçün Primary Key və Foreign Key əlaqəli relasiyalı cədvəllər (`users`, `prediction_logs`, `feedback`) modelləşdirmək"
+  - "`INNER JOIN` və `LEFT JOIN` fərqini izah etmək və könüllü rəy (`feedback`) cədvəlində `INNER JOIN`-in niyə dataset qərəzi (selection bias) yaratdığını müəyyənləşdirmək"
+  - "`GROUP BY`, `HAVING` və `CASE WHEN` ilə model versiyaları üzrə xəta və gecikmə metriklərini hesablamaq"
+  - "B-Tree indekslərinin axtarışı $O(N)$-dən $O(\\log N)$-ə necə endirdiyini və parametrləşdirilmiş (`?`) sorğuların SQL Injection-ın qarşısını necə aldığını tətbiq etmək"
+why_it_matters: |
+  Hər bir uğurlu ML/LLM məhsulunun ürəyi model ağırlıqları deyil, onun **verilənlər bazasıdır**.
+  Production-da modelin verdiyi hər cavab `prediction_logs` cədvəlinə, istifadəçinin bəzən basdığı 👍/👎 düyməsi isə `feedback` cədvəlinə düşür.
+
+  Mühəndislərin ən bahalı səhvlərindən biri növbəti təlim datasetini hazırlayarkən `prediction_logs INNER JOIN feedback` yazmaqdır:
+  İstifadəçilərin yalnız 3–5%-i (əsasən də narazı qalanlar!) rəy düyməsini basır. `INNER JOIN` rəyi olmayan 95% normal proqnozu sildiyi üçün model yalnız ekstremal şikayətlər üzərində öyrənir və **güclü selection bias** yaranır! Düzgün `LEFT JOIN`, aqreqasiya və indeksləmə AI mühəndisinin gündəlik super-gücüdür.
+terms:
+  - term: Primary Key (PK)
+    definition: "Cədvəldəki hər sətri unikal şəkildə tanıdan sütun (məs. `pred_id`); `NULL` ola bilməz və avtomatik indekslənir."
+  - term: Foreign Key (FK)
+    definition: "Bir cədvəldəki sütunun digər cədvəlin Primary Key-inə istinad etməsi (`feedback.pred_id -> prediction_logs.pred_id`); istinad bütövlüyünü qoruyur."
+  - term: INNER JOIN vs LEFT JOIN
+    definition: "`INNER JOIN` yalnız hər iki cədvəldə uyğunluğu olan sətirləri saxlayır; `LEFT JOIN` isə sol cədvəlin BÜTÜN sətirlərini saxlayır, sağda uyğunluq yoxdursa `NULL` qoyur."
+  - term: Selection bias (Seçim qərəzi)
+    definition: "Yanlış SQL filtri və ya `INNER JOIN` nəticəsində əhalinin mühüm bir hissəsinin (məs. rəy yazmayan və ya sığorta hadisəsi olmayan müştərilərin) təlim datasından çıxarılması."
+  - term: B-Tree Index
+    definition: "Cədvəl sütunu üzərində qurulan balanslı ağac strukturu; axtarışı tam cədvəl gəzişindən ($O(N)$) loqarifmik vaxta ($O(\\log N)$) endirir."
+  - term: Parameterized query
+    definition: "SQL sorğusunda dəyərləri f-string ilə yapışdırmaq əvəzinə `?` (və ya `$1`) yerləşdiriciləri ilə ayrıca ötürmək; SQL Injection hücumunu tam bloklayır."
+sections:
+  - id: relational-schema-and-joins
+    kind: explanation
+    title: "AI Sistemləri üçün Relasiyalı Sxem, JOIN Seçimi, İndekslər və Təhlükəsizlik"
+    body: |
+      ### 1. AI Tətbiqi üçün Relasiyalı Modelləşdirmə
+      Bütün məlumatları tək nəhəng cədvələ yığmaq təkrarlanmaya (redundancy) və yeniləmə xətalarına yol açır. Normalizasiya olunmuş AI log sxemi:
+      - `users(user_id PK, plan_tier, created_at)`
+      - `prediction_logs(pred_id PK, user_id FK, model_version, latency_ms, created_at)`
+      - `feedback(feedback_id PK, pred_id FK, rating, comment)` — burada `rating` dəyəri `-1` (👎) və ya `+1` (👍) olur.
+
+      ### 2. `INNER JOIN` vs `LEFT JOIN` — Niyə 95% Datanı İtirə Bilərsən?
+      Hər proqnozun (`prediction_logs`) rəyi (`feedback`) olmur.
+      - **`INNER JOIN feedback ON p.pred_id = f.pred_id`:** Yalnız rəyi olan proqnozları qaytarır. Əgər `v1` modelinin 1000 proqnozundan yalnız 2-sinə 👎 verilibsə və qalan 998-nə heç bir rəy verilməyibsə, `INNER JOIN` 998 uğurlu sorğunu silir və xəta faizini **2/2 = 100%** kimi yanlış göstərir!
+      - **`LEFT JOIN feedback ON p.pred_id = f.pred_id`:** Bütün 1000 proqnozu saxlayır; rəyi olmayan sətirlərdə `f.rating` dəyəri `NULL` olur. Beləliklə həqiqi şikayət nisbəti **2/1000 = 0.2%** düzgün hesablanır.
+
+      ### 3. `WHERE` vs `HAVING` və Şərti Aqreqasiya
+      - `WHERE`: Qruplaşdırmadan (`GROUP BY`) **əvvəl** tək-tək sətirləri süzür.
+      - `HAVING`: `GROUP BY`-dan **sonra** qrup aqreqatlarını (`HAVING COUNT(*) >= 100`) süzür.
+      - Şərti sayma: `SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END)` qrup daxilində yalnız mənfi rəyləri sayır.
+
+      ### 4. B-Tree İndeks ($O(\log N)$) və SQL Injection Müdafiəsi
+      `prediction_logs` cədvəlində 50 milyon sətir varsa, `WHERE model_version = 'v2'` sorğusu indekssiz **Full Table Scan ($O(N)$)** edir.
+      `CREATE INDEX idx_pred_model ON prediction_logs(model_version);` əmri B-Tree ağacı qurur və axtarışı $O(\log N)$ addıma endirir.
+
+      **SQL Injection Qaydası:** Heç vaxt `f"SELECT * FROM users WHERE name = '{user_input}'"` yazma! İstifadəçi `' OR '1'='1` daxil etsə bütün baza sızır. Həmişə parametrləşdirilmiş sorğu istifadə et:
+      `cursor.execute("SELECT * FROM users WHERE name = ?", (user_input,))`.
+  - id: hospital-chart-analogy
+    kind: analogy
+    title: "Mental model: Xəstəxana Qeydiyyat Jurnalı və Şikayət Qutusu"
+    body: |
+      Təsəvvür et ki, xəstəxanaya ay ərzində **10 000 pasiyent** gəlib (`prediction_logs`). Çıxışda isə könüllü **Şikayət və Təklif Qutusu** (`feedback`) var və ora cəmi **50 vərəq** atılıb (40-ı narazılıq).
+
+      - **`INNER JOIN` etmək:** Yalnız qutuya vərəq atan 50 nəfərə baxıb *"Xəstəxanaya gələnlərin 80%-i (40/50) narazıdır!"* nəticəsinə gəlməkdir. Sağlam çıxıb gedən 9 950 pasiyenti tamamilə unutdun!
+      - **`LEFT JOIN` etmək:** Qeydiyyat jurnalındakı bütün 10 000 pasiyenti siyahıya almaq və qarşısında qutudan vərəq çıxanları qeyd etməkdir (40 / 10 000 = 0.4% şikayət nisbəti).
+  - id: schema-and-join-diagram
+    kind: diagram
+    title: "Relasiyalı AI Log Sxemi və LEFT JOIN Axını"
+    body: |
+      ```mermaid
+      erDiagram
+        USERS ||--o{ PREDICTION_LOGS : "makes"
+        PREDICTION_LOGS ||--o| FEEDBACK : "receives_optional"
+        USERS {
+          int user_id PK
+          string plan_tier
+        }
+        PREDICTION_LOGS {
+          int pred_id PK
+          int user_id FK
+          string model_version
+          int latency_ms
+        }
+        FEEDBACK {
+          int feedback_id PK
+          int pred_id FK
+          int rating
+        }
+      ```
+
+      `||--o|` işarəsi göstərir ki, hər bir `PREDICTION_LOGS` sətrinin **sıfır və ya bir** `FEEDBACK` qarşılığı ola bilər — məhz buna görə analitikada `LEFT JOIN` məcburidir.
+  - id: worked-left-join-table
+    kind: worked_example
+    title: "Kiçik cədvəllərlə LEFT JOIN + GROUP BY hesablaması"
+    body: |
+      Gəl iki cədvəl üzərində `LEFT JOIN` və model versiyası üzrə aqreqasiyanı əllə izləyək.
+
+      **`prediction_logs` cədvəli:**
+
+      | `pred_id` | `model_version` |
+      |---|---|
+      | 1 | `"v1"` |
+      | 2 | `"v1"` |
+      | 3 | `"v1"` |
+      | 4 | `"v2"` |
+      | 5 | `"v2"` |
+
+      **`feedback` cədvəli (`-1` = thumbs down, `+1` = thumbs up):**
+
+      | `pred_id` | `rating` |
+      |---|---|
+      | 1 | `-1` |
+      | 2 | `+1` |
+
+      **Addım 1 — `prediction_logs p LEFT JOIN feedback f ON p.pred_id = f.pred_id`:**
+
+      | `p.pred_id` | `p.model_version` | `f.rating` | `CASE WHEN f.rating = -1 THEN 1 ELSE 0 END` |
+      |---|---|---|---|
+      | 1 | `"v1"` | `-1` | `1` |
+      | 2 | `"v1"` | `+1` | `0` |
+      | 3 | `"v1"` | `NULL` | `0` |
+      | 4 | `"v2"` | `NULL` | `0` |
+      | 5 | `"v2"` | `NULL` | `0` |
+
+      **Addım 2 — `GROUP BY p.model_version ORDER BY p.model_version`:**
+      - `"v1"`: `COUNT(p.pred_id) = 3`, `thumbs_down_count = 1 + 0 + 0 = 1` → `("v1", 3, 1)`
+      - `"v2"`: `COUNT(p.pred_id) = 2`, `thumbs_down_count = 0 + 0 = 0` → `("v2", 2, 0)`
+
+      Əgər `INNER JOIN` yazsaydıq, `"v2"` modeli nəticədən **tamamilə yox olacaqdı**, `"v1"` üçün isə `total_predictions` 3 əvəzinə 2 çıxacaqdı!
+  - id: code-sqlite-analytics
+    kind: code
+    title: "Kod — Python sqlite3 ilə Parametrləşdirilmiş İdxal və LEFT JOIN Analitikası"
+    body: |
+      ```python
+      import sqlite3
+
+
+      def analyze_models(
+          predictions: list[tuple[int, str, int]],
+          feedbacks: list[tuple[int, int]],
+      ) -> list[tuple[str, int, int, float]]:
+          """Return (model_version, total_preds, thumbs_down, avg_latency_ms)."""
+          conn = sqlite3.connect(":memory:")
+          try:
+              cur = conn.cursor()
+              cur.execute(
+                  """
+                  CREATE TABLE prediction_logs (
+                      pred_id INTEGER PRIMARY KEY,
+                      model_version TEXT NOT NULL,
+                      latency_ms INTEGER NOT NULL
+                  )
+                  """
+              )
+              cur.execute(
+                  """
+                  CREATE TABLE feedback (
+                      pred_id INTEGER PRIMARY KEY,
+                      rating INTEGER NOT NULL,
+                      FOREIGN KEY (pred_id) REFERENCES prediction_logs(pred_id)
+                  )
+                  """
+              )
+              cur.execute(
+                  "CREATE INDEX idx_pred_model ON prediction_logs(model_version)"
+              )
+
+              # Parameterized batch insert (? placeholders prevent SQL injection)
+              cur.executemany(
+                  "INSERT INTO prediction_logs (pred_id, model_version, latency_ms) VALUES (?, ?, ?)",
+                  predictions,
+              )
+              cur.executemany(
+                  "INSERT INTO feedback (pred_id, rating) VALUES (?, ?)",
+                  feedbacks,
+              )
+
+              cur.execute(
+                  """
+                  SELECT
+                      p.model_version,
+                      COUNT(p.pred_id) AS total_predictions,
+                      SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END) AS thumbs_down_count,
+                      ROUND(AVG(p.latency_ms), 1) AS avg_latency
+                  FROM prediction_logs p
+                  LEFT JOIN feedback f ON p.pred_id = f.pred_id
+                  GROUP BY p.model_version
+                  ORDER BY p.model_version ASC
+                  """
+              )
+              return cur.fetchall()
+          finally:
+              conn.close()
+
+
+      preds = [(1, "v1", 120), (2, "v1", 140), (3, "v1", 100), (4, "v2", 80), (5, "v2", 90)]
+      fb = [(1, -1), (2, 1)]
+      print(analyze_models(preds, fb))
+      # [('v1', 3, 1, 120.0), ('v2', 2, 0, 85.0)]
+      ```
+  - id: sql-common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən SQL səhvləri"
+    body: |
+      **1. `LEFT JOIN`-dən sonra `WHERE f.rating = -1` yazmaq**
+      ```sql
+      SELECT p.model_version, COUNT(p.pred_id)
+      FROM prediction_logs p
+      LEFT JOIN feedback f ON p.pred_id = f.pred_id
+      WHERE f.rating = -1   -- BUG! NULL sətirləri silir və LEFT JOIN-i gizlicə INNER JOIN-ə çevirir!
+      GROUP BY p.model_version;
+      ```
+      `WHERE f.rating = -1` şərti `f.rating IS NULL` olan bütün sətirləri atdığı üçün `LEFT JOIN` mənasını itirir! Şərti ya `SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END)` içində, ya da `LEFT JOIN feedback f ON p.pred_id = f.pred_id AND f.rating = -1` kimi `ON` bölməsində yaz.
+
+      **2. `NULL` ilə `= NULL` və ya `!= NULL` müqayisəsi**
+      SQL-də `NULL = NULL` ifadəsi `TRUE` deyil, `UNKNOWN` (`NULL`) qaytarır! Boş dəyərləri yoxlamaq üçün həmişə `IS NULL` və `IS NOT NULL` istifadə et.
+
+      **3. `COUNT(*)` vs `COUNT(f.rating)` qarışıqlığı**
+      `COUNT(*)` (və ya `COUNT(p.pred_id)`) qrupdakı bütün sətirləri sayır; `COUNT(f.rating)` isə yalnız `f.rating` dəyəri `NULL` olmayan sətirləri sayır.
+
+      **4. Python f-string ilə SQL sorğusu qurmaq (SQL Injection)**
+      `cur.execute(f"SELECT * FROM logs WHERE model_version = '{ver}'")` həm təhlükəsizlik dəliyidir, həm də dırnaq işarəsi olan mətndə sintaksis xətası verir.
+  - id: sql-tradeoffs
+    kind: tradeoffs
+    title: "Engineering trade-offs"
+    body: |
+      - **İndekslərin faydası vs Yazma (Write) xərci:** Hər əlavə B-Tree indeksi `SELECT` və `JOIN` sorğularını $O(\log N)$ sürətləndirir, lakin hər `INSERT`, `UPDATE`, `DELETE` əməliyyatında həmin ağaclar da yenilənməli olduğu üçün yazma sürətini azaldır və əlavə disk yeri tutur. Yalnız tez-tez `WHERE`, `JOIN` və `ORDER BY`-da istifadə olunan sütunları indekslə.
+      - **SQL Aqreqasiyası vs Pandas/Python Yaddaşı:** 20 milyon log sətrini `SELECT *` ilə Python-a çəkib Pandas-da `groupby` etmək GB-larla şəbəkə trafiki və RAM sərf edir. Aqreqasiyanı (`GROUP BY`) birbaşa verilənlər bazası mühərrikində icra edib Python-a yalnız yekun cədvəli (məs. 5 sətir) qaytarmaq 100 dəfə daha effektivdir.
+      - **Relasiyalı SQL vs Vector DB:** Metaverilənlər, istifadəçi icazələri, maliyyə/log analitikası və ACID tranzaksiyalar üçün relasiyalı SQL (PostgreSQL / SQLite) əvəzsizdir; yüksək ölçülü embedding oxşarlığı üçün isə ya `pgvector` uzantısı, ya da xüsusi vektor indeksi istifadə olunur.
+mastery_criteria:
+  - "`prediction_logs` və `feedback` cədvəllərini `LEFT JOIN` və `GROUP BY` ilə birləşdirib itkisiz model metrikləri çıxara bilirsən"
+  - "`INNER JOIN`-in könüllü rəy və ya hadisə cədvəllərində yaratdığı selection bias problemini diaqnoz edə bilirsən"
+  - "Python `sqlite3` modulunda `?` parametrləri ilə təhlükəsiz cədvəl doldurma və analitik sorğu yaza bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-sql-null-comparison
+      type: mcq
+      title: "SQL-də NULL yoxlaması"
+      prompt: "`LEFT JOIN`-dən sonra istifadəçi rəyi (`f.rating`) olmayan proqnozları seçmək üçün hansı `WHERE` şərti doğrudur?"
+      skills: [sql-basics]
+      category: data
+      options:
+        - id: a
+          text: "`WHERE f.rating == NULL`"
+          feedback: "SQL-də `==` operatoru və `NULL` ilə bərabərlik yoxlaması işləmir."
+        - id: b
+          text: "`WHERE f.rating = NULL`"
+          feedback: "`= NULL` həmişə `UNKNOWN` qaytarır və 0 sətir seçir."
+        - id: c
+          text: "`WHERE f.rating IS NULL`"
+          feedback: "Doğru! SQL-də `NULL` dəyərlər yalnız `IS NULL` və `IS NOT NULL` ilə yoxlanılır."
+      answer: c
+      explanation: "SQL üçqiymətli məntiq (`TRUE`, `FALSE`, `UNKNOWN`) istifadə edir; `NULL` dəyəri yoxlamaq üçün `IS NULL` sintaksisi məcburidir."
+    - id: q-sql-where-vs-having
+      type: mcq
+      title: "WHERE vs HAVING fərqi"
+      prompt: "Yalnız ən azı 500 proqnoz vermiş `model_version` qruplarını saxlamaq üçün hansı SQL ifadəsi istifadə olunmalıdır?"
+      skills: [sql-basics]
+      category: data
+      options:
+        - id: a
+          text: "`WHERE COUNT(pred_id) >= 500 GROUP BY model_version`"
+          feedback: "`WHERE` qruplaşdırmadan əvvəl işləyir və `COUNT()` kimi aqreqat funksiyaları qəbul etmir."
+        - id: b
+          text: "`GROUP BY model_version HAVING COUNT(pred_id) >= 500`"
+          feedback: "Doğru! `HAVING` qruplar yaradıldıqdan sonra aqreqat nəticələrini süzür."
+        - id: c
+          text: "`ORDER BY COUNT(pred_id) >= 500`"
+          feedback: "`ORDER BY` sətirləri sıralayır, filtrləmir."
+      answer: b
+      explanation: "`WHERE` fərdi sətirləri qruplaşmadan əvvəl, `HAVING` isə `GROUP BY` nəticəsində yaranmış qrupları aqreqat şərtinə görə süzür."
+    - id: q-sql-index-complexity
+      type: mcq
+      title: "B-Tree indeksinin axtarış mürəkkəbliyi"
+      prompt: "$N$ sətirlik `prediction_logs` cədvəlində `user_id` sütununa B-Tree indeksi əlavə etdikdə `WHERE user_id = 42` axtarışının zaman mürəkkəbliyi necə dəyişir?"
+      skills: [sql-basics, py-data-structures]
+      category: data
+      options:
+        - id: a
+          text: "$O(N)$ tam cədvəl gəzişindən $O(\\log N)$ ağac axtarışına düşür"
+          feedback: "Doğru! Balanslı B-Tree ağacı milyonlarla sətir içində bir neçə səviyyəlik keçidlə hədəf sətri tapır."
+        - id: b
+          text: "$O(\\log N)$-dən $O(N^2)$-ə qalxır"
+          feedback: "İndeks axtarışı yavaşlatmır, əksinə sürətləndirir."
+        - id: c
+          text: "Axtarış sürəti dəyişmir, yalnız disk həcmi azalır"
+          feedback: "İndeks əlavə disk yeri tutur, lakin oxuma/axtarış sürətini kəskin artırır."
+      answer: a
+      explanation: "İndekssiz cədvəldə baza bütün $N$ sətri yoxlamalıdır ($O(N)$). B-Tree indeksi isə sıralı ağac strukturu ilə axtarışı $O(\\log N)$-ə endirir."
+    - id: q-sql-injection-prevention
+      type: multi
+      title: "SQL Injection və təhlükəsiz verilənlər bazası sorğuları"
+      prompt: "Python-da SQL sorğuları yazarkən hansı qaydalar təhlükəsiz və doğrudur? Hamısını seç."
+      skills: [sql-basics]
+      category: production
+      options:
+        - id: a
+          text: "İstifadəçi input-unu `?` (SQLite) və ya `%s` (psycopg) placeholder-ləri ilə ayrıca tuple kimi `cursor.execute(sql, (val,))` şəklində ötürmək"
+          feedback: "Bəli — baza sürücüsü parametri kod kimi yox, təhlükəsiz literal dəyər kimi emal edir."
+        - id: b
+          text: "Çoxlu sətir əlavə edərkən `cursor.executemany(\"INSERT INTO t VALUES (?, ?)\", rows)` istifadə etmək"
+          feedback: "Bəli — həm SQL injection-dan qoruyur, həm də tək-tək dövrə nisbətən qat-qat sürətlidir."
+        - id: c
+          text: "`cursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")` f-string sintaksisindən istifadə etmək"
+          feedback: "Xeyr! Bu, klassik SQL Injection boşluğudur."
+      answers: [a, b]
+      explanation: "Parametrləşdirilmiş sorğular (`execute` və `executemany` ilə `?` placeholder-ləri) SQL əmri ilə istifadəçi datasını bir-birindən tam ayırır."
+exercises:
+  - id: ex-sql-left-join-aggregate
+    type: code
+    title: "SQLite ilə model versiyalarının xəta statistikasını hesabla"
+    prompt: |
+      Python-un standart `sqlite3` modulundan (`sqlite3.connect(":memory:")`) istifadə edərək `compute_model_error_rates(predictions, feedbacks)` funksiyasını yaz.
+
+      **Giriş verilənləri:**
+      - `predictions`: `(pred_id, model_version)` tuple-larından ibarət siyahı (məs. `[(1, "v1"), (2, "v1"), (3, "v2")]`).
+      - `feedbacks`: `(pred_id, rating)` tuple-larından ibarət siyahı (`rating = -1` mənfi 👎, `rating = 1` müsbət 👍 rəydir; bir çox `pred_id` üçün `feedbacks`-də sətir olmaya bilər!).
+
+      **Tələblər:**
+      1. Yaddaşdaxili SQLite bazasında `predictions(pred_id INTEGER PRIMARY KEY, model_version TEXT)` və `feedbacks(pred_id INTEGER PRIMARY KEY, rating INTEGER)` cədvəllərini yarat.
+      2. Verilənləri parametrləşdirilmiş `?` sorğusu (`executemany`) ilə cədvəllərə əlavə et.
+      3. `LEFT JOIN` və `GROUP BY model_version` istifadə edən SQL sorğusu ilə hər bir `model_version` üçün:
+         - `total_predictions`: həmin model versiyasının ümumi proqnoz sayı,
+         - `thumbs_down_count`: həmin model versiyası üçün `rating = -1` olan rəylərin sayı (heç mənfi rəyi yoxdursa `0`, `NULL` YOX!)
+         hesabla.
+      4. Nəticəni `model_version` üzrə artan sırada (`ORDER BY model_version ASC`) `list[tuple[str, int, int]]` kimi qaytar.
+    skills: [sql-basics, py-data-structures]
+    category: data
+    difficulty: 2
+    hints:
+      - "`conn = sqlite3.connect(\":memory:\")` ilə baza aç, iki cədvəli `CREATE TABLE` ilə yarat və `cur.executemany(\"INSERT INTO ... VALUES (?, ?)\", ...)` ilə doldur."
+      - "`LEFT JOIN feedbacks f ON p.pred_id = f.pred_id` istifadə et ki, heç rəyi olmayan model versiyaları silinməsin."
+      - "Mənfi rəyləri saymaq üçün `SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END)` ifadəsindən istifadə et — bu, heç rəyi olmayan qruplar üçün də `NULL` yox, `0` qaytarır."
+    starter_code: |
+      import sqlite3
+
+      def compute_model_error_rates(
+          predictions: list[tuple[int, str]],
+          feedbacks: list[tuple[int, int]],
+      ) -> list[tuple[str, int, int]]:
+          # TODO: sqlite3 :memory: bazasında LEFT JOIN + GROUP BY ilə hesabla
+          return []
+    tests:
+      - name: "Rəyi olmayan proqnozları və model versiyalarını itirmədən düzgün hesablayır"
+        code: |
+          preds = [(1, "v1"), (2, "v1"), (3, "v1"), (4, "v2"), (5, "v2")]
+          fb = [(1, -1), (2, 1)]
+          res = compute_model_error_rates(preds, fb)
+          assert res == [("v1", 3, 1), ("v2", 2, 0)], f"Gözlənilən [('v1', 3, 1), ('v2', 2, 0)], alınan {res}"
+      - name: "Çoxlu mənfi rəy və sıralama (ORDER BY model_version ASC)"
+        code: |
+          preds = [(10, "v3"), (11, "v1"), (12, "v3"), (13, "v2")]
+          fb = [(10, -1), (12, -1), (13, 1)]
+          res = compute_model_error_rates(preds, fb)
+          assert res == [("v1", 1, 0), ("v2", 1, 0), ("v3", 2, 2)], f"Alınan: {res}"
+      - name: "Boş feedback siyahısında bütün modellər üçün thumbs_down_count = 0 qaytarır"
+        code: |
+          preds = [(1, "alpha"), (2, "alpha"), (3, "beta")]
+          res = compute_model_error_rates(preds, [])
+          assert res == [("alpha", 2, 0), ("beta", 1, 0)], f"Alınan: {res}"
+      - name: "Boş predictions siyahısı üçün boş list qaytarır"
+        code: |
+          assert compute_model_error_rates([], []) == []
+    solution: |
+      import sqlite3
+
+      def compute_model_error_rates(
+          predictions: list[tuple[int, str]],
+          feedbacks: list[tuple[int, int]],
+      ) -> list[tuple[str, int, int]]:
+          conn = sqlite3.connect(":memory:")
+          try:
+              cur = conn.cursor()
+              cur.execute(
+                  "CREATE TABLE predictions (pred_id INTEGER PRIMARY KEY, model_version TEXT NOT NULL)"
+              )
+              cur.execute(
+                  "CREATE TABLE feedbacks (pred_id INTEGER PRIMARY KEY, rating INTEGER NOT NULL)"
+              )
+              cur.executemany(
+                  "INSERT INTO predictions (pred_id, model_version) VALUES (?, ?)",
+                  predictions,
+              )
+              cur.executemany(
+                  "INSERT INTO feedbacks (pred_id, rating) VALUES (?, ?)",
+                  feedbacks,
+              )
+              cur.execute(
+                  """
+                  SELECT
+                      p.model_version,
+                      COUNT(p.pred_id) AS total_predictions,
+                      SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END) AS thumbs_down_count
+                  FROM predictions p
+                  LEFT JOIN feedbacks f ON p.pred_id = f.pred_id
+                  GROUP BY p.model_version
+                  ORDER BY p.model_version ASC
+                  """
+              )
+              return cur.fetchall()
+          finally:
+              conn.close()
+    explanation: |
+      `LEFT JOIN` bütün proqnozları qoruyub saxlayır, `SUM(CASE WHEN f.rating = -1 THEN 1 ELSE 0 END)` isə hətta bütün rəyləri `NULL` olan model versiyaları üçün də `0` qaytarır.
+  - id: ex-sql-inner-vs-left-mcq
+    type: mcq
+    title: "Diaqnoz: ML təlim datasetində gizli Selection Bias"
+    prompt: |
+      Sığorta şirkətində müştəri risk modeli üçün təlim datası hazırlayan mühəndis belə bir SQL sorğusu yazıb:
+
+      ```sql
+      SELECT c.customer_id, c.age, c.car_age, SUM(cl.claim_amount) AS total_claim
+      FROM customers c
+      INNER JOIN user_claims cl ON c.customer_id = cl.customer_id
+      GROUP BY c.customer_id, c.age, c.car_age;
+      ```
+
+      Bu dataset üzərində öyrədilən model production-da yeni müştərilərin **hamısına** həddindən artıq yüksək qəza riski proqnozlaşdırır. Kök səbəb nədir?
+    skills: [sql-basics, py-data-structures]
+    category: data
+    difficulty: 2
+    hints:
+      - "Heç vaxt qəza törətməmiş (sağlam/təhlükəsiz) müştərilərin `user_claims` cədvəlində sətri varmı?"
+      - "`INNER JOIN` sağ cədvəldə qarşılığı olmayan müştərilərlə nə edir?"
+    options:
+      - id: a
+        text: "`GROUP BY` ifadəsində `c.age` sütununun yazılması orta dəyəri artırır"
+        feedback: "`GROUP BY`-da müştəri atributlarının olması sadəcə hər müştəri üçün bir qrup yaradır."
+      - id: b
+        text: "`INNER JOIN` heç vaxt qəza iddiası (`user_claims`) olmayan bütün təhlükəsiz müştəriləri datasetdən sildiyi üçün model yalnız qəza törətmiş müştərilər üzərində öyrənib (selection bias)"
+        feedback: "Doğru! Təhlükəsiz müştərilər (`total_claim = 0`) təlim datasından tamamilə çıxarılıb. `LEFT JOIN` və `COALESCE(SUM(cl.claim_amount), 0)` istifadə edilməli idi."
+      - id: c
+        text: "`SUM` funksiyası SQL-də yalnız müsbət ədədlərlə işləyir"
+        feedback: "Problem `SUM`-da deyil, `0` qəzalı müştərilərin `INNER JOIN` tərəfindən atılmasındadır."
+    answer: b
+    explanation: |
+      Hadisə (`claims`, `feedback`, `purchases`) cədvəlləri ilə `INNER JOIN` etmək hadisəsi olmayan bütün nümunələri (0 sinfini) silir. Düzgün həll: `LEFT JOIN user_claims` + `COALESCE(SUM(cl.claim_amount), 0)`.
+references:
+  - title: "Python Standard Library — sqlite3 DB-API 2.0 interface"
+    url: https://docs.python.org/3/library/sqlite3.html
+    note: "Python-da sqlite3, parametrləşdirilmiş sorğular və yaddaşdaxili baza sənədləri"
+  - title: "SQLite Query Planner and B-Tree Indexes"
+    url: https://www.sqlite.org/queryplanner.html
+    note: "B-Tree indekslərinin cədvəl axtarışını O(N)-dən O(log N)-ə necə endirdiyinin təsviri"

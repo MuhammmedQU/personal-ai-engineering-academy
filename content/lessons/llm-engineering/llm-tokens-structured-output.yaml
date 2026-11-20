@@ -1,0 +1,454 @@
+id: llm-tokens-structured-output
+track: llm-engineering
+module: llm-foundations
+title: "LLM API-ləri: tokenlər, xərc/gecikmə riyaziyyatı və strukturlaşdırılmış JSON çıxışı"
+summary: "Modeli öyrətməklə (training) hazır modeli API ilə çağırmaq (inference) arasındakı fərqi, subword tokenizasiyanı, context window və xərc/latency hesabını öyrənəcəksən. Promptu test edilə bilən spesifikasiya kimi yazmağı və LLM-in qaytardığı JSON çıxışını sxemə görə doğrulamağı məşq edəcəksən."
+level: foundation
+estimated_minutes: [45, 65]
+prerequisites: [py-functions-contracts, http-json-api-clients]
+next: llm-embeddings-semantic-search
+skills: [llm-tokens-context, llm-structured-output]
+objectives:
+  - "Model training ilə LLM API inference arasındakı fundamental fərqi izah etmək"
+  - "Subword tokenizasiyanı, context window limitini və xərc/latency düsturlarını tətbiq etmək"
+  - "Promptu aydın giriş sərhədləri və çıxış müqaviləsi olan spesifikasiya kimi tərtib etmək"
+  - "LLM-dən gələn xam mətni etibarsız input kimi qəbul edib JSON sxemi və məhdud retry ilə doğrulamaq"
+why_it_matters: |
+  Bir çox yeni başlayan mühəndis LLM API-sinə göndərilən promptun modeli "öyrətdiyini" düşünür və ya modeldən `"JSON qaytar"` istəyəndə həmişə qüsursuz JSON gələcəyinə güvənir. Production mühitində bu iki yanlış təsəvvür sistemi çökdürür: context window dolduqda sorğular kəsilir, gözlənilməz çıxış formatı isə tətbiqdə `JSONDecodeError` və ya səhv biznes qərarları yaradır.
+
+  LLM-i sehrli qutu kimi yox, **ehtimal əsaslı mətn tamamlama mühərriki** kimi başa düşəndə:
+  - xərc və gecikməni (latency) trafik artmazdan əvvəl dəqiq hesablayırsan,
+  - promptları təsadüfi cümlələr əvəzinə versiyalanmış mühəndis spesifikasiyası kimi yazırsan,
+  - çıxışı sərt sxem doğrulamasından (schema validation) keçirərək etibarlı proqram təminatı qurursan.
+terms:
+  - term: Inference (API çağırışı)
+    definition: "Artıq öyrədilmiş və çəkiləri (weights) dondurulmuş modelə input göndərib çıxış almaq prosesi. API çağırışı modelin çəkilərini dəyişmir."
+  - term: Token və Subword Tokenization
+    definition: "LLM-in emal etdiyi ən kiçik mətn vahidi (BPE/WordPiece). Tez-tez işlənən sözlər tək token, nadir və ya şəkilçili sözlər isə bir neçə alt-tokenə bölünür."
+  - term: Context window
+    definition: "Bir API çağırışında modelin eyni anda görə bildiyi maksimum token sayı ($N_{in} + N_{out} \\le C_{max}$). Modelin müvəqqəti işçi yaddaşıdır."
+  - term: TTFT (Time To First Token)
+    definition: "Sorğu göndəriləndən ilk çıxış tokeni gələnə qədər keçən vaxt; əsasən input promptun uzunluğundan (prefill) asılıdır."
+  - term: Prompt as specification
+    definition: "Promptun rol, tapşırıq, aydın ayrılmış input datası, çıxış JSON sxemi və edge-case qaydaları ilə müqavilə kimi yazılması."
+  - term: Structured output validation
+    definition: "Modelin qaytardığı mətni JSON kimi parse edib tələb olunan sahələri, tipləri və dəyər aralıqlarını kodla (məs. Pydantic və ya validator funksiya ilə) yoxlamaq."
+sections:
+  - id: training-vs-inference
+    kind: explanation
+    title: "Training vs Inference, Tokenlər və Xərc/Latency riyaziyyatı"
+    body: |
+      ### 1. Training vs Inference: Model sənin promptundan "öyrənmir"
+      LLM ilə işləyərkən iki tamamilə fərqli mərhələni ayırd etməlisən:
+      - **Training / Fine-tuning:** Milyardlarla parametr (weights) böyük data üzərində gradient descent ilə yenilənir. Bu, yüksək hesablama gücü tələb edən, saatlarla və ya günlərlə çəkən prosesdir.
+      - **Inference (API istifadəsi):** Modelin çəkiləri **dondurulub** (frozen). Sən HTTP sorğusu ilə prompt göndərirsən, model həmin promptu müvəqqəti **context window** içində oxuyur və növbəti tokenləri ehtimal paylanmasına görə ardıcıl generasiya edir. Sorğu bitən kimi model səninlə danışığını "unudur". Çoxaddımlı söhbət (chat) illüziyası sadəcə sənin kodunun hər növbəti API sorğusunda bütün tarixçəni yenidən göndərməsi hesabına yaranır.
+
+      ### 2. Subword Tokenization və Context Window
+      LLM-lər hərflərlə və ya tam sözlərlə deyil, **subword tokenlərlə** işləyir. İngilis dilində 1 token təxminən 3–4 simvoldur (`"billing"` → 1 token). Lakin Azərbaycan dili kimi iltisaqi (şəkilçili) dillərdə bir söz bir neçə tokenə parçalanır (məsələn, `"müqavilələrimizdəndir"` → 5–7 token). Buna görə Azərbaycan dilindəki mətn eyni uzunluqlu ingilis mətnindən **1.5–2.5 dəfə çox token** sərf edə bilər.
+
+      Hər modelin sabit **context window** limiti ($C_{\max}$) var:
+
+      $$N_{\text{in}} + N_{\text{out}} \le C_{\max}$$
+
+      Burada $N_{\text{in}}$ göndərdiyin promptun (system prompt + tarixçə + sənədlər), $N_{\text{out}}$ isə modelin qaytardığı cavabın token sayıdır.
+
+      ### 3. Xərc və Gecikmə (Latency) riyaziyyatı
+      LLM API-lərində input və output tokenləri fərqli qiymətləndirilir:
+
+      $$\text{Cost} = N_{\text{in}} \cdot p_{\text{in}} + N_{\text{out}} \cdot p_{\text{out}}$$
+
+      Çıxış tokeninin qiyməti ($p_{\text{out}}$) adətən giriş tokenindən ($p_{\text{in}}$) **3–5 dəfə baha** olur. Səbəb arxitekturadır: giriş tokenləri GPU-da paralel emal olunur (**prefill**), çıxış tokenləri isə **avtoreqressiv** — yəni bir-bir, hər yeni token üçün əvvəlki bütün konteksti oxuyaraq generasiya edilir (**decode**).
+
+      Eyni səbəbdən ümumi gecikmə (latency) əsasən **çıxış tokenlərinin sayından** asılıdır:
+
+      $$\text{Latency} \approx \text{TTFT}(N_{\text{in}}) + N_{\text{out}} \cdot t_{\text{token}}$$
+
+      Cavabı 500 tokendən 100 tokenə qısaltmaq həm xərci, həm də istifadəçinin gözləmə müddətini kəskin azaldır.
+  - id: contractor-analogy
+    kind: analogy
+    title: "Mental model: yaddaşı sıfırlanan podratçı və ciddi təhvil-təslim blankı"
+    body: |
+      LLM API-sini hər səhər yaddaşı sıfırlanan, amma çox sürətli oxuyan bir məsləhətçi kimi təsəvvür et:
+
+      - **Context window = Masanın üstü:** Məsləhətçinin əvvəlki günlərdən heç nə yadında qalmır (**stateless inference**). O yalnız həmin an masanın üstünə qoyduğun qovluğu (promptu) oxuya bilir. Masa dolursa, köhnə vərəqləri götürməlisən.
+      - **Prompt = Texniki tapşırıq:** Ona *"Bu müştəri şikayətinə bax, gör nə deyir"* desən, sənə uzun bir inşa yazacaq. Amma ona rəsmi blank verib *"Yalnız bu 3 xananı doldur: kateqoriya, təcililik (1-5) və 1 cümləlik xülasə"* desən, standart cavab alacaqsan.
+      - **Validation = Qəbul şöbəsi:** Məsləhətçi bəzən təcililik xanasına rəqəm əvəzinə `"çox təcili"` yaza bilər. Qəbul şöbəsi (sənin Python validator funksiyan) blankı yoxlamadan bazaya yazsa, sistem xəta verəcək. Səhv doldurulmuş blank dərhal geri qaytarılır (bounded retry) və ya rədd edilir.
+  - id: validation-loop-diagram
+    kind: diagram
+    title: "Prompt spesifikasiyası və sxem doğrulama dövrü"
+    body: |
+      ```mermaid
+      flowchart LR
+        A["Input Data + Prompt Spec"] --> B["LLM API (Inference)"]
+        B --> C["Raw String Output"]
+        C --> D{"Schema Validator"}
+        D -- "Keçdi (Valid dict)" --> E["Application Logic"]
+        D -- "Xəta (max_retries > 0)" --> F["Xəta mesajı ilə Retry"]
+        F --> B
+        D -- "Xəta (limit bitdi)" --> G["Fallback / ValueError"]
+      ```
+
+      Diqqət et: LLM-dən çıxan `Raw String Output` heç vaxt birbaşa biznes məntiqinə (`Application Logic`) ötürülmür. Arada həmişə deterministik `Schema Validator` dayanır.
+  - id: worked-cost-latency
+    kind: worked_example
+    title: "Addım-addım xərc və gecikmə hesabı"
+    body: |
+      Tutaq ki, müştəri dəstək biletlərini təsnif edən bir xidmət qurursan.
+      - Günlük sorğu sayı: $20\,000$ bilet
+      - Hər sorğuda orta giriş: $N_{\text{in}} = 1\,200$ token (sistem təlimatı + bilet mətni)
+      - Hər sorğuda orta çıxış: $N_{\text{out}} = 150$ token (strukturlaşdırılmış JSON)
+      - Model qiymətləri: $p_{\text{in}} = \$1.50 / 10^6$ token, $p_{\text{out}} = \$6.00 / 10^6$ token
+      - Gecikmə parametrləri: $\text{TTFT} = 350\text{ ms}$, hər çıxış tokeni üçün $t_{\text{token}} = 12\text{ ms}$
+
+      **1. Bir sorğunun xərci:**
+
+      $$\text{Cost}_{\text{req}} = \frac{1200}{10^6} \times 1.50 + \frac{150}{10^6} \times 6.00 = 0.0018 + 0.0009 = \$0.0027$$
+
+      **2. Günlük və aylıq (30 gün) xərc:**
+
+      $$\text{Cost}_{\text{day}} = 20\,000 \times 0.0027 = \$54.00$$
+
+      $$\text{Cost}_{\text{month}} = 30 \times 54.00 = \$1\,620.00$$
+
+      **3. Bir sorğunun gözlənilən gecikməsi (latency):**
+
+      $$\text{Latency} \approx 350\text{ ms} + 150 \times 12\text{ ms} = 350 + 1800 = 2\,150\text{ ms} = 2.15\text{ s}$$
+
+      **Optimallaşdırma nəticəsi:** Əgər JSON sxemindən uzun izah sahəsini çıxarıb $N_{\text{out}}$-u 150-dən 50 tokenə endirsək, gecikmə $2.15\text{ s}$-dən $0.95\text{ s}$-yə düşür, aylıq xərc isə $\$360$ azalır!
+  - id: code-structured-validation
+    kind: code
+    title: "Kod: Prompt spesifikasiyası, JSON doğrulama və bounded retry"
+    body: |
+      ```python
+      import json
+      from typing import Callable
+
+      ALLOWED_CATEGORIES = {"billing", "technical", "account"}
+
+
+      def build_ticket_prompt(ticket_text: str) -> str:
+          """Promptu aydın sərhədləri və çıxış müqaviləsi olan spesifikasiya kimi qurur."""
+          return (
+              "You are a support ticket classifier.\n"
+              "Analyze the customer ticket inside <ticket> tags and respond ONLY with a valid JSON object.\n"
+              "Required JSON schema:\n"
+              '{"category": "billing" | "technical" | "account", '
+              '"urgency": integer between 1 and 5, '
+              '"summary": non-empty string under 200 chars}\n\n'
+              f"<ticket>\n{ticket_text}\n</ticket>"
+          )
+
+
+      def validate_ticket_response(raw_json_str: str) -> dict:
+          """LLM-in xam cavabını parse edir və müqaviləyə uyğunluğunu yoxlayır."""
+          try:
+              data = json.loads(raw_json_str)
+          except Exception as exc:
+              raise ValueError(f"Invalid JSON: {exc}") from exc
+
+          if not isinstance(data, dict):
+              raise ValueError("JSON root must be an object")
+
+          category = data.get("category")
+          if category not in ALLOWED_CATEGORIES:
+              raise ValueError(f"Invalid category: {category!r}")
+
+          urgency = data.get("urgency")
+          # Diqqət: Python-da isinstance(True, int) == True olduğu üçün bool ayrıca rədd edilməlidir!
+          if isinstance(urgency, bool) or not isinstance(urgency, int) or not (1 <= urgency <= 5):
+              raise ValueError(f"Invalid urgency: {urgency!r}")
+
+          summary = data.get("summary")
+          if not isinstance(summary, str) or not summary.strip():
+              raise ValueError("summary must be a non-empty string")
+
+          return {
+              "category": category,
+              "urgency": urgency,
+              "summary": summary.strip(),
+          }
+
+
+      def classify_with_retry(
+          ticket_text: str,
+          llm_call: Callable[[str], str],
+          max_retries: int = 2,
+      ) -> dict:
+          """Doğrulama uğursuz olduqda məhdud sayda (bounded) yenidən cəhd edir."""
+          prompt = build_ticket_prompt(ticket_text)
+          last_error: Exception | None = None
+
+          for attempt in range(max_retries + 1):
+              raw_output = llm_call(prompt)
+              try:
+                  return validate_ticket_response(raw_output)
+              except ValueError as err:
+                  last_error = err
+                  prompt = (
+                      f"{build_ticket_prompt(ticket_text)}\n\n"
+                      f"Previous response failed validation: {err}. "
+                      "Return ONLY valid JSON matching the schema."
+                  )
+
+          raise ValueError(f"LLM failed schema validation after {max_retries + 1} attempts: {last_error}")
+      ```
+
+      Vacib mühəndislik detalları:
+      - **Input ayrılması (`<ticket>` teqləri):** İstifadəçi mətnini təlimatdan aydın ayırır ki, model harada təlimatın bitib datanın başladığını bilsin.
+      - **`isinstance(urgency, bool)` yoxlaması:** Python-da `bool` tipi `int`-in alt-sinfidir (`isinstance(True, int)` `True` qaytarır). Bu yoxlama olmasa `"urgency": true` dəyəri `1` kimi səssizcə keçər.
+      - **Bounded retry (`max_retries`):** Sonsuz `while True` dövrü LLM xəta verdikdə həm pul kisəsini boşaldır, həm də tətbiqi asılı vəziyyətdə saxlayır.
+  - id: common-mistakes
+    kind: mistakes
+    title: "Ən çox edilən səhvlər"
+    body: |
+      **1. Xam LLM çıxışına kor-koranə güvənmək**
+      Modelə `"Respond in JSON"` yazmaq kifayət deyil. Model bəzən JSON-un əvvəlinə ```` ```json ```` bloku və ya `"Here is the JSON:"` mətni əlavə edir, yaxud sahənin adını səhv yazır. Həmişə native Structured Outputs / JSON Schema rejimindən istifadə et **və** tətbiq tərəfində sxemi doğrula.
+
+      **2. Sonsuz retry dövrü (`while True`)**
+      Sxem doğrulaması uğursuz olanda limit qoymadan yenidən sorğu göndərmək API xərclərini saniyələr içində partlada bilər. Həmişə `max_retries` (adətən 1 və ya 2) təyin et və limit bitdikdə deterministik fallback qaytar.
+
+      **3. Söhbət tarixçəsini kəsmədən göndərmək**
+      Hər mesajda bütün əvvəlki mesajları yenidən göndərdikdə $N_{\text{in}}$ kvadratik artır ($O(T^2)$ ümumi token sərfi) və nəhayət context window limitini aşır. Köhnə mesajları pəncərə ilə (sliding window) məhdudlaşdır və ya xülasələşdir.
+
+      **4. İngilis dili token sayını Azərbaycan dilinə şamil etmək**
+      Azərbaycan dilində şəkilçilər səbəbindən eyni həcmli mətn daha çox token tutur. Qiymət və context window hesablamalarında həmişə real Azərbaycan mətnləri üzərində token sayğacı (`tiktoken` və ya API-nin `usage` cavabı) ilə ölçmə apar.
+  - id: tradeoffs
+    kind: tradeoffs
+    title: "Mühəndislik seçimləri və məhdudiyyətlər"
+    body: |
+      - **Böyük context window vs RAG / seçmə kontekst:** Model 128k və ya 1M context window dəstəkləsə belə, hər sorğuda 100k token göndərmək həm çox bahadır, həm TTFT gecikməsini saniyələrə qaldırır, həm də modelin ortadakı detalları qaçırmasına ("lost in the middle") səbəb olur. Yalnız lazım olan parçaları seçib göndər.
+      - **Kiçik sürətli model vs böyük model:** Sadə təsnifat və JSON çıxarışı üçün böyük reasoning modeli əvəzinə kiçik model (məs. Flash / Mini sinfi) 10–20 dəfə ucuz və 3–5 dəfə sürətlidir.
+      - **Temperature seçimi:** Strukturlaşdırılmış data çıxarışı və təsnifat tapşırıqlarında `temperature=0` (və ya `0.0`-a yaxın) seç ki, çıxış maksimum sabit və təkrarolunan olsun.
+      - **Strict JSON Schema API vs kod içi doğrulama:** Müasir LLM provayderləri token səviyyəsində JSON sxemini məcbur edə bilir (constrained decoding), amma biznes qaydalarını (məs. tarixin gələcəkdə olması, məbləğin müsbət olması) yenə də sənin Python kodun yoxlamalıdır.
+mastery_criteria:
+  - "Verilmiş sorğu həcmi, giriş/çıxış token sayı və qiymət cədvəlinə əsasən aylıq API xərcini və gözlənilən gecikməni dəqiq hesablayırsan"
+  - "Training ilə inference fərqini və context window-un niyə daimi yaddaş olmadığını izah edə bilirsən"
+  - "LLM-dən gələn JSON mətnini parse edən, tipləri və icazəli dəyərləri yoxlayan, xəta halında ValueError qaldıran Python validatoru yaza bilirsən"
+quiz:
+  pass_threshold: 0.75
+  questions:
+    - id: q-llmtok-inference-memory
+      type: mcq
+      title: "API çağırışı və model yaddaşı"
+      prompt: "Standart LLM API-sinə (inference endpoint) müştəri qaydalarını əhatə edən prompt göndərdikdə modelin daxili çəkilərinə (weights) nə baş verir?"
+      skills: [llm-tokens-context]
+      category: concept
+      options:
+        - id: a
+          text: "Model qaydaları öyrənir və növbəti müstəqil API sorğularında həmin qaydaları avtomatik xatırlayır"
+          feedback: "Xeyr — inference zamanı modelin çəkiləri dəyişmir və hər sorğu müstəqildir (stateless)."
+        - id: b
+          text: "Modelin çəkiləri dəyişmir; göndərilən mətn yalnız həmin sorğunun context window-u daxilində müvəqqəti emal olunur"
+          feedback: "Doğrudur. Inference zamanı çəkilər dondurulmuş olur; növbəti sorğuda həmin məlumatı yenidən göndərməsən model onu bilmir."
+        - id: c
+          text: "Model yalnız temperature=0 olduqda məlumatı yaddaşına yazır"
+          feedback: "Temperature yalnız token seçimi zamanı təsadüfiliyi idarə edir, çəkiləri yeniləmir."
+      answer: b
+      explanation: "Inference API çağırışları stateless-dir və modelin parametrlərini yeniləmir. Context window yalnız cari sorğu müddətində aktiv olan işçi yaddaşdır."
+    - id: q-llmtok-latency-driver
+      type: mcq
+      title: "LLM gecikməsinin (latency) əsas səbəbi"
+      prompt: "Niyə eyni modeldə 500 tokenlik cavab generasiya etmək 500 tokenlik giriş promptunu oxumaqdan qat-qat çox vaxt aparır?"
+      skills: [llm-tokens-context]
+      category: llm-architecture
+      options:
+        - id: a
+          text: "Giriş tokenləri GPU-da paralel emal olunur (prefill), çıxış tokenləri isə avtoreqressiv olaraq bir-bir ardıcıl generasiya edilir"
+          feedback: "Doğrudur. Hər yeni çıxış tokeni əvvəlki token hazır olduqdan sonra növbəti addımda hesablanır."
+        - id: b
+          text: "Giriş tokenləri sıxılır, çıxış tokenləri isə şifrələnir"
+          feedback: "Xeyr, fərq şifrələmədə deyil, Transformer arxitekturasının paralel prefill vs ardıcıl decode mərhələlərindədir."
+        - id: c
+          text: "API serverləri yalnız çıxış tokenlərini diskə yazır"
+          feedback: "Gecikmənin əsas mənbəyi disk yox, GPU-da ardıcıl avtoreqressiv hesablamadır."
+      answer: a
+      explanation: "Prefill mərhələsində bütün giriş tokenləri matris vurması ilə paralel hesablanır. Decode mərhələsində isə model növbəti tokeni tapmaq üçün əvvəlki tokenin nəticəsini gözləməlidir."
+    - id: q-llmtok-request-cost
+      type: numeric
+      title: "Bir sorğunun token xərci"
+      prompt: |
+        Bir API sorğusunda $N_{\text{in}} = 2000$ giriş tokeni və $N_{\text{out}} = 500$ çıxış tokeni işlənib.
+        Modelin qiyməti:
+        - Giriş: $\$3.00 / 10^6$ token
+        - Çıxış: $\$12.00 / 10^6$ token
+
+        Bu tək sorğunun ümumi xərci neçə ABŞ dollarıdır (USD)?
+      skills: [llm-tokens-context]
+      category: math
+      answer: 0.012
+      tolerance: 0.0005
+      unit: "USD"
+      hints:
+        - "Giriş xərci: (2000 / 1_000_000) * 3.00"
+        - "Çıxış xərci: (500 / 1_000_000) * 12.00"
+      explanation: "Giriş xərci = $0.002 \\times 3 = 0.006$ USD. Çıxış xərci = $0.0005 \\times 12 = 0.006$ USD. Cəmi = $0.006 + 0.006 = 0.012$ USD."
+    - id: q-llmtok-structured-practices
+      type: multi
+      title: "Etibarlı strukturlaşdırılmış çıxış qaydaları"
+      prompt: "Production-da LLM-dən JSON çıxışı alarkən hansı mühəndislik addımları tətbiq edilməlidir? Doğru olanların hamısını seç."
+      skills: [llm-structured-output]
+      category: production
+      options:
+        - id: a
+          text: "Gözlənilən JSON strukturunu, sahə adlarını və icazəli dəyər tiplərini promptda və ya API schema parametrində açıq göstərmək"
+          feedback: "Bəli — aydın çıxış müqaviləsi modelin səhv ehtimalını kəskin azaldır."
+        - id: b
+          text: "Modelin cavabını json.loads və sxem doğrulamasından (tip, aralıq, enum yoxlaması) keçirmək"
+          feedback: "Bəli — modelin qaytardığı mətn həmişə etibarsız xarici input kimi yoxlanmalıdır."
+        - id: c
+          text: "Doğrulama uğursuz olduqda məhdud sayda (məs. max_retries=2) yenidən cəhd və fallback mexanizmi qurmaq"
+          feedback: "Bəli — bounded retry müvəqqəti format səhvlərini xərci partlatmadan düzəldir."
+        - id: d
+          text: "Modelin cavabını birbaşa eval() funksiyası ilə Python obyektinə çevirmək"
+          feedback: "Xeyr — eval() ixtiyari kod icrasına (Remote Code Execution) yol açan ciddi təhlükəsizlik boşluğudur."
+      answers: [a, b, c]
+      explanation: "Etibarlı LLM inteqrasiyası aydın spesifikasiya, `json.loads` + sxem doğrulaması və məhdud retry/fallback üçlüyünə əsaslanır. `eval()` heç vaxt istifadə edilməməlidir."
+exercises:
+  - id: ex-llmtok-validate-ticket
+    type: code
+    title: "validate_ticket_response validatorunu yaz"
+    prompt: |
+      LLM-dən qayıdan xam JSON mətnini (`raw_json_str`) doğrulayan `validate_ticket_response(raw_json_str: str) -> dict` funksiyasını yaz.
+
+      **Müqavilə:**
+      1. `raw_json_str` düzgün JSON obyekti (`dict`) olmalıdır. Parse xətası varsa və ya kök element `dict` deyilsə `ValueError` qaldır.
+      2. Tələb olunan sahələr:
+         - `"category"`: yalnız `"billing"`, `"technical"` və ya `"account"` ola bilər.
+         - `"urgency"`: `1` ilə `5` arasında (hər ikisi daxil) tam ədəd (`int`) olmalıdır. Diqqət: `bool` dəyərlər (`True`/`False`) rədd edilməlidir!
+         - `"summary"`: boş olmayan `str` olmalıdır (kənar boşluqlar `.strip()` ilə təmizləndikdən sonra ən azı 1 simvol qalmalıdır).
+      3. Hər hansı qayda pozularsa `ValueError` qaldır.
+      4. Doğrulama uğurludursa, yalnız bu 3 açardan ibarət təmizlənmiş `dict` qaytar (`"summary"` `.strip()` olunmuş halda).
+    skills: [llm-structured-output]
+    category: python
+    difficulty: 2
+    hints:
+      - "`json.loads(raw_json_str)` çağırışını `try...except Exception` içində yaz və xəta olduqda `raise ValueError(...)` et."
+      - "Python-da `isinstance(True, int)` ifadəsi `True` qaytarır! Ona görə əvvəlcə `if isinstance(urgency, bool) or not isinstance(urgency, int): raise ValueError(...)` yoxla."
+      - "Qaytarılan dict-də əlavə yad açarlar olmamalı və `summary.strip()` qaytarılmalıdır."
+    starter_code: |
+      import json
+
+      ALLOWED_CATEGORIES = {"billing", "technical", "account"}
+
+      def validate_ticket_response(raw_json_str: str) -> dict:
+          # TODO: JSON-u parse et, sahələri doğrula və təmiz dict qaytar
+          pass
+    tests:
+      - name: "Düzgün JSON cavabı qəbul edilir və summary strip olunur"
+        code: |
+          raw = '{"category": "billing", "urgency": 4, "summary": "  Kartdan iki dəfə ödəniş çıxılıb  ", "extra": 123}'
+          res = validate_ticket_response(raw)
+          assert res == {
+              "category": "billing",
+              "urgency": 4,
+              "summary": "Kartdan iki dəfə ödəniş çıxılıb",
+          }, f"Gözlənilməz nəticə: {res}"
+      - name: "Sınıq JSON mətni ValueError qaldırır"
+        code: |
+          try:
+              validate_ticket_response("{broken json")
+              assert False, "ValueError qaldırılmalı idi"
+          except ValueError:
+              pass
+      - name: "İcazəsiz category və ya səhv urgency rədd edilir"
+        code: |
+          for bad in [
+              '{"category": "sales", "urgency": 3, "summary": "ok"}',
+              '{"category": "technical", "urgency": 6, "summary": "ok"}',
+              '{"category": "technical", "urgency": 0, "summary": "ok"}',
+              '{"category": "technical", "urgency": true, "summary": "ok"}',
+              '{"category": "account", "urgency": 2, "summary": "   "}',
+              '[1, 2, 3]',
+          ]:
+              try:
+                  validate_ticket_response(bad)
+                  assert False, f"Bu input rədd edilməli idi: {bad}"
+              except ValueError:
+                  pass
+    solution: |
+      import json
+
+      ALLOWED_CATEGORIES = {"billing", "technical", "account"}
+
+      def validate_ticket_response(raw_json_str: str) -> dict:
+          try:
+              data = json.loads(raw_json_str)
+          except Exception as exc:
+              raise ValueError(f"Invalid JSON: {exc}") from exc
+
+          if not isinstance(data, dict):
+              raise ValueError("Root must be a JSON object")
+
+          category = data.get("category")
+          if category not in ALLOWED_CATEGORIES:
+              raise ValueError(f"Invalid category: {category!r}")
+
+          urgency = data.get("urgency")
+          if isinstance(urgency, bool) or not isinstance(urgency, int) or not (1 <= urgency <= 5):
+              raise ValueError(f"Invalid urgency: {urgency!r}")
+
+          summary = data.get("summary")
+          if not isinstance(summary, str) or not summary.strip():
+              raise ValueError("Invalid summary")
+
+          return {
+              "category": category,
+              "urgency": urgency,
+              "summary": summary.strip(),
+          }
+    explanation: |
+      Validator funksiyası LLM çıxışını etibarsız xarici input kimi emal edir: əvvəlcə sintaktik JSON parse, sonra kök tipin `dict` olması, daha sonra hər bir sahənin tipi və biznes sərhədləri yoxlanılır. Əlavə yad açarlar (`"extra"`) təmizlənərək yalnız müqavilədəki struktur qaytarılır.
+  - id: ex-llmtok-monthly-cost
+    type: numeric
+    title: "Aylıq LLM API büdcəsini hesabla"
+    prompt: |
+      Şirkət daxili sənəd xülasələşdirmə xidməti ayda **10,000 sorğu** emal edir.
+      - Hər sorğuda orta giriş: $N_{\text{in}} = 1\,500$ token
+      - Hər sorğuda orta çıxış: $N_{\text{out}} = 400$ token
+      - Qiymət: giriş $\$2.00 / 10^6$ token, çıxış $\$8.00 / 10^6$ token
+
+      Bu xidmətin aylıq LLM API xərci neçə ABŞ dollarıdır (USD)?
+    skills: [llm-tokens-context]
+    category: math
+    difficulty: 1
+    answer: 62
+    tolerance: 0.1
+    unit: "USD"
+    hints:
+      - "Aylıq ümumi giriş tokeni: 10,000 * 1,500 = 15,000,000 (15 milyon token)."
+      - "Aylıq ümumi çıxış tokeni: 10,000 * 400 = 4,000,000 (4 milyon token)."
+      - "Xərc = 15 * 2.00 + 4 * 8.00"
+    explanation: |
+      Ayda 15M giriş tokeni ($15 \times \$2.00 = \$30.00$) və 4M çıxış tokeni ($4 \times \$8.00 = \$32.00$) sərf olunur. Ümumi aylıq xərc $\$30.00 + \$32.00 = \$62.00$ təşkil edir.
+  - id: ex-llmtok-retry-policy-mcq
+    type: mcq
+    title: "Structured Output: Sxem xətası zamanı düzgün Retry və Validation axını"
+    prompt: |
+      Müştəri rəylərini təsnif edən xidmət LLM-dən JSON sxeminə uyğun cavab tələb edir. İlk cəhddə model `"urgency": "high"` qaytarır, halbuki sxem `1..5` arası tam ədəd (`int`) tələb edir.
+
+      Production sistemində ən düzgün avtomatik mühəndislik davranışı hansıdır?
+    skills: [llm-structured-output]
+    category: llm-architecture
+    difficulty: 2
+    hints:
+      - "Modelə hansı sahədə nə səhv etdiyini (`ValidationError` mesajını) demədən eyni promptu sonsuz dövrdə göndərmək həm xərci partladır, həm də eyni səhvi təkrarladır."
+      - "Retry sayı məhdud (`max_retries=2`) olmalı, uğursuz qaldıqda isə təhlükəsiz fallback/xəta qaytarılmalıdır."
+    options:
+      - id: a
+        text: "ValidationError mesajını növbəti cəhdin kontekstinə əlavə edib maksimum 1–2 dəfə yenidən sorğulamaq (bounded retry); yenə uğursuz olarsa strukturlaşdırılmış xəta qaytarıb loglamaq"
+        feedback: "Doğrudur! Konkret doğrulama xətasını göstərmək modelə öz səhvini düzəltməyə imkan verir, məhdud cəhd sayı isə xərci və gecikməni qoruyur."
+      - id: b
+        text: "`while True:` dövründə düzgün JSON alınana qədər məhdudiyyətsiz retry etmək"
+        feedback: "Sonsuz retry həm istifadəçi sorğusunu asılı vəziyyətdə qoyur, həm də API büdcəsini dəqiqələr içində tükədə bilər."
+      - id: c
+        text: "Doğrulamanı söndürüb `\"high\"` string-ni birbaşa verilənlər bazasının `INTEGER` sütununa yazmağa çalışmaq"
+        feedback: "Bu, xətanı aşağı axındakı verilənlər bazasına ötürüb bütün pipeline-ı çökdürəcək."
+    answer: a
+    explanation: "Structured output validatoru uğursuz olduqda ən effektiv pattern: konkret `ValidationError` mesajı ilə məhdud sayda (`max_retries <= 2`) düzəliş istəmək və hədd aşılarsa deterministik fallback/error qaytarmaqdır."
+references:
+  - title: "OpenAI — Structured Outputs Guide"
+    url: https://platform.openai.com/docs/guides/structured-outputs
+    note: "JSON Schema əsaslı strukturlaşdırılmış çıxışların iş prinsipi"
+  - title: "Anthropic — Prompt Engineering Overview"
+    url: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
+    note: "Aydın sərhədlər və spesifikasiya kimi prompt yazmaq qaydaları"
