@@ -20,3 +20,16 @@ logs/
 .DS_Store
 Thumbs.db
 .vscode/
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-journal
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
